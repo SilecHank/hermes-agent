@@ -783,6 +783,55 @@ class TestBusySessionOnboardingHint:
         assert "/busy queue" not in content
 
     @pytest.mark.asyncio
+    async def test_wecom_queue_mode_sends_chinese_busy_ack(self):
+        """WeCom group follow-ups should get a concise Chinese queued notice."""
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter(platform_val="wecom")
+
+        event = _make_event(text="第二个问题", platform_val="wecom")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 1,
+            "max_iterations": 60,
+            "current_tool": None,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time()
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "正在处理上一条消息" in content
+        assert "已排队" in content
+        assert "Queued for the next turn" not in content
+        agent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wecom_pending_startup_sends_chinese_busy_ack(self):
+        """WeCom messages arriving while the agent is starting should not be silent."""
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+        adapter = _make_adapter(platform_val="wecom")
+
+        event = _make_event(text="启动期追加问题", platform_val="wecom")
+        sk = build_session_key(event.source)
+        runner._running_agents[sk] = sentinel
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_message(event)
+
+        assert result is None
+        assert sk in adapter._pending_messages
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "正在处理上一条消息" in content
+        assert "已排队" in content
+
+    @pytest.mark.asyncio
     async def test_queue_mode_hint_points_to_interrupt(self, tmp_path, monkeypatch):
         """In queue mode the hint should suggest /busy interrupt, not /busy queue."""
         import gateway.run as _gr

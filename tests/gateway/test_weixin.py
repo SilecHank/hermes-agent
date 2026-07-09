@@ -988,6 +988,15 @@ class TestWeixinContentDedup:
         # is_duplicate should only be called for message_id, never for content
         assert all("content:" not in str(call) for call in adapter._dedup.is_duplicate.call_args_list)
 
+    def test_content_dedup_uses_short_ttl_separate_from_message_id_dedup(self):
+        assert weixin.MESSAGE_DEDUP_TTL_SECONDS == 300
+        assert weixin.CONTENT_DEDUP_TTL_SECONDS <= 10
+
+        adapter = _make_adapter()
+
+        assert adapter._dedup._ttl == 300
+        assert adapter._content_dedup._ttl == weixin.CONTENT_DEDUP_TTL_SECONDS
+
 
 class TestWeixinTextDebounce:
     """Text-debounce batching for rapid multi-message bursts (issue #35301).

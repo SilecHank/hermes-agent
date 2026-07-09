@@ -308,6 +308,13 @@ class TestWecomCallbackPollLoop:
             await task
         assert calls == ["test"]
 
+    @pytest.mark.asyncio
+    async def test_callback_adapter_does_not_keep_private_dm_queue_state(self):
+        adapter = WecomCallbackAdapter(_config())
+
+        assert not hasattr(adapter, "_dm_queue")
+        assert not hasattr(adapter, "_dm_processing")
+
 
 class TestWecomCallbackBodySizeLimit:
     """Pre-auth oversized-body rejection (DoS hardening, PR #10192)."""
@@ -345,5 +352,4 @@ class TestWecomCallbackBodySizeLimit:
         small = b"<xml><Encrypt>not-real</Encrypt></xml>"
         response = await adapter._handle_callback(self._request(small))
         assert response.status != 413
-
 

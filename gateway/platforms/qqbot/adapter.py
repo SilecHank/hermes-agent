@@ -278,7 +278,7 @@ class QQAdapter(BasePlatformAdapter):
     # Connection lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self, **kwargs) -> bool:
         """Authenticate, obtain gateway URL, and open the WebSocket."""
         if not AIOHTTP_AVAILABLE:
             message = "QQ startup failed: aiohttp not installed"
@@ -503,7 +503,8 @@ class QQAdapter(BasePlatformAdapter):
                     return
 
                 code = exc.code
-                logger.warning(
+                logger.log(
+                    self._websocket_close_log_level(code, exc.reason),
                     "[%s] WebSocket closed: code=%s reason=%s",
                     self._log_tag,
                     code,
@@ -676,6 +677,14 @@ class QQAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[%s] Reconnect failed: %s", self._log_tag, exc)
             return False
+
+    @staticmethod
+    def _websocket_close_log_level(code: Optional[int], reason: str) -> int:
+        """Classify expected QQ gateway session rotation as info, not warning."""
+        reason_lower = (reason or "").lower()
+        if code == 4009 and ("session timed out" in reason_lower or "timeout" in reason_lower):
+            return logging.INFO
+        return logging.WARNING
 
     async def _read_events(self) -> None:
         """Read WebSocket frames until connection closes."""
@@ -2485,6 +2494,22 @@ class QQAdapter(BasePlatformAdapter):
             except Exception as exc:
                 last_exc = exc
                 err = str(exc).lower()
+                if reply_to and self._is_reply_msg_id_expired_error(str(exc)):
+                    logger.warning(
+                        "[%s] reply msg_id expired; retrying once without reply_to",
+                        self._log_tag,
+                    )
+                    try:
+                        if chat_type == "c2c":
+                            return await self._send_c2c_text(chat_id, content, None)
+                        if chat_type == "group":
+                            return await self._send_group_text(chat_id, content, None)
+                        if chat_type == "guild":
+                            return await self._send_guild_text(chat_id, content, None)
+                    except Exception as fallback_exc:
+                        last_exc = fallback_exc
+                        err = str(fallback_exc).lower()
+
                 # Permanent errors — don't retry
                 if any(
                         k in err
@@ -2509,6 +2534,16 @@ class QQAdapter(BasePlatformAdapter):
             k in error_msg.lower() for k in ("invalid", "forbidden", "not found")
         )
         return SendResult(success=False, error=error_msg, retryable=retryable)
+
+    @staticmethod
+    def _is_reply_msg_id_expired_error(error: str) -> bool:
+        """Return True when QQ rejects a passive reply because msg_id expired."""
+        lowered = (error or "").lower()
+        return "msg_id" in lowered and (
+            "已过期" in error
+            or "expired" in lowered
+            or "expire" in lowered
+        )
 
     async def _send_c2c_text(
             self,

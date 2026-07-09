@@ -1,6 +1,7 @@
 """Tests for the QQ Bot platform adapter."""
 
 import asyncio
+import logging
 import os
 from types import SimpleNamespace
 from unittest import mock
@@ -94,6 +95,27 @@ class TestQQAdapterInit:
     def test_name_property(self):
         adapter = self._make(app_id="a", client_secret="b")
         assert adapter.name == "QQBot"
+
+
+class TestQQGatewayStabilityHelpers:
+    def test_session_timeout_close_is_info_level(self):
+        from gateway.platforms.qqbot import QQAdapter
+
+        assert QQAdapter._websocket_close_log_level(4009, "Session timed out") == logging.INFO
+        assert QQAdapter._websocket_close_log_level(4009, "timeout") == logging.INFO
+
+    def test_unexpected_close_is_warning_level(self):
+        from gateway.platforms.qqbot import QQAdapter
+
+        assert QQAdapter._websocket_close_log_level(4001, "bad auth") == logging.WARNING
+        assert QQAdapter._websocket_close_log_level(4009, "other close") == logging.WARNING
+
+    def test_reply_msg_id_expired_error_detection(self):
+        from gateway.platforms.qqbot import QQAdapter
+
+        assert QQAdapter._is_reply_msg_id_expired_error("msg_id 已过期") is True
+        assert QQAdapter._is_reply_msg_id_expired_error("msg_id expired") is True
+        assert QQAdapter._is_reply_msg_id_expired_error("other expired token") is False
 
 
 # ---------------------------------------------------------------------------
