@@ -80,7 +80,10 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self._app: Optional[web.Application] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self._message_queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
+        self._dm_message_queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
         self._poll_task: Optional[asyncio.Task] = None
+        self._dm_poll_task: Optional[asyncio.Task] = None
+        self._dm_active = False
         self._seen_messages: Dict[str, float] = {}
         self._user_app_map: Dict[str, str] = {}
         self._access_tokens: Dict[str, Dict[str, Any]] = {}
@@ -148,6 +151,7 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             self._site = web.TCPSite(self._runner, self._host, self._port)
             await self._site.start()
             self._poll_task = asyncio.create_task(self._poll_loop())
+            self._dm_poll_task = asyncio.create_task(self._dm_poll_loop())
             self._mark_connected()
             logger.info(
                 "[WecomCallback] HTTP server listening on %s:%s%s",
@@ -176,6 +180,13 @@ class WecomCallbackAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+        if self._dm_poll_task:
+            self._dm_poll_task.cancel()
+            try:
+                await self._dm_poll_task
+            except asyncio.CancelledError:
+                pass
+            self._dm_poll_task = None
         await self._cleanup()
         self._mark_disconnected()
         logger.info("[WecomCallback] Disconnected")
@@ -257,6 +268,35 @@ class WecomCallbackAdapter(BasePlatformAdapter):
     # Inbound: HTTP callback handlers
     # ------------------------------------------------------------------
 
+    async def _send_dm_text(self, chat_id: str, app: Dict[str, Any], text: str) -> None:
+        """Send a lightweight DM text for queue notification, outside the LLM path."""
+        del app
+        try:
+            await self.send(chat_id, text)
+        except Exception:
+            logger.warning("[WecomCallback] Queue notification send failed for %s", chat_id)
+
+    async def _enqueue_event(self, event: MessageEvent, app: Dict[str, Any]) -> None:
+        """Route callback events.
+
+        DM callbacks use a dedicated serial worker because multiple WeCom
+        members can privately message the same bot at once.  Group events keep
+        the regular platform queue so group traffic is not blocked by private
+        support conversations.
+        """
+        source = event.source
+        if source and source.chat_type == "dm":
+            position = self._dm_message_queue.qsize() + (1 if self._dm_active else 0)
+            await self._dm_message_queue.put(event)
+            if position > 0:
+                await self._send_dm_text(
+                    source.chat_id,
+                    app,
+                    f"你的请求已收到，当前排队第{position}位，请稍候。",
+                )
+            return
+        await self._message_queue.put(event)
+
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "platform": "wecom_callback"})
 
@@ -315,7 +355,7 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                             str(app.get("corp_id") or ""), event.source.user_id,
                         )
                         self._user_app_map[map_key] = app["name"]
-                    await self._message_queue.put(event)
+                    await self._enqueue_event(event, app)
                 # Immediately acknowledge — the agent's reply will arrive
                 # later via the proactive message/send API.
                 return web.Response(text="success", content_type="text/plain")
@@ -336,6 +376,18 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                 task.add_done_callback(self._background_tasks.discard)
             except Exception:
                 logger.exception("[WecomCallback] Failed to enqueue event")
+
+    async def _dm_poll_loop(self) -> None:
+        """Drain DM callbacks one at a time so private support requests queue."""
+        while True:
+            event = await self._dm_message_queue.get()
+            self._dm_active = True
+            try:
+                await self.handle_message(event)
+            except Exception:
+                logger.exception("[WecomCallback] Failed to process DM event")
+            finally:
+                self._dm_active = False
 
     # ------------------------------------------------------------------
     # XML / crypto helpers

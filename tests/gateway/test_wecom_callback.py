@@ -309,7 +309,94 @@ class TestWecomCallbackPollLoop:
         assert calls == ["test"]
 
     @pytest.mark.asyncio
-    async def test_callback_adapter_does_not_keep_private_dm_queue_state(self):
+    async def test_dm_poll_loop_dispatches_messages_serially(self, monkeypatch):
+        adapter = WecomCallbackAdapter(_config())
+        calls = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def fake_handle_message(event):
+            calls.append(f"start:{event.text}")
+            if event.text == "first":
+                first_started.set()
+                await release_first.wait()
+            calls.append(f"end:{event.text}")
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        first = adapter._build_event(
+            _app(),
+            """
+            <xml>
+              <ToUserName>ww1234567890</ToUserName>
+              <FromUserName>alice</FromUserName>
+              <CreateTime>1710000000</CreateTime>
+              <MsgType>text</MsgType>
+              <Content>first</Content>
+              <MsgId>dm1</MsgId>
+            </xml>
+            """,
+        )
+        second = adapter._build_event(
+            _app(),
+            """
+            <xml>
+              <ToUserName>ww1234567890</ToUserName>
+              <FromUserName>bob</FromUserName>
+              <CreateTime>1710000001</CreateTime>
+              <MsgType>text</MsgType>
+              <Content>second</Content>
+              <MsgId>dm2</MsgId>
+            </xml>
+            """,
+        )
+
+        task = asyncio.create_task(adapter._dm_poll_loop())
+        await adapter._dm_message_queue.put(first)
+        await adapter._dm_message_queue.put(second)
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+
+        assert calls == ["start:first"]
+
+        release_first.set()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert calls == ["start:first", "end:first", "start:second", "end:second"]
+
+    @pytest.mark.asyncio
+    async def test_enqueue_dm_sends_queue_notice_when_worker_busy(self, monkeypatch):
+        adapter = WecomCallbackAdapter(_config())
+        notices = []
+
+        async def fake_send_dm_text(chat_id, app, text):
+            notices.append((chat_id, text))
+
+        monkeypatch.setattr(adapter, "_send_dm_text", fake_send_dm_text)
+        event = adapter._build_event(
+            _app(),
+            """
+            <xml>
+              <ToUserName>ww1234567890</ToUserName>
+              <FromUserName>alice</FromUserName>
+              <CreateTime>1710000000</CreateTime>
+              <MsgType>text</MsgType>
+              <Content>queued</Content>
+              <MsgId>dm3</MsgId>
+            </xml>
+            """,
+        )
+        adapter._dm_active = True
+
+        await adapter._enqueue_event(event, _app())
+
+        assert adapter._dm_message_queue.qsize() == 1
+        assert notices
+        assert "排队" in notices[0][1]
+        assert "第1位" in notices[0][1]
+
+    def test_callback_adapter_does_not_keep_unconsumed_private_dm_list(self):
         adapter = WecomCallbackAdapter(_config())
 
         assert not hasattr(adapter, "_dm_queue")
@@ -352,4 +439,3 @@ class TestWecomCallbackBodySizeLimit:
         small = b"<xml><Encrypt>not-real</Encrypt></xml>"
         response = await adapter._handle_callback(self._request(small))
         assert response.status != 413
-
