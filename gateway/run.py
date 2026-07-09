@@ -5392,7 +5392,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         running_agent = self._running_agents.get(session_key)
 
+        platform_value = getattr(event.source.platform, "value", event.source.platform)
+        is_wecom = str(platform_value or "").lower() == "wecom"
+
         effective_mode = self._busy_input_mode
+        if is_wecom and event.message_type == MessageType.TEXT:
+            effective_mode = "queue"
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
             event.message_type == MessageType.TEXT
@@ -5559,7 +5564,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
-        if is_steer_mode:
+        if is_wecom:
+            message = "正在处理上一条消息，你的问题已排队。请等当前回复完成后再继续补充。"
+        elif is_steer_mode:
             message = (
                 f"⏩ Steered into current run{status_detail}. "
                 f"Your message arrives after the next tool call."
@@ -5600,7 +5607,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 mark_seen,
             )
             _user_cfg = _load_gateway_config()
-            if not is_seen(_user_cfg, BUSY_INPUT_FLAG):
+            if not is_wecom and not is_seen(_user_cfg, BUSY_INPUT_FLAG):
                 if is_steer_mode:
                     _hint_mode = "steer"
                 elif is_queue_mode:
@@ -8986,6 +8993,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        if not is_internal:
+            try:
+                from gateway.review_approval_commands import (
+                    is_review_approval_command as _is_review_approval_command,
+                    review_approval_config as _review_approval_config,
+                    run_review_approval_command as _run_review_approval_command,
+                )
+
+                _review_cfg = _review_approval_config()
+                if _is_review_approval_command(event, _review_cfg):
+                    return await _run_review_approval_command(event, _review_cfg)
+            except Exception as _review_exc:
+                logger.warning("Review approval command handling failed: %s", _review_exc, exc_info=True)
+                return f"审批命令处理失败：{_review_exc}"
+
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -9503,16 +9525,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._release_running_agent_state(_quick_key)
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
-                # Queue the message so it will be picked up after the
-                # agent starts.
-                adapter = self._adapter_for_source(source)
-                if adapter:
-                    merge_pending_message_event(
-                        adapter._pending_messages,
-                        _quick_key,
-                        event,
-                        merge_text=True,
-                    )
+                await self._handle_active_session_busy_message(event, _quick_key)
                 return None
             if self._draining:
                 if self._queue_during_drain_enabled():
