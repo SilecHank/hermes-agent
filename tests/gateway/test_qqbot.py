@@ -118,6 +118,164 @@ class TestQQGatewayStabilityHelpers:
         assert QQAdapter._is_reply_msg_id_expired_error("other expired token") is False
 
 
+class TestQQDmQueue:
+    def _make_event(self, text, chat_id):
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        return MessageEvent(
+            source=adapter.build_source(
+                chat_id=chat_id,
+                user_id=chat_id,
+                chat_type="dm",
+            ),
+            text=text,
+            message_type=MessageType.TEXT,
+            message_id=f"msg-{chat_id}-{text}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_dm_poll_loop_dispatches_messages_serially(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        calls = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def fake_handle_message(event):
+            calls.append(f"start:{event.text}")
+            if event.text == "first":
+                first_started.set()
+                await release_first.wait()
+            calls.append(f"end:{event.text}")
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+
+        task = asyncio.create_task(adapter._dm_poll_loop())
+        await adapter._dm_message_queue.put(self._make_event("first", "u1"))
+        await adapter._dm_message_queue.put(self._make_event("second", "u2"))
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+
+        assert calls == ["start:first"]
+
+        release_first.set()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert calls == ["start:first", "end:first", "start:second", "end:second"]
+
+    @pytest.mark.asyncio
+    async def test_enqueue_dm_sends_queue_notice_when_worker_busy(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        notices = []
+
+        async def fake_send(chat_id, content, **kwargs):
+            notices.append((chat_id, content))
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True, message_id="notice")
+
+        monkeypatch.setattr(adapter, "send", fake_send)
+        adapter._dm_active = True
+
+        await adapter._enqueue_dm_event(self._make_event("queued", "u1"))
+
+        assert adapter._dm_message_queue.qsize() == 1
+        assert notices
+        assert notices[0][0] == "u1"
+        assert "排队" in notices[0][1]
+        assert "第1位" in notices[0][1]
+
+    def test_adapter_does_not_keep_unconsumed_private_dm_list(self):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+
+        assert not hasattr(adapter, "_dm_queue")
+        assert not hasattr(adapter, "_dm_processing")
+
+    @pytest.mark.asyncio
+    async def test_group_messages_do_not_use_dm_queue(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        handled = []
+
+        async def fake_process_attachments(_attachments):
+            return {
+                "image_urls": [],
+                "image_media_types": [],
+                "voice_transcripts": [],
+                "attachment_info": "",
+            }
+
+        async def fake_process_quoted_context(_payload):
+            return {"quote_block": "", "image_urls": [], "image_media_types": []}
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        async def fail_enqueue(_event):
+            raise AssertionError("group messages must not enter the DM queue")
+
+        monkeypatch.setattr(adapter, "_process_attachments", fake_process_attachments)
+        monkeypatch.setattr(adapter, "_process_quoted_context", fake_process_quoted_context)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        monkeypatch.setattr(adapter, "_enqueue_dm_event", fail_enqueue)
+
+        await adapter._handle_group_message(
+            {"group_openid": "g1"},
+            "m1",
+            "@bot hello",
+            {"member_openid": "u1"},
+            "2026-07-09T12:00:00+08:00",
+        )
+
+        assert len(handled) == 1
+        assert handled[0].source.chat_type == "group"
+
+    @pytest.mark.asyncio
+    async def test_guild_dm_messages_use_dm_queue(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        queued = []
+
+        async def fake_process_attachments(_attachments):
+            return {
+                "image_urls": [],
+                "image_media_types": [],
+                "voice_transcripts": [],
+                "attachment_info": "",
+            }
+
+        async def fake_process_quoted_context(_payload):
+            return {"quote_block": "", "image_urls": [], "image_media_types": []}
+
+        async def fake_enqueue(event):
+            queued.append(event)
+
+        monkeypatch.setattr(adapter, "_process_attachments", fake_process_attachments)
+        monkeypatch.setattr(adapter, "_process_quoted_context", fake_process_quoted_context)
+        monkeypatch.setattr(adapter, "_enqueue_dm_event", fake_enqueue)
+
+        await adapter._handle_dm_message(
+            {"guild_id": "guild-dm"},
+            "m2",
+            "hello",
+            {"id": "u2"},
+            "2026-07-09T12:00:00+08:00",
+        )
+
+        assert len(queued) == 1
+        assert queued[0].source.chat_type == "dm"
+
+
 # ---------------------------------------------------------------------------
 # _coerce_list
 # ---------------------------------------------------------------------------

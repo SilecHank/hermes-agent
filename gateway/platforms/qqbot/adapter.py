@@ -223,6 +223,9 @@ class QQAdapter(BasePlatformAdapter):
         self._http_client: Optional[httpx.AsyncClient] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._dm_poll_task: Optional[asyncio.Task] = None
+        self._dm_message_queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
+        self._dm_active = False
         self._heartbeat_interval: float = 30.0  # seconds, updated by Hello
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
@@ -324,6 +327,7 @@ class QQAdapter(BasePlatformAdapter):
             # 4. Start listeners
             self._listen_task = asyncio.create_task(self._listen_loop())
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            self._dm_poll_task = asyncio.create_task(self._dm_poll_loop())
             self._mark_connected()
             logger.info("[%s] Connected", self._log_tag)
             return True
@@ -355,6 +359,14 @@ class QQAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._heartbeat_task = None
+
+        if self._dm_poll_task:
+            self._dm_poll_task.cancel()
+            try:
+                await self._dm_poll_task
+            except asyncio.CancelledError:
+                pass
+            self._dm_poll_task = None
 
         await self._cleanup()
         self._release_platform_lock()
@@ -930,6 +942,29 @@ class QQAdapter(BasePlatformAdapter):
             self._last_msg_id[event.source.chat_id] = event.message_id
         await super().handle_message(event)
 
+    async def _enqueue_dm_event(self, event: MessageEvent) -> None:
+        """Queue private QQ messages so multiple users do not run agents concurrently."""
+        source = event.source
+        position = self._dm_message_queue.qsize() + (1 if self._dm_active else 0)
+        await self._dm_message_queue.put(event)
+        if position > 0 and source and source.chat_id:
+            await self.send(
+                source.chat_id,
+                f"你的请求已收到，当前排队第{position}位，请稍候。",
+            )
+
+    async def _dm_poll_loop(self) -> None:
+        """Drain private QQ messages one at a time."""
+        while True:
+            event = await self._dm_message_queue.get()
+            self._dm_active = True
+            try:
+                await self.handle_message(event)
+            except Exception:
+                logger.exception("[%s] Failed to process queued DM event", self._log_tag)
+            finally:
+                self._dm_active = False
+
     async def _on_message(self, event_type: str, d: Any) -> None:
         """Process an inbound QQ Bot message event."""
         if not isinstance(d, dict):
@@ -1304,7 +1339,7 @@ class QQAdapter(BasePlatformAdapter):
             media_types=image_media_types,
             timestamp=self._parse_qq_timestamp(timestamp),
         )
-        await self.handle_message(event)
+        await self._enqueue_dm_event(event)
 
     async def _handle_group_message(
             self,
@@ -1444,7 +1479,7 @@ class QQAdapter(BasePlatformAdapter):
             media_types=image_media_types,
             timestamp=self._parse_qq_timestamp(timestamp),
         )
-        await self.handle_message(event)
+        await self._enqueue_dm_event(event)
 
     async def _handle_dm_message(
             self,
@@ -1514,7 +1549,7 @@ class QQAdapter(BasePlatformAdapter):
             media_types=image_media_types,
             timestamp=self._parse_qq_timestamp(timestamp),
         )
-        await self.handle_message(event)
+        await self._enqueue_dm_event(event)
 
     # ------------------------------------------------------------------
     # Quoted-message handling
