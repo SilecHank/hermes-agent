@@ -1447,6 +1447,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
     except Exception:
         pass
+    if "wrap_response" in job:
+        wrap_response = bool(job.get("wrap_response"))
 
     if wrap_response:
         task_name = job.get("name", job["id"])
