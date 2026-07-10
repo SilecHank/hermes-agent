@@ -3281,8 +3281,11 @@ class QQAdapter(BasePlatformAdapter):
 
     def _is_duplicate(self, msg_id: str) -> bool:
         now = time.time()
+        cutoff = now - DEDUP_WINDOW_SECONDS
+        self._seen_messages = {
+            key: ts for key, ts in self._seen_messages.items() if ts > cutoff
+        }
         if len(self._seen_messages) > DEDUP_MAX_SIZE:
-            cutoff = now - DEDUP_WINDOW_SECONDS
             self._seen_messages = {
                 key: ts for key, ts in self._seen_messages.items() if ts > cutoff
             }

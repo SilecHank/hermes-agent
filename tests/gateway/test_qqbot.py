@@ -118,6 +118,36 @@ class TestQQGatewayStabilityHelpers:
         assert QQAdapter._is_reply_msg_id_expired_error("other expired token") is False
 
 
+class TestQQDedupWindow:
+    def test_duplicate_message_id_expires_after_short_window(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+        import gateway.platforms.qqbot.adapter as adapter_mod
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        now = [1000.0]
+        monkeypatch.setattr(adapter_mod.time, "time", lambda: now[0])
+
+        assert adapter._is_duplicate("m1") is False
+        assert adapter._is_duplicate("m1") is True
+
+        now[0] += 31
+
+        assert adapter._is_duplicate("m1") is False
+
+    def test_duplicate_message_id_still_blocks_within_window(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+        import gateway.platforms.qqbot.adapter as adapter_mod
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        now = [1000.0]
+        monkeypatch.setattr(adapter_mod.time, "time", lambda: now[0])
+
+        assert adapter._is_duplicate("m2") is False
+        now[0] += 29
+
+        assert adapter._is_duplicate("m2") is True
+
+
 class TestQQDmQueue:
     def _make_event(self, text, chat_id):
         from gateway.platforms.base import MessageEvent, MessageType
