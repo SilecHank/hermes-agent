@@ -107,6 +107,25 @@ def _gateway_surface_passes_raw_text(platform: Any) -> bool:
     return _gateway_platform_value(platform) in _GATEWAY_RAW_TEXT_PLATFORMS
 
 
+def _should_send_auto_reset_notice(
+    *,
+    reset_reason: str,
+    policy: Any,
+    had_activity: bool,
+    platform_name: str,
+) -> bool:
+    """Whether an auto-reset should be announced to the chat surface."""
+    if reset_reason == "group_prompt_tokens":
+        return False
+    if reset_reason == "suspended":
+        return True
+    return (
+        policy.notify
+        and had_activity
+        and platform_name not in policy.notify_exclude_platforms
+    )
+
+
 _GATEWAY_PROVIDER_ERROR_RE = re.compile(
     r"("  # infrastructure/provider error preambles, not ordinary assistant prose
     r"api\s+(?:call\s+)?failed"
@@ -10909,12 +10928,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 platform_name = source.platform.value if source.platform else ""
                 had_activity = getattr(session_entry, 'reset_had_activity', False)
-                # Suspended sessions always notify (they were explicitly stopped
-                # or crashed mid-operation) — skip the policy check.
-                should_notify = reset_reason == "suspended" or (
-                    policy.notify
-                    and had_activity
-                    and platform_name not in policy.notify_exclude_platforms
+                should_notify = _should_send_auto_reset_notice(
+                    reset_reason=reset_reason,
+                    policy=policy,
+                    had_activity=had_activity,
+                    platform_name=platform_name,
                 )
                 if should_notify:
                     adapter = self._adapter_for_source(source)

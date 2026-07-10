@@ -15,6 +15,7 @@ from gateway.config import (
     Platform,
     SessionResetPolicy,
 )
+from gateway.run import _should_send_auto_reset_notice
 from gateway.session import SessionEntry, SessionSource, SessionStore
 
 
@@ -203,6 +204,38 @@ class TestResetPolicyNotify:
         assert restored.notify == original.notify
         assert restored.notify_exclude_platforms == original.notify_exclude_platforms
         assert restored.mode == original.mode
+
+
+class TestAutoResetNoticeDecision:
+    def test_group_prompt_token_reset_is_silent(self):
+        policy = SessionResetPolicy(notify=True)
+
+        assert _should_send_auto_reset_notice(
+            reset_reason="group_prompt_tokens",
+            policy=policy,
+            had_activity=True,
+            platform_name="qqbot",
+        ) is False
+
+    def test_idle_reset_still_follows_policy(self):
+        policy = SessionResetPolicy(notify=True)
+
+        assert _should_send_auto_reset_notice(
+            reset_reason="idle",
+            policy=policy,
+            had_activity=True,
+            platform_name="qqbot",
+        ) is True
+
+    def test_suspended_reset_still_notifies(self):
+        policy = SessionResetPolicy(notify=False)
+
+        assert _should_send_auto_reset_notice(
+            reset_reason="suspended",
+            policy=policy,
+            had_activity=False,
+            platform_name="qqbot",
+        ) is True
 
 
 # ---------------------------------------------------------------------------
