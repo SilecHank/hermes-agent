@@ -1,6 +1,7 @@
 """Tests for gateway session management."""
 import json
 import pytest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
@@ -1371,6 +1372,94 @@ class TestHasAnySessions:
 
         store._entries = {"key1": MagicMock()}
         assert store.has_any_sessions() is False
+
+
+class TestTeamChatPromptTokenReset:
+    @pytest.fixture()
+    def store(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            s = SessionStore(sessions_dir=tmp_path, config=config)
+        s._db = None
+        s._loaded = True
+        return s
+
+    def test_qqbot_group_with_large_prompt_tokens_starts_fresh_session(self, store):
+        source = SessionSource(
+            platform=Platform.QQBOT,
+            chat_id="group-1",
+            chat_type="group",
+            user_id="alice",
+        )
+        first = store.get_or_create_session(source)
+        store.update_session(first.session_key, last_prompt_tokens=234_000)
+
+        second = store.get_or_create_session(source)
+
+        assert second.session_id != first.session_id
+        assert second.was_auto_reset is True
+        assert second.auto_reset_reason == "group_prompt_tokens"
+
+    def test_wecom_group_with_large_prompt_tokens_starts_fresh_session(self, store):
+        source = SessionSource(
+            platform=Platform.WECOM,
+            chat_id="group-1",
+            chat_type="group",
+            user_id="alice",
+        )
+        first = store.get_or_create_session(source)
+        store.update_session(first.session_key, last_prompt_tokens=80_000)
+
+        second = store.get_or_create_session(source)
+
+        assert second.session_id != first.session_id
+        assert second.was_auto_reset is True
+        assert second.auto_reset_reason == "group_prompt_tokens"
+
+    def test_weixin_dm_is_not_reset_by_team_group_prompt_token_guard(self, store):
+        source = SessionSource(
+            platform=Platform.WEIXIN,
+            chat_id="user-1",
+            chat_type="dm",
+            user_id="user-1",
+        )
+        first = store.get_or_create_session(source)
+        store.update_session(first.session_key, last_prompt_tokens=234_000)
+
+        second = store.get_or_create_session(source)
+
+        assert second.session_id == first.session_id
+
+    def test_removed_qqbot_group_mapping_does_not_recover_old_db_session(self, store):
+        class FakeDB:
+            reopened = []
+
+            def find_latest_gateway_session_for_peer(self, **kwargs):
+                return {
+                    "id": "old-qqbot-session",
+                    "started_at": 1700000000,
+                    "session_key": "agent:main:qqbot:group:group-1:alice",
+                }
+
+            def reopen_session(self, session_id):
+                self.reopened.append(session_id)
+
+        source = SessionSource(
+            platform=Platform.QQBOT,
+            chat_id="group-1",
+            chat_type="group",
+            user_id="alice",
+        )
+        store._db = FakeDB()
+
+        recovered = store._recover_session_from_db(
+            session_key="agent:main:qqbot:group:group-1:alice",
+            source=source,
+            now=datetime.fromtimestamp(1700000001),
+        )
+
+        assert recovered is None
+        assert store._db.reopened == []
 
 
 class TestLastPromptTokens:

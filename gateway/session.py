@@ -89,6 +89,12 @@ from .config import (
     SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
     HomeChannel,
 )
+
+TEAM_GROUP_PROMPT_TOKEN_RESET_PLATFORMS = frozenset({
+    Platform.QQBOT,
+    Platform.WECOM,
+})
+TEAM_GROUP_PROMPT_TOKEN_RESET_THRESHOLD = 60_000
 from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
@@ -1355,6 +1361,17 @@ class SessionStore:
         """Rebuild a missing session-key mapping from durable state.db data."""
         if not self._db:
             return None
+        if (
+            source.chat_type == "group"
+            and source.platform in TEAM_GROUP_PROMPT_TOKEN_RESET_PLATFORMS
+        ):
+            logger.info(
+                "Gateway session DB recovery skipped for %s group routing key %s; "
+                "missing routing entry is treated as an intentional fresh boundary",
+                source.platform.value,
+                session_key,
+            )
+            return None
         finder = getattr(self._db, "find_latest_gateway_session_for_peer", None)
         if not callable(finder):
             return None
@@ -1589,6 +1606,21 @@ class SessionStore:
                     session_key,
                 )
                 return None
+
+        if (
+            source.chat_type == "group"
+            and source.platform in TEAM_GROUP_PROMPT_TOKEN_RESET_PLATFORMS
+            and entry.last_prompt_tokens >= TEAM_GROUP_PROMPT_TOKEN_RESET_THRESHOLD
+        ):
+            logger.info(
+                "Session reset triggered for %s group session %s: "
+                "last_prompt_tokens=%s >= %s",
+                source.platform.value,
+                entry.session_key,
+                entry.last_prompt_tokens,
+                TEAM_GROUP_PROMPT_TOKEN_RESET_THRESHOLD,
+            )
+            return "group_prompt_tokens"
 
         policy = self.config.get_reset_policy(
             platform=source.platform,

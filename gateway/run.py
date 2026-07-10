@@ -10892,6 +10892,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 context_note = "[System note: The user's previous session was stopped and suspended. This is a fresh conversation with no prior context.]"
             elif reset_reason == "daily":
                 context_note = "[System note: The user's session was automatically reset by the daily schedule. This is a fresh conversation with no prior context.]"
+            elif reset_reason == "group_prompt_tokens":
+                context_note = "[System note: The previous team-chat session exceeded the gateway prompt-token threshold. This is a fresh conversation with no prior context.]"
             else:
                 context_note = "[System note: The user's previous session expired due to inactivity. This is a fresh conversation with no prior context.]"
             context_prompt = context_note + "\n\n" + context_prompt
@@ -10921,6 +10923,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             reason_text = "previous session was stopped or interrupted"
                         elif reset_reason == "daily":
                             reason_text = f"daily schedule at {policy.at_hour}:00"
+                        elif reset_reason == "group_prompt_tokens":
+                            reason_text = "team chat context exceeded the prompt-token threshold"
                         else:
                             hours = policy.idle_minutes // 60
                             mins = policy.idle_minutes % 60
@@ -15651,6 +15655,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ("agent", "disabled_toolsets"),
         ("memory", "provider"),
     )
+    _CACHE_BUSTING_TOP_LEVEL_CONFIG_KEYS: tuple[str, ...] = (
+        "platform_hints",
+    )
 
     _HONCHO_CACHE_BUSTING_KEYS = (
         "honcho.peer_name",
@@ -15717,6 +15724,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 out[f"{section}.{key}"] = section_val.get(key)
             else:
                 out[f"{section}.{key}"] = None
+        for key in cls._CACHE_BUSTING_TOP_LEVEL_CONFIG_KEYS:
+            out[key] = cfg.get(key)
         try:
             from tools.registry import registry
 

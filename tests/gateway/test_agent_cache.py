@@ -282,6 +282,18 @@ class TestExtractCacheBustingConfig:
 
         assert out["tools.registry_generation"] == 12345
 
+    def test_platform_hints_bust_cached_agent(self):
+        from gateway.run import GatewayRunner
+
+        before = GatewayRunner._extract_cache_busting_config(
+            {"platform_hints": {"qqbot": {"append": "old style"}}}
+        )
+        after = GatewayRunner._extract_cache_busting_config(
+            {"platform_hints": {"qqbot": {"append": "new style"}}}
+        )
+
+        assert before["platform_hints"] != after["platform_hints"]
+
 
     def test_skips_honcho_config_read_when_provider_is_not_honcho(self, monkeypatch):
         """Non-Honcho gateways must not read/parse honcho.json on every message."""
