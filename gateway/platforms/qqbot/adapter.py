@@ -856,6 +856,7 @@ class QQAdapter(BasePlatformAdapter):
 
         # op 0 = Dispatch
         if op == 0 and t:
+            logger.info("[%s] Dispatch event: %s", self._log_tag, t)
             if t == "READY":
                 self._handle_ready(d)
             elif t == "RESUMED":
