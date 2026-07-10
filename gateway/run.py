@@ -5547,7 +5547,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _load_gateway_config(),
                 _platform_config_key(event.source.platform),
                 "busy_ack_detail",
-                True,
+                False,
             )
         )
 

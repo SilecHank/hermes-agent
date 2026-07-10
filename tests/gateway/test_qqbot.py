@@ -123,7 +123,7 @@ class TestQQDmQueue:
         from gateway.platforms.base import MessageEvent, MessageType
         from gateway.platforms.qqbot import QQAdapter
 
-        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b", group_policy="open"))
         return MessageEvent(
             source=adapter.build_source(
                 chat_id=chat_id,
@@ -139,7 +139,7 @@ class TestQQDmQueue:
     async def test_dm_poll_loop_dispatches_messages_serially(self, monkeypatch):
         from gateway.platforms.qqbot import QQAdapter
 
-        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b", group_policy="open"))
         calls = []
         first_started = asyncio.Event()
         release_first = asyncio.Event()
@@ -203,7 +203,7 @@ class TestQQDmQueue:
     async def test_group_messages_do_not_use_dm_queue(self, monkeypatch):
         from gateway.platforms.qqbot import QQAdapter
 
-        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b", group_policy="open"))
         handled = []
 
         async def fake_process_attachments(_attachments):
@@ -233,6 +233,46 @@ class TestQQDmQueue:
             "m1",
             "@bot hello",
             {"member_openid": "u1"},
+            "2026-07-09T12:00:00+08:00",
+        )
+
+        assert len(handled) == 1
+        assert handled[0].source.chat_type == "group"
+
+    @pytest.mark.asyncio
+    async def test_guild_group_messages_do_not_use_dm_queue(self, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b", group_policy="open"))
+        handled = []
+
+        async def fake_process_attachments(_attachments):
+            return {
+                "image_urls": [],
+                "image_media_types": [],
+                "voice_transcripts": [],
+                "attachment_info": "",
+            }
+
+        async def fake_process_quoted_context(_payload):
+            return {"quote_block": "", "image_urls": [], "image_media_types": []}
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        async def fail_enqueue(_event):
+            raise AssertionError("guild group messages must not enter the DM queue")
+
+        monkeypatch.setattr(adapter, "_process_attachments", fake_process_attachments)
+        monkeypatch.setattr(adapter, "_process_quoted_context", fake_process_quoted_context)
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        monkeypatch.setattr(adapter, "_enqueue_dm_event", fail_enqueue)
+
+        await adapter._handle_guild_message(
+            {"guild_id": "guild-1", "channel_id": "channel-1"},
+            "m-guild",
+            "hello",
+            {"id": "u1", "username": "user"},
             "2026-07-09T12:00:00+08:00",
         )
 

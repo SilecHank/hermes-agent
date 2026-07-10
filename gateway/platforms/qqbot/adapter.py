@@ -1479,7 +1479,7 @@ class QQAdapter(BasePlatformAdapter):
             media_types=image_media_types,
             timestamp=self._parse_qq_timestamp(timestamp),
         )
-        await self._enqueue_dm_event(event)
+        await self.handle_message(event)
 
     async def _handle_dm_message(
             self,
