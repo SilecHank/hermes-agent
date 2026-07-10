@@ -60,7 +60,7 @@ DEFAULT_PATH = "/wecom/callback"
 # unauthenticated POST can force before signature verification.
 _MAX_BODY = 65_536
 ACCESS_TOKEN_TTL_SECONDS = 7200
-MESSAGE_DEDUP_TTL_SECONDS = 300
+MESSAGE_DEDUP_TTL_SECONDS = 30
 
 
 def check_wecom_callback_requirements() -> bool:
@@ -337,18 +337,9 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                 if event is not None:
                     # Deduplicate: WeCom retries callbacks on timeout,
                     # producing duplicate inbound messages (#10305).
-                    if event.message_id:
-                        now = time.time()
-                        if event.message_id in self._seen_messages:
-                            if now - self._seen_messages[event.message_id] < MESSAGE_DEDUP_TTL_SECONDS:
-                                logger.debug("[WecomCallback] Duplicate MsgId %s, skipping", event.message_id)
-                                return web.Response(text="success", content_type="text/plain")
-                            del self._seen_messages[event.message_id]
-                        self._seen_messages[event.message_id] = now
-                        # Prune expired entries when cache grows large
-                        if len(self._seen_messages) > 2000:
-                            cutoff = now - MESSAGE_DEDUP_TTL_SECONDS
-                            self._seen_messages = {k: v for k, v in self._seen_messages.items() if v > cutoff}
+                    if self._is_duplicate_message(event.message_id):
+                        logger.debug("[WecomCallback] Duplicate MsgId %s, skipping", event.message_id)
+                        return web.Response(text="success", content_type="text/plain")
                     # Record which app this user belongs to.
                     if event.source and event.source.user_id:
                         map_key = self._user_app_key(
@@ -365,6 +356,23 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                 logger.exception("[WecomCallback] Error handling message")
                 break
         return web.Response(status=400, text="invalid callback payload")
+
+    def _is_duplicate_message(self, message_id: Optional[str]) -> bool:
+        if not message_id:
+            return False
+        now = time.time()
+        cutoff = now - MESSAGE_DEDUP_TTL_SECONDS
+        self._seen_messages = {k: v for k, v in self._seen_messages.items() if v > cutoff}
+        if message_id in self._seen_messages:
+            return True
+        self._seen_messages[message_id] = now
+        if len(self._seen_messages) > 2000:
+            newest = sorted(
+                self._seen_messages.items(),
+                key=lambda item: item[1],
+            )[-2000:]
+            self._seen_messages = dict(newest)
+        return False
 
     async def _poll_loop(self) -> None:
         """Drain the message queue and dispatch to the gateway runner."""

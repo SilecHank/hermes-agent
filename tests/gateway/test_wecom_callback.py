@@ -153,6 +153,35 @@ class TestWecomCallbackRouting:
         assert calls["json"]["agentid"] == 1001
 
 
+class TestWecomCallbackDedupWindow:
+    def test_duplicate_message_id_expires_after_short_window(self, monkeypatch):
+        from plugins.platforms.wecom import callback_adapter
+
+        adapter = WecomCallbackAdapter(_config())
+        now = [1000.0]
+        monkeypatch.setattr(callback_adapter.time, "time", lambda: now[0])
+
+        assert adapter._is_duplicate_message("msg-1") is False
+        assert adapter._is_duplicate_message("msg-1") is True
+
+        now[0] += 31.0
+
+        assert adapter._is_duplicate_message("msg-1") is False
+
+    def test_duplicate_message_id_still_blocks_within_window(self, monkeypatch):
+        from plugins.platforms.wecom import callback_adapter
+
+        adapter = WecomCallbackAdapter(_config())
+        now = [1000.0]
+        monkeypatch.setattr(callback_adapter.time, "time", lambda: now[0])
+
+        assert adapter._is_duplicate_message("msg-2") is False
+
+        now[0] += 29.0
+
+        assert adapter._is_duplicate_message("msg-2") is True
+
+
 class TestWecomCallbackSendTokenRefresh:
     @pytest.mark.asyncio
     async def test_send_retries_with_fresh_token_on_errcode_40001(self):
