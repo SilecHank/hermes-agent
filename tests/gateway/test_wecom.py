@@ -74,6 +74,13 @@ class TestWeComAdapterInit:
         assert adapter._secret == "env-secret"
         assert adapter._ws_url == "wss://env.example/ws"
 
+    def test_uses_short_duplicate_message_window(self):
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+
+        assert adapter._dedup._ttl == 30
+
 
 class TestWeComConnect:
     @pytest.mark.asyncio

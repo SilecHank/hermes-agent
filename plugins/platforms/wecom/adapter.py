@@ -95,6 +95,7 @@ HEARTBEAT_INTERVAL_SECONDS = 30.0
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 
 DEDUP_MAX_SIZE = 1000
+DEDUP_TTL_SECONDS = 30
 
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
 VIDEO_MAX_BYTES = 10 * 1024 * 1024
@@ -182,7 +183,10 @@ class WeComAdapter(BasePlatformAdapter):
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._pending_responses: Dict[str, asyncio.Future] = {}
-        self._dedup = MessageDeduplicator(max_size=DEDUP_MAX_SIZE)
+        self._dedup = MessageDeduplicator(
+            max_size=DEDUP_MAX_SIZE,
+            ttl_seconds=DEDUP_TTL_SECONDS,
+        )
         self._reply_req_ids: Dict[str, str] = {}
 
         # Text batching: merge rapid successive messages (Telegram-style).
