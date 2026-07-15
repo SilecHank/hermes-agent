@@ -57,6 +57,45 @@ class TestContextFileCwd:
         assert _captured_context_cwd(_make_agent()) == tmp_path
 
 
+class _MemoryStore:
+    def format_for_system_prompt(self, store):
+        return {
+            "memory": "MEMORY (your personal notes)\nprivate operational facts",
+            "user": "USER PROFILE (who the user is)\nprivate user details",
+        }[store]
+
+
+def _volatile_prompt(chat_type):
+    agent = _make_agent(
+        platform="qqbot",
+        _chat_type=chat_type,
+        _memory_store=_MemoryStore(),
+        _memory_enabled=True,
+        _user_profile_enabled=True,
+    )
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("run_agent.build_environment_hints", return_value=""),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        return build_system_prompt_parts(agent)["volatile"]
+
+
+class TestSharedChatMemoryIsolation:
+    def test_group_prompt_excludes_personal_memory_and_user_profile(self):
+        volatile = _volatile_prompt("group")
+
+        assert "MEMORY (your personal notes)" not in volatile
+        assert "USER PROFILE (who the user is)" not in volatile
+
+    def test_direct_message_keeps_personal_memory_and_user_profile(self):
+        volatile = _volatile_prompt("dm")
+
+        assert "MEMORY (your personal notes)" in volatile
+        assert "USER PROFILE (who the user is)" in volatile
+
+
 def _stable_prompt(agent):
     with (
         patch("run_agent.load_soul_md", return_value=""),
