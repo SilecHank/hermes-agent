@@ -574,6 +574,7 @@ class HermesACPAgent(acp.Agent):
         "compress": "Compress conversation context",
         "steer": "Inject guidance into the currently running agent turn",
         "queue": "Queue a prompt to run after the current turn finishes",
+        "ivd": "登记或查看 IVD 统一维护任务",
         "version": "Show Hermes version",
     }
 
@@ -612,6 +613,11 @@ class HermesACPAgent(acp.Agent):
             "name": "queue",
             "description": "Queue a prompt to run after the current turn finishes",
             "input_hint": "prompt to run next",
+        },
+        {
+            "name": "ivd",
+            "description": "登记或查看 IVD 统一维护任务",
+            "input_hint": "sync --scope <名称> | status [command_id]",
         },
         {
             "name": "version",
@@ -2042,6 +2048,7 @@ class HermesACPAgent(acp.Agent):
             "compress": self._cmd_compress,
             "steer": self._cmd_steer,
             "queue": self._cmd_queue,
+            "ivd": self._cmd_ivd,
             "version": self._cmd_version,
         }.get(cmd)
 
@@ -2301,6 +2308,98 @@ class HermesACPAgent(acp.Agent):
             state.queued_prompts.append(queued_text)
             depth = len(state.queued_prompts)
         return f"Queued for the next turn. ({depth} queued)"
+
+    def _cmd_ivd(self, args: str, state: SessionState) -> str:
+        """Handle ACP-local /ivd commands through the shared maintenance ledger."""
+        try:
+            from gateway.maintenance_command_bus import (
+                MaintenanceCommandLedger,
+                classify_maintenance_command,
+            )
+            from hermes_constants import get_hermes_home
+        except Exception as exc:
+            logger.warning("ACP /ivd dependencies unavailable: %s", exc, exc_info=True)
+            return "IVD 维护命令暂不可用：无法加载维护台账模块。"
+
+        raw_args = args.strip()
+        command_text = f"/ivd {raw_args}".strip()
+        normalized = classify_maintenance_command(command_text)
+        if normalized is None:
+            return (
+                "IVD 维护命令用法：\n"
+                "- `/ivd sync --scope <名称>`：登记一次统一维护任务\n"
+                "- `/ivd status <command_id>`：查看维护任务状态"
+            )
+
+        ledger = MaintenanceCommandLedger(get_hermes_home() / "maintenance-command-ledger.json")
+        ledger.recover_stale_running()
+        ledger.prune()
+        if normalized == "ivd_maintenance_status":
+            parts = raw_args.split()
+            command_id = parts[1] if len(parts) > 1 and parts[0].casefold() == "status" else ""
+            if not command_id:
+                return ledger.format_recent_summary()
+            return ledger.format_status_summary(command_id)
+
+        scope = self._ivd_maintenance_scope(raw_args)
+        claim = ledger.claim(
+            command_text,
+            origin_platform="acp",
+            origin_chat_id=str(state.session_id),
+            origin_user_id=None,
+            scope=scope,
+        )
+        if claim is None:
+            return "没有识别到可执行的 IVD 维护命令。"
+
+        if claim.should_execute:
+            self._schedule_acp_ivd_maintenance_worker(ledger, claim.command_id, scope)
+            return (
+                f"已接收统一维护命令 `{claim.command_id}`，只会执行一次。\n"
+                f"范围：`{scope}`。\n"
+                "已登记到共享维护台账，并启动后台维护 worker。\n"
+                "后续维护动作必须继续遵守 pending_verify 不进正式答案、缺失 product_line 不强行补齐。"
+            )
+
+        return (
+            f"维护命令 `{claim.command_id}` 已有执行记录，不会重复执行。\n"
+            f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
+        )
+
+    def _schedule_acp_ivd_maintenance_worker(self, ledger: Any, command_id: str, scope: str) -> None:
+        try:
+            from gateway.ivd_maintenance_worker import run_ivd_maintenance_worker
+        except Exception as exc:
+            logger.warning("ACP /ivd worker unavailable: %s", exc, exc_info=True)
+            ledger.mark_failed(command_id, error="worker_unavailable")
+            return
+
+        def _run_worker() -> None:
+            try:
+                run_ivd_maintenance_worker(ledger, command_id, scope=scope)
+            except Exception as exc:
+                logger.warning("ACP /ivd worker failed: %s", exc, exc_info=True)
+                ledger.mark_failed(command_id, error=str(exc))
+
+        future = _executor.submit(_run_worker)
+        futures = getattr(self, "_ivd_worker_futures", None)
+        if not isinstance(futures, set):
+            futures = set()
+            self._ivd_worker_futures = futures
+        futures.add(future)
+        future.add_done_callback(lambda done: futures.discard(done))
+
+    @staticmethod
+    def _ivd_maintenance_scope(raw_args: str) -> str:
+        parts = raw_args.split()
+        for index, part in enumerate(parts):
+            if part == "--scope" and index + 1 < len(parts):
+                return parts[index + 1].strip() or "default"
+            if part.startswith("--scope="):
+                value = part.split("=", 1)[1].strip()
+                if value:
+                    return value
+        return datetime.now(timezone.utc).date().isoformat()
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
         return f"Hermes Agent v{HERMES_VERSION}"

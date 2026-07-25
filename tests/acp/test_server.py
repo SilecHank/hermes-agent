@@ -438,6 +438,7 @@ class TestSessionOps:
             "compress",
             "steer",
             "queue",
+            "ivd",
             "version",
         ]
         model_cmd = next(
@@ -1909,6 +1910,42 @@ class TestSlashCommands:
         state = self._make_state(mock_manager)
         result = agent._handle_slash_command("/version", state)
         assert HERMES_VERSION in result
+
+    def test_ivd_sync_claims_maintenance_command_in_chinese(self, agent, mock_manager, tmp_path):
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(tmp_path)
+        try:
+            state = self._make_state(mock_manager)
+            with patch.object(agent, "_schedule_acp_ivd_maintenance_worker") as schedule:
+                result = agent._handle_slash_command(
+                    "/ivd sync --scope hermes-ivd-system-v2026.07.25",
+                    state,
+                )
+        finally:
+            reset_hermes_home_override(token)
+
+        assert result is not None
+        assert "已接收统一维护命令" in result
+        assert "hermes-ivd-system-v2026.07.25" in result
+        assert "只会执行一次" in result
+        schedule.assert_called_once()
+
+    def test_ivd_status_lists_recent_commands(self, agent, mock_manager, tmp_path):
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(tmp_path)
+        try:
+            state = self._make_state(mock_manager)
+            with patch.object(agent, "_schedule_acp_ivd_maintenance_worker"):
+                agent._handle_slash_command("/ivd sync --scope release-record", state)
+            result = agent._handle_slash_command("/ivd status", state)
+        finally:
+            reset_hermes_home_override(token)
+
+        assert result is not None
+        assert "最近维护命令" in result
+        assert "release-record" in result
 
     def test_compact_compresses_context(self, agent, mock_manager):
         state = self._make_state(mock_manager)

@@ -59,6 +59,7 @@ it. New commands land often; `/help` in-session is always authoritative.
 /bundles                 List skill bundles (/<name> loads several skills)
 /learn <source>          Learn a reusable skill from dirs/URLs/this chat
 /memory [pending|approve|reject] Review pending memory writes / approval gate
+/ivd [sync|status]       IVD maintenance command bus (GW/ACP)
 /pet [toggle|list|<slug>] Petdex mascot control (CLI)
 /hatch [description]     Generate a new pet from a description (CLI)
 /cron [sub]              Manage scheduled tasks (CLI)
