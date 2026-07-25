@@ -4771,6 +4771,9 @@ class GatewaySlashCommandsMixin:
 
         scope = self._ivd_maintenance_scope(raw_args)
         source = event.source
+        denied = self._ivd_sync_admin_denial(source)
+        if denied:
+            return denied
         claim = ledger.claim(
             command_text,
             origin_platform=source.platform.value if source.platform else "",
@@ -4782,7 +4785,14 @@ class GatewaySlashCommandsMixin:
             return "没有识别到可执行的 IVD 维护命令。"
 
         if claim.should_execute:
-            self._schedule_ivd_maintenance_worker(ledger, claim.command_id, scope)
+            self._schedule_ivd_maintenance_worker(
+                ledger,
+                claim.command_id,
+                scope,
+                origin_platform=source.platform,
+                origin_chat_id=str(source.chat_id),
+                notify_platforms=claim.notify_platforms,
+            )
             await self._send_ivd_maintenance_short_notice(claim, scope, origin_platform=source.platform)
             notify = "、".join(claim.notify_platforms) or "无"
             return (
@@ -4797,20 +4807,50 @@ class GatewaySlashCommandsMixin:
             f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
         )
 
+    def _ivd_sync_admin_denial(self, source: SessionSource) -> str | None:
+        from gateway.slash_access import policy_for_source
+
+        policy = policy_for_source(getattr(self, "config", None), source)
+        if policy.enabled and policy.is_admin(source.user_id):
+            return None
+        return (
+            "只有管理员可以执行 IVD 维护同步。\n"
+            "请让管理员在当前平台配置 `allow_admin_from` 或 `group_allow_admin_from` 后再发起。"
+        )
+
     def _schedule_ivd_maintenance_worker(
         self,
         ledger: MaintenanceCommandLedger,
         command_id: str,
         scope: str,
+        *,
+        origin_platform,
+        origin_chat_id: str,
+        notify_platforms: tuple[str, ...],
     ) -> None:
         from gateway.ivd_maintenance_worker import run_ivd_maintenance_worker
 
         async def _run() -> None:
-            await asyncio.to_thread(
+            artifact = await asyncio.to_thread(
                 run_ivd_maintenance_worker,
                 ledger,
                 command_id,
                 scope=scope,
+            )
+            status = "failed"
+            try:
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+                status = str(payload.get("status") or status)
+            except Exception:
+                logger.debug("IVD maintenance artifact status read failed", exc_info=True)
+            await self._send_ivd_maintenance_completion_notice(
+                command_id=command_id,
+                scope=scope,
+                status=status,
+                artifact=str(artifact),
+                origin_platform=origin_platform,
+                origin_chat_id=origin_chat_id,
+                notify_platforms=notify_platforms,
             )
 
         task = asyncio.create_task(_run())
@@ -4847,6 +4887,56 @@ class GatewaySlashCommandsMixin:
                 await adapter.send(str(chat_id), text)
             except Exception as exc:
                 logger.debug("IVD maintenance short notice failed for %s: %s", platform_name, exc)
+
+    async def _send_ivd_maintenance_completion_notice(
+        self,
+        *,
+        command_id: str,
+        scope: str,
+        status: str,
+        artifact: str,
+        origin_platform,
+        origin_chat_id: str,
+        notify_platforms: tuple[str, ...],
+    ) -> None:
+        if not getattr(self, "adapters", None):
+            return
+        label = "维护完成" if status == "completed" else "维护失败"
+        text = (
+            f"IVD {label}：`{command_id}`。\n"
+            f"范围：`{scope}`；产物：`{artifact}`。\n"
+            f"可用 `/ivd status {command_id}` 查看状态。"
+        )
+        targets: list[tuple[Platform, str]] = []
+        if origin_platform is not None and origin_chat_id:
+            try:
+                targets.append((Platform(getattr(origin_platform, "value", origin_platform)), origin_chat_id))
+            except Exception:
+                pass
+        config = getattr(self, "config", None)
+        platform_configs = getattr(config, "platforms", {}) if config is not None else {}
+        for platform_name in notify_platforms:
+            try:
+                platform = Platform(platform_name)
+            except Exception:
+                continue
+            platform_config = platform_configs.get(platform) if isinstance(platform_configs, dict) else None
+            home = getattr(platform_config, "home_channel", None)
+            chat_id = getattr(home, "chat_id", None)
+            if chat_id:
+                targets.append((platform, str(chat_id)))
+        seen: set[tuple[Platform, str]] = set()
+        for platform, chat_id in targets:
+            if (platform, chat_id) in seen:
+                continue
+            seen.add((platform, chat_id))
+            adapter = self.adapters.get(platform)
+            if adapter is None:
+                continue
+            try:
+                await adapter.send(chat_id, text)
+            except Exception as exc:
+                logger.debug("IVD maintenance completion notice failed for %s: %s", platform.value, exc)
 
     def _ivd_maintenance_scope(self, raw_args: str) -> str:
         parts = raw_args.split()
