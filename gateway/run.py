@@ -13520,12 +13520,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                                 _hyg_timeout_seconds,
                                             )
                                             _timeout_msg = (
-                                                "⚠️ Context compression timed out "
-                                                f"after {_hyg_timeout_seconds:.1f}s. "
-                                                "No messages were dropped — continuing without "
-                                                "compression. Run /compress to retry, /reset for "
-                                                "a clean session, or check your "
-                                                "auxiliary.compression model configuration."
+                                                "⚠️ 上下文压缩超时"
+                                                f"（已等待 {_hyg_timeout_seconds:.1f} 秒）。"
+                                                "没有删除任何消息，本轮对话会继续处理。"
+                                                "你可以发送 /compress 重试，或发送 /reset 开始一个干净会话；"
+                                                "如果反复出现，请检查 config.yaml 里的 auxiliary.compression 模型配置。"
                                             )
                                             try:
                                                 _adapter = self._adapter_for_source(source)

@@ -819,7 +819,7 @@ async def test_session_hygiene_timeout_continues_to_agent_and_sets_cooldown(monk
     assert worker_started.is_set()
     assert runner._run_agent.await_count == 1
     assert runner._hygiene_compression_failure_cooldowns["sess-timeout"] > time.time()
-    timeout_warnings = [s for s in adapter.sent if "Context compression timed out" in s["content"]]
+    timeout_warnings = [s for s in adapter.sent if "上下文压缩超时" in s["content"]]
     assert len(timeout_warnings) == 1
     fake_db.archive_and_compact.assert_not_called()
     SlowCompressAgent.last_instance.close.assert_not_called()
