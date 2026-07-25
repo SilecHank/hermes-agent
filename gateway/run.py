@@ -458,22 +458,57 @@ def _format_exec_approval_fallback(
 ) -> str:
     """Render the text fallback from approval capabilities, not platform names."""
     cmd_preview = command[:200] + "..." if len(command) > 200 else command
-    heading = "⚠️ **Dangerous command requires approval:**"
+    heading = "⚠️ **需要你确认后才能执行：**"
     if smart_denied:
-        heading = "⚠️ **Smart DENY — owner override for one operation:**"
+        heading = "⚠️ **智能审批已拦截，需要你手动确认本次执行：**"
 
-    choices = [f"Reply `{command_prefix}approve` to execute this one operation"]
+    choices = [f"回复 `同意` 或 `{command_prefix}approve` 执行这一次"]
     if not smart_denied and allow_session:
         choices.append(
-            f"`{command_prefix}approve session` to approve this pattern for the session"
+            f"回复 `本轮同意` 或 `{command_prefix}approve session` 本轮会话批准同类操作"
         )
         if allow_permanent:
-            choices.append(f"`{command_prefix}approve always` to approve permanently")
-    choices.append(f"`{command_prefix}deny` to cancel")
+            choices.append(f"回复 `以后都同意` 或 `{command_prefix}approve always` 永久批准同类操作")
+    choices.append(f"回复 `取消` 或 `{command_prefix}deny` 不执行")
     return (
-        f"{heading}\n```\n{cmd_preview}\n```\nReason: {description}\n\n"
-        + ", ".join(choices[:-1]) + f", or {choices[-1]}."
+        f"{heading}\n```\n{cmd_preview}\n```\n原因：{description}\n\n"
+        + "；".join(choices[:-1]) + f"；{choices[-1]}。"
     )
+
+
+def _normalize_gateway_approval_reply(raw_text: str) -> tuple[str, str] | None:
+    raw = str(raw_text or "").strip().casefold()
+    approve_once = {"approve", "yes", "ok", "okay", "confirm", "y", "👍", "同意", "批准", "执行", "确认", "可以", "继续", "通过"}
+    deny = {"deny", "no", "reject", "cancel", "n", "👎", "取消", "拒绝", "不同意", "不要执行", "不通过"}
+    approve_always = {"always", "approve always", "always approve", "以后都同意", "永久同意", "总是批准", "始终允许"}
+    approve_session = {"session", "approve session", "session approve", "本轮同意", "本次会话同意", "本会话批准", "本轮批准"}
+    if raw in approve_once:
+        return ("approve", "")
+    if raw in deny:
+        return ("deny", "")
+    if raw in approve_always:
+        return ("approve", "always")
+    if raw in approve_session:
+        return ("approve", "session")
+    return None
+
+
+def _normalize_slash_confirm_reply(*, cmd_reply: str, norm_reply: str) -> str | None:
+    cmd = str(cmd_reply or "").strip().casefold()
+    norm = str(norm_reply or "").strip().casefold()
+    if cmd in {"approve", "yes", "ok", "confirm", "同意", "确认", "可以"}:
+        return "once"
+    if cmd in {"always", "remember", "以后都同意", "永久同意"}:
+        return "always"
+    if cmd in {"cancel", "no", "deny", "nevermind", "取消", "拒绝"}:
+        return "cancel"
+    if norm in {"approve", "approve once", "once", "同意", "确认", "可以", "执行"}:
+        return "once"
+    if norm in {"always", "always approve", "以后都同意", "永久同意", "总是批准"}:
+        return "always"
+    if norm in {"cancel", "nevermind", "no", "取消", "拒绝", "不同意", "不要执行"}:
+        return "cancel"
+    return None
 
 
 def _gateway_provider_error_reply(text: str) -> str:
@@ -6151,21 +6186,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from tools.approval import has_blocking_approval
             if has_blocking_approval(session_key):
-                _raw_text = (event.text or "").strip().lower()
-                _approve_words = {"approve", "yes", "ok", "okay", "confirm", "y", "👍"}
-                _deny_words = {"deny", "no", "reject", "cancel", "n", "👎"}
+                _normalized_reply = _normalize_gateway_approval_reply(event.text or "")
                 _approval_handler = None
                 _normalized_args = ""
-                if _raw_text in _approve_words:
-                    _approval_handler = self._handle_approve_command
-                elif _raw_text in _deny_words:
-                    _approval_handler = self._handle_deny_command
-                elif _raw_text in {"always", "approve always", "always approve"}:
-                    _approval_handler = self._handle_approve_command
-                    _normalized_args = "always"
-                elif _raw_text in {"session", "approve session", "session approve"}:
-                    _approval_handler = self._handle_approve_command
-                    _normalized_args = "session"
+                if _normalized_reply is not None:
+                    _verb, _normalized_args = _normalized_reply
+                    _approval_handler = (
+                        self._handle_approve_command
+                        if _verb == "approve"
+                        else self._handle_deny_command
+                    )
                 if _approval_handler is not None:
                     # Synthesize the canonical "/approve [args]" / "/deny"
                     # command text so the slash handlers parse modifiers via
@@ -6173,7 +6203,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # MessageEvent.is_command()/get_command_args() only
                     # recognize the "/" prefix, not the per-platform display
                     # prefix ("!" on Slack/Matrix).
-                    _verb = "approve" if _approval_handler is self._handle_approve_command else "deny"
                     _synth = f"/{_verb}"
                     if _normalized_args:
                         _synth = f"{_synth} {_normalized_args}"
@@ -11050,19 +11079,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # not registered commands, so the `!` survives to here.
             _norm_reply = _raw_reply.lstrip("!/").lower()
             _cmd_reply = event.get_command()
-            _confirm_choice = None
-            if _cmd_reply in {"approve", "yes", "ok", "confirm"}:
-                _confirm_choice = "once"
-            elif _cmd_reply in {"always", "remember"}:
-                _confirm_choice = "always"
-            elif _cmd_reply in {"cancel", "no", "deny", "nevermind"}:
-                _confirm_choice = "cancel"
-            elif _norm_reply in {"approve", "approve once", "once"}:
-                _confirm_choice = "once"
-            elif _norm_reply in {"always", "always approve"}:
-                _confirm_choice = "always"
-            elif _norm_reply in {"cancel", "nevermind", "no"}:
-                _confirm_choice = "cancel"
+            _confirm_choice = _normalize_slash_confirm_reply(
+                cmd_reply=_cmd_reply,
+                norm_reply=_norm_reply,
+            )
             if _confirm_choice is not None:
                 _resolved = await _slash_confirm_mod.resolve(
                     _quick_key, _pending_confirm.get("confirm_id"), _confirm_choice,
@@ -11330,6 +11350,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # mid-run is the whole point of the board.
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
                 return await self._handle_kanban_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "ivd":
+                return await self._handle_ivd_command(event)
 
             # /goal is safe mid-run for status/pause/clear/wait (inspection
             # and control-plane only — doesn't interrupt the running turn).
@@ -11784,6 +11807,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
+
+        if canonical == "ivd":
+            return await self._handle_ivd_command(event)
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)

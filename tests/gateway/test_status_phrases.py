@@ -49,6 +49,15 @@ def test_builtin_catalog_is_loaded_from_external_asset_and_is_status_only():
     assert len(catalog["generic"]) >= 10
 
 
+def test_builtin_status_phrases_are_chinese_first_for_messaging_surfaces():
+    catalog = resolve_status_phrase_catalog({}, "weixin")
+
+    combined = " ".join(catalog["status"][:5] + catalog["generic"][:5])
+    assert any("\u4e00" <= ch <= "\u9fff" for ch in combined)
+    assert "still on it" not in catalog["status"]
+    assert "one sec" not in catalog["generic"]
+
+
 def test_relative_status_phrase_path_loads_from_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     phrase_file = tmp_path / "phrases.yaml"

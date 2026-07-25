@@ -4741,6 +4741,70 @@ class GatewaySlashCommandsMixin:
         lines.append("Invoke a bundle with `/<slug>` to load all its skills.")
         return "\n".join(lines)
 
+    async def _handle_ivd_command(self, event: MessageEvent) -> str:
+        """Handle /ivd — shared IVD maintenance control-plane commands."""
+        from gateway.maintenance_command_bus import (
+            MaintenanceCommandLedger,
+            classify_maintenance_command,
+        )
+        from gateway.run import _hermes_home
+
+        raw_args = event.get_command_args().strip()
+        command_text = f"/ivd {raw_args}".strip()
+        normalized = classify_maintenance_command(command_text)
+        if normalized is None:
+            return (
+                "IVD 维护命令用法：\n"
+                "- `/ivd sync --scope <名称>`：登记一次三平台统一维护任务\n"
+                "- `/ivd status <command_id>`：查看维护任务状态"
+            )
+
+        ledger = MaintenanceCommandLedger(_hermes_home / "maintenance-command-ledger.json")
+        if normalized == "ivd_maintenance_status":
+            parts = raw_args.split()
+            command_id = parts[1] if len(parts) > 1 and parts[0].casefold() == "status" else ""
+            if not command_id:
+                return "请带上维护命令 ID，例如 `/ivd status ivd-xxxxxx`。"
+            return ledger.format_status_summary(command_id)
+
+        scope = self._ivd_maintenance_scope(raw_args)
+        source = event.source
+        claim = ledger.claim(
+            command_text,
+            origin_platform=source.platform.value if source.platform else "",
+            origin_chat_id=str(source.chat_id),
+            origin_user_id=str(source.user_id) if source.user_id else None,
+            scope=scope,
+        )
+        if claim is None:
+            return "没有识别到可执行的 IVD 维护命令。"
+
+        if claim.should_execute:
+            ledger.mark_running(claim.command_id)
+            notify = "、".join(claim.notify_platforms) or "无"
+            return (
+                f"已接收统一维护命令 `{claim.command_id}`，只会执行一次。\n"
+                f"范围：`{scope}`。\n"
+                f"其他平台短通知目标：{notify}。\n"
+                "后续维护动作必须继续遵守 pending_verify 不进正式答案、缺失 product_line 不强行补齐。"
+            )
+
+        return (
+            f"维护命令 `{claim.command_id}` 已有执行记录，不会重复执行。\n"
+            f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
+        )
+
+    def _ivd_maintenance_scope(self, raw_args: str) -> str:
+        parts = raw_args.split()
+        for index, part in enumerate(parts):
+            if part == "--scope" and index + 1 < len(parts):
+                return parts[index + 1].strip() or "default"
+            if part.startswith("--scope="):
+                value = part.split("=", 1)[1].strip()
+                if value:
+                    return value
+        return datetime.utcnow().strftime("%Y-%m-%d")
+
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /approve command — unblock waiting agent thread(s).
 
