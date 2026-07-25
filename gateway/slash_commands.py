@@ -4781,6 +4781,7 @@ class GatewaySlashCommandsMixin:
 
         if claim.should_execute:
             ledger.mark_running(claim.command_id)
+            await self._send_ivd_maintenance_short_notice(claim, scope, origin_platform=source.platform)
             notify = "、".join(claim.notify_platforms) or "无"
             return (
                 f"已接收统一维护命令 `{claim.command_id}`，只会执行一次。\n"
@@ -4793,6 +4794,33 @@ class GatewaySlashCommandsMixin:
             f"维护命令 `{claim.command_id}` 已有执行记录，不会重复执行。\n"
             f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
         )
+
+    async def _send_ivd_maintenance_short_notice(self, claim, scope: str, *, origin_platform) -> None:
+        if not getattr(self, "adapters", None):
+            return
+        config = getattr(self, "config", None)
+        platform_configs = getattr(config, "platforms", {}) if config is not None else {}
+        origin_value = getattr(origin_platform, "value", origin_platform)
+        text = (
+            f"统一维护命令 `{claim.command_id}` 已从 {origin_value} 发起。\n"
+            f"范围：`{scope}`；同一范围不会重复执行。\n"
+            f"查看状态：`/ivd status {claim.command_id}`。"
+        )
+        for platform_name in claim.notify_platforms:
+            try:
+                platform = Platform(platform_name)
+            except Exception:
+                continue
+            adapter = self.adapters.get(platform)
+            platform_config = platform_configs.get(platform) if isinstance(platform_configs, dict) else None
+            home = getattr(platform_config, "home_channel", None)
+            chat_id = getattr(home, "chat_id", None)
+            if adapter is None or not chat_id:
+                continue
+            try:
+                await adapter.send(str(chat_id), text)
+            except Exception as exc:
+                logger.debug("IVD maintenance short notice failed for %s: %s", platform_name, exc)
 
     def _ivd_maintenance_scope(self, raw_args: str) -> str:
         parts = raw_args.split()

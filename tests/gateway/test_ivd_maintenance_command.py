@@ -1,8 +1,8 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -12,6 +12,7 @@ def _make_runner():
 
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
+    runner.config = GatewayConfig(platforms={})
     return runner
 
 
@@ -52,3 +53,25 @@ async def test_ivd_sync_handler_claims_once_with_chinese_reply(tmp_path):
     assert "只会执行一次" in first
     assert "已有执行记录" in second
     assert "不会重复执行" in second
+
+
+@pytest.mark.asyncio
+async def test_ivd_sync_sends_short_notice_to_configured_peer_home_channel(tmp_path):
+    runner = _make_runner()
+    qq_adapter = MagicMock()
+    qq_adapter.send = AsyncMock()
+    runner.adapters = {Platform.QQBOT: qq_adapter}
+    runner.config.platforms[Platform.QQBOT] = PlatformConfig(
+        enabled=True,
+        home_channel=HomeChannel(Platform.QQBOT, "qq-home", "QQ home"),
+    )
+
+    with patch("gateway.run._hermes_home", tmp_path):
+        result = await runner._handle_ivd_command(_make_event("/ivd sync --scope kb-update-20260725"))
+
+    assert "已接收统一维护命令" in result
+    qq_adapter.send.assert_awaited_once()
+    args, kwargs = qq_adapter.send.call_args
+    assert args[0] == "qq-home"
+    assert "统一维护命令" in args[1]
+    assert "kb-update-20260725" in args[1]
