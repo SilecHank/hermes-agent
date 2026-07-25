@@ -17,8 +17,27 @@ def test_default_worker_steps_are_deterministic_and_pending_safe():
     assert "hermes_candidate_promotion_queue.py" in joined
     assert "detect-kb-conflicts.py" in joined
     assert "review-inbox-maintenance.py" in joined
+    assert "hermes_daily_maintenance_runner.py" in joined
+    assert "--execute" in joined
     assert "git commit" not in joined
     assert "git push" not in joined
+
+
+def test_default_worker_steps_mount_daily_runner_with_scope_date():
+    steps = build_default_ivd_maintenance_steps(Path("/kb"), python_executable="py", run_date="2026-07-25")
+
+    daily_steps = [step for step in steps if step.name == "daily_maintenance_runner"]
+
+    assert len(daily_steps) == 1
+    assert daily_steps[0].argv == (
+        "py",
+        "scripts/hermes_daily_maintenance_runner.py",
+        "--date",
+        "2026-07-25",
+        "--repo-root",
+        ".",
+        "--execute",
+    )
 
 
 def test_worker_marks_completed_and_writes_artifact(tmp_path):

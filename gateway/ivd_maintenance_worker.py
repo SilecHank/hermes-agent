@@ -29,8 +29,14 @@ def resolve_ivd_kb_root() -> Path:
     return Path(os.environ.get("HERMES_IVD_KB_ROOT") or "/home/slim/IVD-KnowledgeHub")
 
 
-def build_default_ivd_maintenance_steps(kb_root: Path, *, python_executable: str | None = None) -> tuple[WorkerStep, ...]:
+def build_default_ivd_maintenance_steps(
+    kb_root: Path,
+    *,
+    python_executable: str | None = None,
+    run_date: str | None = None,
+) -> tuple[WorkerStep, ...]:
     py = python_executable or sys.executable
+    maintenance_date = run_date or time.strftime("%Y-%m-%d", time.localtime())
     out_dir = kb_root / "knowledge-base" / "_extracted" / "hermes-review-inbox"
     return (
         WorkerStep(
@@ -57,6 +63,18 @@ def build_default_ivd_maintenance_steps(kb_root: Path, *, python_executable: str
         WorkerStep(
             "runtime_config_validation",
             (py, "scripts/hermes_runtime_config.py", "knowledge-base/config/hermes-runtime-concurrency.json"),
+        ),
+        WorkerStep(
+            "daily_maintenance_runner",
+            (
+                py,
+                "scripts/hermes_daily_maintenance_runner.py",
+                "--date",
+                maintenance_date,
+                "--repo-root",
+                ".",
+                "--execute",
+            ),
         ),
     )
 
