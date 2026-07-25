@@ -43,7 +43,8 @@ def test_ivd_is_registered_gateway_command():
 async def test_ivd_sync_handler_claims_once_with_chinese_reply(tmp_path):
     runner = _make_runner()
 
-    with patch("gateway.run._hermes_home", tmp_path):
+    with patch("gateway.run._hermes_home", tmp_path), \
+         patch.object(runner, "_schedule_ivd_maintenance_worker") as schedule:
         first = await runner._handle_ivd_command(_make_event("/ivd sync --scope kb-update-20260725"))
         second = await runner._handle_ivd_command(
             _make_event("/ivd sync --scope kb-update-20260725", platform=Platform.QQBOT)
@@ -53,6 +54,7 @@ async def test_ivd_sync_handler_claims_once_with_chinese_reply(tmp_path):
     assert "只会执行一次" in first
     assert "已有执行记录" in second
     assert "不会重复执行" in second
+    schedule.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -66,7 +68,8 @@ async def test_ivd_sync_sends_short_notice_to_configured_peer_home_channel(tmp_p
         home_channel=HomeChannel(Platform.QQBOT, "qq-home", "QQ home"),
     )
 
-    with patch("gateway.run._hermes_home", tmp_path):
+    with patch("gateway.run._hermes_home", tmp_path), \
+         patch.object(runner, "_schedule_ivd_maintenance_worker"):
         result = await runner._handle_ivd_command(_make_event("/ivd sync --scope kb-update-20260725"))
 
     assert "已接收统一维护命令" in result
@@ -75,3 +78,16 @@ async def test_ivd_sync_sends_short_notice_to_configured_peer_home_channel(tmp_p
     assert args[0] == "qq-home"
     assert "统一维护命令" in args[1]
     assert "kb-update-20260725" in args[1]
+
+
+@pytest.mark.asyncio
+async def test_ivd_status_without_id_lists_recent_commands(tmp_path):
+    runner = _make_runner()
+
+    with patch("gateway.run._hermes_home", tmp_path), \
+         patch.object(runner, "_schedule_ivd_maintenance_worker"):
+        await runner._handle_ivd_command(_make_event("/ivd sync --scope kb-update-20260725"))
+        result = await runner._handle_ivd_command(_make_event("/ivd status"))
+
+    assert "最近维护命令" in result
+    assert "kb-update-20260725" in result

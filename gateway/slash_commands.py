@@ -4760,11 +4760,13 @@ class GatewaySlashCommandsMixin:
             )
 
         ledger = MaintenanceCommandLedger(_hermes_home / "maintenance-command-ledger.json")
+        ledger.recover_stale_running()
+        ledger.prune()
         if normalized == "ivd_maintenance_status":
             parts = raw_args.split()
             command_id = parts[1] if len(parts) > 1 and parts[0].casefold() == "status" else ""
             if not command_id:
-                return "请带上维护命令 ID，例如 `/ivd status ivd-xxxxxx`。"
+                return ledger.format_recent_summary()
             return ledger.format_status_summary(command_id)
 
         scope = self._ivd_maintenance_scope(raw_args)
@@ -4780,7 +4782,7 @@ class GatewaySlashCommandsMixin:
             return "没有识别到可执行的 IVD 维护命令。"
 
         if claim.should_execute:
-            ledger.mark_running(claim.command_id)
+            self._schedule_ivd_maintenance_worker(ledger, claim.command_id, scope)
             await self._send_ivd_maintenance_short_notice(claim, scope, origin_platform=source.platform)
             notify = "、".join(claim.notify_platforms) or "无"
             return (
@@ -4794,6 +4796,30 @@ class GatewaySlashCommandsMixin:
             f"维护命令 `{claim.command_id}` 已有执行记录，不会重复执行。\n"
             f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
         )
+
+    def _schedule_ivd_maintenance_worker(
+        self,
+        ledger: MaintenanceCommandLedger,
+        command_id: str,
+        scope: str,
+    ) -> None:
+        from gateway.ivd_maintenance_worker import run_ivd_maintenance_worker
+
+        async def _run() -> None:
+            await asyncio.to_thread(
+                run_ivd_maintenance_worker,
+                ledger,
+                command_id,
+                scope=scope,
+            )
+
+        task = asyncio.create_task(_run())
+        background_tasks = getattr(self, "_background_tasks", None)
+        if not isinstance(background_tasks, set):
+            background_tasks = set()
+            self._background_tasks = background_tasks
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
     async def _send_ivd_maintenance_short_notice(self, claim, scope: str, *, origin_platform) -> None:
         if not getattr(self, "adapters", None):

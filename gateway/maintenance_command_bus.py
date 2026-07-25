@@ -133,6 +133,9 @@ class MaintenanceCommandLedger:
     def mark_completed(self, command_id: str, *, artifact: str | None = None) -> None:
         self._set_status(command_id, "completed", artifact=artifact)
 
+    def mark_failed(self, command_id: str, *, error: str | None = None, artifact: str | None = None) -> None:
+        self._set_status(command_id, "failed", error=error, artifact=artifact)
+
     def format_status_summary(self, command_id: str) -> str:
         state = self._read_state()
         item = state.get("commands", {}).get(command_id)
@@ -146,7 +149,72 @@ class MaintenanceCommandLedger:
         }
         status = str(item.get("status") or "queued")
         label = labels.get(status, status)
-        return f"维护命令 `{command_id}`：{label}；范围 `{item.get('scope', '-')}`。"
+        suffix = f"；产物 `{item['artifact']}`" if item.get("artifact") else ""
+        return f"维护命令 `{command_id}`：{label}；范围 `{item.get('scope', '-')}`{suffix}。"
+
+    def format_recent_summary(self, *, limit: int = 5) -> str:
+        commands = self.list_recent(limit=limit)
+        if not commands:
+            return "最近维护命令：暂无记录。"
+        lines = ["最近维护命令："]
+        for item in commands:
+            lines.append(
+                f"- `{item.get('command_id')}`：{item.get('status', 'queued')}；"
+                f"范围 `{item.get('scope', '-')}`；更新时间 {item.get('updated_at', '-')}"
+            )
+        return "\n".join(lines)
+
+    def list_recent(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        state = self._read_state()
+        commands = [
+            item for item in state.get("commands", {}).values()
+            if isinstance(item, dict)
+        ]
+        commands.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+        return commands[: max(limit, 0)]
+
+    def recover_stale_running(self, *, max_age_seconds: int = 3600, now_epoch: float | None = None) -> int:
+        now = now_epoch if now_epoch is not None else time.time()
+        recovered = 0
+        with self._locked():
+            state = self._read_state()
+            for item in state.get("commands", {}).values():
+                if not isinstance(item, dict) or item.get("status") != "running":
+                    continue
+                updated = _parse_epoch(str(item.get("updated_at") or item.get("created_at") or ""))
+                if updated is None or now - updated <= max_age_seconds:
+                    continue
+                item["status"] = "failed"
+                item["error"] = "stale_running_recovered"
+                item["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+                recovered += 1
+            if recovered:
+                self._write_state(state)
+        return recovered
+
+    def prune(self, *, max_age_seconds: int = 7 * 24 * 3600, now_epoch: float | None = None) -> int:
+        now = now_epoch if now_epoch is not None else time.time()
+        with self._locked():
+            state = self._read_state()
+            commands = state.setdefault("commands", {})
+            fingerprints = state.setdefault("fingerprints", {})
+            to_remove: list[str] = []
+            for command_id, item in list(commands.items()):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("status") in {"queued", "running"}:
+                    continue
+                updated = _parse_epoch(str(item.get("updated_at") or item.get("created_at") or ""))
+                if updated is not None and now - updated > max_age_seconds:
+                    to_remove.append(command_id)
+            for command_id in to_remove:
+                item = commands.pop(command_id, {})
+                fingerprint = item.get("fingerprint") if isinstance(item, dict) else None
+                if fingerprint:
+                    fingerprints.pop(fingerprint, None)
+            if to_remove:
+                self._write_state(state)
+        return len(to_remove)
 
     def _set_status(self, command_id: str, status: str, **extra: Any) -> None:
         with self._locked():
@@ -211,3 +279,12 @@ class MaintenanceCommandLedger:
                 self.lock_path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _parse_epoch(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
