@@ -21202,6 +21202,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
+            # Product-specific troubleshooting facts are injected per turn so
+            # they constrain the current model call without entering transcript
+            # history or leaking into an unrelated follow-up. The guard is
+            # optional and fail-open: a missing/invalid KB card never blocks a
+            # platform message.
+            _after_sales_turn = None
+            try:
+                from gateway.after_sales_guard import prepare_after_sales_turn
+
+                _after_sales_turn = prepare_after_sales_turn(
+                    user_config,
+                    platform=platform_key,
+                    message=message,
+                    history=history,
+                )
+                if _after_sales_turn is not None:
+                    combined_ephemeral = (
+                        combined_ephemeral + "\n\n" + _after_sales_turn.context
+                    ).strip()
+                    logger.info(
+                        "After-sales workflow facts matched: platform=%s workflow=%s stage=%s",
+                        platform_key,
+                        _after_sales_turn.facts.get("workflow_id", ""),
+                        _after_sales_turn.facts.get("current_stage", ""),
+                    )
+            except Exception as _guard_exc:
+                logger.warning(
+                    "After-sales workflow fact injection skipped: %s", _guard_exc
+                )
+
             max_iterations = _current_max_iterations()
 
             try:
@@ -21838,6 +21868,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # tool_progress mode. Mattermost needs an explicit per-platform
             # opt-in so global scratch-text display does not leak into threads.
             agent.thinking_progress = _thinking_enabled
+            # Clear the callback on unrelated cached-agent turns. When a
+            # workflow card matched, validation runs inside conversation_loop
+            # before the assistant message is persisted.
+            agent._final_response_validator = (
+                (
+                    lambda answer, _turn=_after_sales_turn, _agent=agent: _turn.validate(
+                        answer,
+                        messages=getattr(_agent, "_session_messages", []),
+                    )
+                )
+                if _after_sales_turn is not None
+                else None
+            )
             # Store agent reference for interrupt support
             agent_holder[0] = agent
             # Capture the full tool definitions for transcript logging

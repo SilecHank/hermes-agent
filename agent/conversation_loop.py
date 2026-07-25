@@ -992,6 +992,7 @@ def run_conversation(
     max_compression_attempts = getattr(agent, "max_compression_attempts", 3)
     _last_preflight_pressure: Optional[int] = None
     _preflight_compression_blocked = _ctx.preflight_compression_blocked
+    final_validation_retries = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
@@ -6268,8 +6269,66 @@ def run_conversation(
                     length_continue_retries = 0
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
+
+                try:
+                    from agent.final_response_validation import evaluate_final_response
+
+                    _validation_decision = evaluate_final_response(
+                        getattr(agent, "_final_response_validator", None),
+                        final_response,
+                        attempts=final_validation_retries,
+                    )
+                except Exception as _validation_exc:
+                    logger.warning(
+                        "Final response validation failed open: %s", _validation_exc
+                    )
+                    _validation_decision = None
+
+                if _validation_decision is not None and _validation_decision.error:
+                    logger.warning(
+                        "Final response validator error; accepting response: %s",
+                        _validation_decision.error,
+                    )
+                if (
+                    _validation_decision is not None
+                    and _validation_decision.action == "retry"
+                ):
+                    final_validation_retries += 1
+                    rejected_msg = agent._build_assistant_message(
+                        assistant_message, "validation_retry"
+                    )
+                    rejected_msg["content"] = final_response
+                    rejected_msg["_final_validation_synthetic"] = True
+                    messages.append(rejected_msg)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": _validation_decision.retry_prompt,
+                            "_final_validation_synthetic": True,
+                        }
+                    )
+                    agent._session_messages = messages
+                    logger.warning(
+                        "Final response rejected before persistence; retrying once: %s",
+                        ", ".join(_validation_decision.reasons),
+                    )
+                    continue
+                if (
+                    _validation_decision is not None
+                    and _validation_decision.action == "fallback"
+                ):
+                    final_response = _validation_decision.response
+                    logger.warning(
+                        "Final response rejected after retry; using safe clarification: %s",
+                        ", ".join(_validation_decision.reasons),
+                    )
+
+                from agent.final_response_validation import strip_validation_scaffolding
+
+                strip_validation_scaffolding(messages)
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
+                final_msg["content"] = final_response
 
                 # ── Dropped tool-call recovery (copilot/Claude) ────────
                 # Some providers (observed: claude-opus-4.8 / claude-sonnet-4.5
@@ -6342,6 +6401,7 @@ def run_conversation(
                         or messages[-1].get("_empty_recovery_synthetic")
                         or messages[-1].get("_empty_terminal_sentinel")
                         or messages[-1].get("_dropped_toolcall_nudge")
+                        or messages[-1].get("_final_validation_synthetic")
                     )
                 ):
                     messages.pop()

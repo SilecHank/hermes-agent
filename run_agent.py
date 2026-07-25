@@ -245,6 +245,7 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     # drive the bounded retry. Persisting them would replay the internal
     # retry instruction as user-authored context on resume.
     "_dropped_toolcall_nudge",
+    "_final_validation_synthetic",
 )
 
 
