@@ -143,6 +143,9 @@ def prepare_after_sales_turn(
     if match is None:
         return None
     context = module.render_fact_context(match)
+    fast_context = _render_fast_response_context(guard, message=message, match=match)
+    if fast_context:
+        context = f"{context}\n\n{fast_context}"
     recent_user_text = " ".join(
         str(item.get("content", ""))
         for item in history[-12:]
@@ -166,3 +169,50 @@ def prepare_after_sales_turn(
         validator=validator,
         allowed_numeric_claims=tuple(dict.fromkeys(allowed_numeric_claims)),
     )
+
+
+def _render_fast_response_context(
+    guard: dict[str, Any],
+    *,
+    message: str,
+    match: dict[str, Any],
+) -> str:
+    module_path = Path(str(guard.get("fast_response_module") or ""))
+    if not module_path.is_file():
+        return ""
+    try:
+        kb_root = str(module_path.parent.parent)
+        if kb_root not in sys.path:
+            sys.path.insert(0, kb_root)
+        module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
+        question_type = _question_type_from_match(match)
+        plan = module.build_fast_response_plan(message, question_type=question_type)
+    except Exception:
+        return ""
+    template = plan.get("answer_template") or {}
+    gate = plan.get("preflight_gate") or {}
+    initial_files = [
+        str(path)
+        for path in plan.get("initial_files", [])[:3]
+        if "candidate" not in str(path).casefold()
+    ]
+    lines = [
+        "[快速回答管线]",
+        f"回答风格：{template.get('style', 'short_first')}",
+        f"预算动作：{gate.get('pipeline_action', 'continue_final_answer')}",
+        f"首轮文件数：{len(initial_files)}",
+    ]
+    if initial_files:
+        lines.append("首轮只读正式来源：" + "；".join(initial_files))
+    lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
+    return "\n".join(lines)
+
+
+def _question_type_from_match(match: dict[str, Any]) -> str:
+    facts = match.get("facts") if isinstance(match, dict) else {}
+    workflow = str((facts or {}).get("workflow_id") or "")
+    if "report" in workflow:
+        return "report_interpretation"
+    if "operation" in workflow or "platform" in workflow:
+        return "platform_operation"
+    return "wet_lab"

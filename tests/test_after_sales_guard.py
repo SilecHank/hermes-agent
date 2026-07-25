@@ -18,6 +18,12 @@ def _config(enabled=True):
     }
 
 
+def _config_with_fast_response(enabled=True):
+    config = _config(enabled=enabled)
+    config["after_sales_guard"]["fast_response_module"] = str(KB / "scripts/hermes_fast_response_pipeline.py")
+    return config
+
+
 def test_prepare_after_sales_turn_injects_verified_context():
     turn = prepare_after_sales_turn(
         _config(),
@@ -29,6 +35,20 @@ def test_prepare_after_sales_turn_injects_verified_context():
     assert turn is not None
     assert "当前测量节点：文库浓度质控" in turn.context
     assert turn.facts["current_stage"] == "library_qc"
+
+
+def test_prepare_after_sales_turn_appends_fast_response_context_when_configured():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="qqbot",
+        message="NIFTY手工实验文库浓度低怎么排查？",
+        history=[],
+    )
+
+    assert turn is not None
+    assert "快速回答管线" in turn.context
+    assert "short_first" in turn.context
+    assert "stop_before_final_answer" not in turn.context
 
 
 def test_prepare_after_sales_turn_uses_recent_user_context():
