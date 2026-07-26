@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import hashlib
 import inspect
+import json
 import logging
 import os
 import re
@@ -4901,12 +4902,16 @@ class GatewaySlashCommandsMixin:
     ) -> None:
         if not getattr(self, "adapters", None):
             return
-        label = "维护完成" if status == "completed" else "维护失败"
-        text = (
+        effective_status, has_pending_review = self._ivd_completion_status_from_artifact(status, artifact)
+        label = "维护完成" if effective_status == "completed" else "维护失败"
+        lines = [
             f"IVD {label}：`{command_id}`。\n"
             f"范围：`{scope}`；产物：`{artifact}`。\n"
             f"可用 `/ivd status {command_id}` 查看状态。"
-        )
+        ]
+        if effective_status == "completed" and has_pending_review:
+            lines.append("提示：发现待确认项，已记录到审核队列，不会作为正式知识直接使用。")
+        text = "\n".join(lines)
         targets: list[tuple[Platform, str]] = []
         if origin_platform is not None and origin_chat_id:
             try:
@@ -4937,6 +4942,27 @@ class GatewaySlashCommandsMixin:
                 await adapter.send(chat_id, text)
             except Exception as exc:
                 logger.debug("IVD maintenance completion notice failed for %s: %s", platform.value, exc)
+
+    @staticmethod
+    def _ivd_completion_status_from_artifact(status: str, artifact: str) -> tuple[str, bool]:
+        effective_status = str(status or "failed").strip().casefold()
+        has_pending_review = False
+        try:
+            payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+        except Exception:
+            return effective_status, has_pending_review
+        artifact_status = str(payload.get("status") or "").strip().casefold() if isinstance(payload, dict) else ""
+        if artifact_status:
+            effective_status = artifact_status
+        steps = payload.get("steps") if isinstance(payload, dict) else []
+        if isinstance(steps, list):
+            has_pending_review = any(
+                isinstance(step, dict)
+                and bool(step.get("allow_failure"))
+                and int(step.get("returncode") or 0) != 0
+                for step in steps
+            )
+        return effective_status, has_pending_review
 
     def _ivd_maintenance_scope(self, raw_args: str) -> str:
         parts = raw_args.split()

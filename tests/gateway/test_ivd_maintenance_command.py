@@ -1,3 +1,4 @@
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -155,3 +156,38 @@ async def test_ivd_worker_completion_notice_is_sent_to_origin_and_peers():
     assert qq_adapter.send.call_args.args[0] == "qq-home"
     assert "维护完成" in origin_adapter.send.call_args.args[1]
     assert "ivd-123" in qq_adapter.send.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_ivd_completion_notice_prefers_completed_artifact_over_stale_status(tmp_path):
+    runner = _make_runner()
+    origin_adapter = MagicMock()
+    origin_adapter.send = AsyncMock()
+    runner.adapters = {Platform.WEIXIN: origin_adapter}
+    artifact = tmp_path / "ivd-result.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "steps": [
+                    {"name": "kb_conflict_detection", "returncode": 1, "allow_failure": True}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await runner._send_ivd_maintenance_completion_notice(
+        command_id="ivd-123",
+        scope="kb-update-20260725",
+        status="failed",
+        artifact=str(artifact),
+        origin_platform=Platform.WEIXIN,
+        origin_chat_id="origin-chat",
+        notify_platforms=(),
+    )
+
+    text = origin_adapter.send.call_args.args[1]
+    assert "维护完成" in text
+    assert "维护失败" not in text
+    assert "待确认" in text
