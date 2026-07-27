@@ -10937,6 +10937,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        if not is_internal:
+            try:
+                from gateway.review_approval_commands import (
+                    is_review_approval_command as _is_review_approval_command,
+                    review_approval_config as _review_approval_config,
+                    run_review_approval_command as _run_review_approval_command,
+                )
+
+                _review_cfg = _review_approval_config()
+                if _is_review_approval_command(event, _review_cfg):
+                    return await _run_review_approval_command(event, _review_cfg)
+            except Exception as _review_exc:
+                logger.warning("Review approval command handling failed: %s", _review_exc, exc_info=True)
+                return f"审批命令处理失败：{_review_exc}"
+
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
