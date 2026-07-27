@@ -64,6 +64,8 @@ def test_review_approval_config_defaults_disabled(monkeypatch):
         "上一頁",
         "D5",
         "A1 S2 Q3",
+        "123通过、456不通过",
+        "1、2通过，3不通过",
     ],
 )
 def test_weixin_dm_review_commands_match_when_enabled(monkeypatch, text):
@@ -89,6 +91,7 @@ def test_non_weixin_or_normal_text_does_not_match(monkeypatch):
     assert not is_review_approval_command(_event("N", Platform.WEIXIN, "group"), cfg)
     assert not is_review_approval_command(_event("NIFTY灰区报告怎么处理"), cfg)
     assert not is_review_approval_command(_event("下一页是什么操作"), cfg)
+    assert not is_review_approval_command(_event("123通过是什么意思"), cfg)
 
 
 def test_build_review_approval_command_quotes_message():

@@ -22,6 +22,11 @@ _DETAIL_RE = re.compile(r"^[Dd]\s*\d+$")
 _TRAILING_REPLY_PUNCTUATION = " \t\r\n。.!！?？；;，,、"
 _NEXT_PAGE_ALIASES = {"N", "NEXT", "下一页", "下页", "下一頁", "下頁"}
 _PREV_PAGE_ALIASES = {"P", "PREV", "PREVIOUS", "上一页", "上页", "上一頁", "上頁"}
+_CHINESE_DECISION_SEPARATOR_RE = re.compile(r"^[、,，\s]*$")
+_CHINESE_DECISION_RE = re.compile(
+    r"([0-9][0-9、,，\s]*)\s*"
+    r"(不通过|不通過|补来源|補來源|待确认|待確認|拒绝|拒絕|跳过|跳過|通过|通過|同意)"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -78,6 +83,10 @@ def is_review_approval_command(event: MessageEvent, config: ReviewApprovalConfig
     if upper in _NEXT_PAGE_ALIASES or upper in _PREV_PAGE_ALIASES:
         return True
     if _DETAIL_RE.fullmatch(text):
+        return True
+    if _CHINESE_DECISION_RE.search(text) and _CHINESE_DECISION_SEPARATOR_RE.fullmatch(
+        _CHINESE_DECISION_RE.sub("", text)
+    ):
         return True
     parts = text.split()
     return bool(parts) and all(_ACTION_RE.fullmatch(part) for part in parts)
