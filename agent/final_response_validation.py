@@ -112,6 +112,17 @@ def evaluate_final_response(
     try:
         result = validator(response)
     except Exception as exc:
+        if getattr(validator, "fail_closed", False):
+            fallback = str(
+                getattr(validator, "error_fallback", "")
+                or "当前正式知识校验暂时不可用，已停止发送未经校验的结论。请稍后重试。"
+            ).strip()
+            return FinalResponseDecision(
+                action="fallback",
+                response=fallback,
+                reasons=("validator_error",),
+                error=str(exc),
+            )
         return FinalResponseDecision(
             action="accept",
             response=response,

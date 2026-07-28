@@ -21898,16 +21898,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Clear the callback on unrelated cached-agent turns. When a
             # workflow card matched, validation runs inside conversation_loop
             # before the assistant message is persisted.
-            agent._final_response_validator = (
-                (
-                    lambda answer, _turn=_after_sales_turn, _agent=agent: _turn.validate(
-                        answer,
-                        messages=getattr(_agent, "_session_messages", []),
-                    )
+            if _after_sales_turn is not None and _after_sales_turn.has_validator:
+                from gateway.after_sales_guard import CriticalAfterSalesValidator
+
+                agent._final_response_validator = CriticalAfterSalesValidator(
+                    turn=_after_sales_turn,
+                    messages_provider=lambda _agent=agent: getattr(
+                        _agent, "_session_messages", []
+                    ),
                 )
-                if _after_sales_turn is not None and _after_sales_turn.has_validator
-                else None
-            )
+            else:
+                agent._final_response_validator = None
             # Store agent reference for interrupt support
             agent_holder[0] = agent
             # Capture the full tool definitions for transcript logging

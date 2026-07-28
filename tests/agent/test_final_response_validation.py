@@ -113,6 +113,21 @@ def test_validator_exception_fails_open():
     assert decision.error == "boom"
 
 
+def test_critical_validator_exception_uses_safe_fallback():
+    def broken(_text):
+        raise RuntimeError("validator unavailable")
+
+    broken.fail_closed = True
+    broken.error_fallback = "当前正式知识校验暂时不可用，已停止发送未经校验的结论。请稍后重试。"
+
+    decision = evaluate_final_response(broken, "unverified response", attempts=0)
+
+    assert decision.action == "fallback"
+    assert decision.response == broken.error_fallback
+    assert decision.reasons == ("validator_error",)
+    assert decision.error == "validator unavailable"
+
+
 def test_validation_retry_scaffolding_is_never_persisted():
     message = {
         "role": "user",

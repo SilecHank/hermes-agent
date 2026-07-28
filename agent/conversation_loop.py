@@ -6286,7 +6286,8 @@ def run_conversation(
 
                 if _validation_decision is not None and _validation_decision.error:
                     logger.warning(
-                        "Final response validator error; accepting response: %s",
+                        "Final response validator error; policy action=%s: %s",
+                        _validation_decision.action,
                         _validation_decision.error,
                     )
                 if (

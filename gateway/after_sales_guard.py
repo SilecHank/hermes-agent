@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Callable
 
 
 MEASUREMENT_VALUE_RE = re.compile(
@@ -64,6 +64,22 @@ class AfterSalesTurn:
             if result.ok
             else self.validator.build_safe_clarification(result, self.facts),
         }
+
+
+@dataclass(frozen=True)
+class CriticalAfterSalesValidator:
+    """Callable policy that prevents unvalidated formal answers from escaping."""
+
+    turn: AfterSalesTurn
+    messages_provider: Callable[[], list[dict[str, Any]]]
+    fail_closed: bool = True
+    error_fallback: str = (
+        "当前正式知识校验暂时不可用，已停止发送未经校验的结论。请稍后重试；"
+        "如问题紧急，请提供产品、流程阶段和异常指标后转人工确认。"
+    )
+
+    def __call__(self, answer: str) -> dict[str, Any]:
+        return self.turn.validate(answer, messages=self.messages_provider())
 
 
 def _trusted_tool_numeric_claims(

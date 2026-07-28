@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from gateway.after_sales_guard import prepare_after_sales_turn
+from gateway.after_sales_guard import CriticalAfterSalesValidator, prepare_after_sales_turn
 
 
 KB = Path("/home/slim/IVD-KnowledgeHub")
@@ -174,6 +174,21 @@ def test_after_sales_turn_validates_before_persistence():
     assert invalid["fallback"]
     assert allowed["ok"] is True
     assert turn.has_validator is True
+
+
+def test_facts_matched_turn_uses_critical_validator_policy():
+    turn = prepare_after_sales_turn(
+        _config(),
+        platform="qqbot",
+        message="NIFTY文库浓度低，48例和96例都出现。",
+        history=[],
+    )
+
+    validator = CriticalAfterSalesValidator(turn=turn, messages_provider=list)
+
+    assert validator.fail_closed is True
+    assert "未经校验" in validator.error_fallback
+    assert validator("48例和96例均出现文库浓度走低。")
 
 
 def test_prepare_after_sales_turn_infers_unit_for_user_supplied_range():
