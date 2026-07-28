@@ -95,6 +95,7 @@ BACKOFF_DELAY_SECONDS = 30
 SESSION_EXPIRED_ERRCODE = -14
 RATE_LIMIT_ERRCODE = -2  # iLink frequency limit — backoff and retry
 MESSAGE_DEDUP_TTL_SECONDS = 300
+CONTENT_DEDUP_TTL_SECONDS = 2
 
 
 def _is_stale_session_ret(
@@ -1159,6 +1160,7 @@ class WeixinAdapter(BasePlatformAdapter):
         self._send_session: Optional[aiohttp.ClientSession] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
+        self._content_dedup = MessageDeduplicator(ttl_seconds=CONTENT_DEDUP_TTL_SECONDS)
 
         self._account_id = str(extra.get("account_id") or get_secret("WEIXIN_ACCOUNT_ID", "")).strip()
         self._token = str(config.token or extra.get("token") or get_secret("WEIXIN_TOKEN", "")).strip()
@@ -1413,12 +1415,13 @@ class WeixinAdapter(BasePlatformAdapter):
         if message_id and self._dedup.is_duplicate(message_id):
             return
 
-        # Secondary content-fingerprint dedup for text messages
+        # Message IDs are authoritative. Content fingerprints are only a
+        # short fallback for upstream events that do not provide an ID.
         item_list = message.get("item_list") or []
         text = _extract_text(item_list)
-        if text:
+        if text and not message_id:
             content_key = f"content:{sender_id}:{hashlib.md5(text.encode()).hexdigest()}"
-            if self._dedup.is_duplicate(content_key):
+            if self._content_dedup.is_duplicate(content_key):
                 logger.debug("[%s] Content-dedup: skipping duplicate message from %s", self.name, sender_id)
                 return
 
@@ -1469,6 +1472,11 @@ class WeixinAdapter(BasePlatformAdapter):
         )
         logger.info("[%s] inbound from=%s type=%s media=%d", self.name, _safe_id(sender_id), source.chat_type, len(media_paths))
         if event.message_type == MessageType.TEXT:
+            from gateway.review_approval_commands import is_review_interaction_text
+
+            if is_review_interaction_text(event.text):
+                await self.handle_message(event)
+                return
             self._enqueue_text_event(event)
         else:
             await self.handle_message(event)

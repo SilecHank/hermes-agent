@@ -72,8 +72,8 @@ def resolve_max_concurrent_sessions(config: Any) -> Optional[int]:
 
 def active_session_limit_message(active_count: int, max_sessions: int) -> str:
     return (
-        f"Hermes is at the active session limit ({active_count}/{max_sessions}). "
-        "Try again when another session finishes."
+        f"当前任务较多（{active_count}/{max_sessions}），这条消息暂未开始处理。"
+        "请稍后重发，已有任务完成后即可继续。"
     )
 
 

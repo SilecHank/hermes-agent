@@ -58,8 +58,8 @@ def test_active_session_lease_blocks_until_release(tmp_path, monkeypatch):
 
     assert blocked_lease is None
     assert blocked_message == (
-        "Hermes is at the active session limit (1/1). "
-        "Try again when another session finishes."
+        "当前任务较多（1/1），这条消息暂未开始处理。"
+        "请稍后重发，已有任务完成后即可继续。"
     )
 
     lease.release()

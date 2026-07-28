@@ -59,6 +59,24 @@ def normalize_review_approval_text(text: str | None) -> str:
     return normalized.strip(_TRAILING_REPLY_PUNCTUATION)
 
 
+def is_review_interaction_text(text: str | None) -> bool:
+    """Return whether text is a stateful review navigation/decision command."""
+    normalized = normalize_review_approval_text(text)
+    if not normalized:
+        return False
+    upper = normalized.upper()
+    if upper in _NEXT_PAGE_ALIASES or upper in _PREV_PAGE_ALIASES:
+        return True
+    if _DETAIL_RE.fullmatch(normalized):
+        return True
+    if _CHINESE_DECISION_RE.search(normalized) and _CHINESE_DECISION_SEPARATOR_RE.fullmatch(
+        _CHINESE_DECISION_RE.sub("", normalized)
+    ):
+        return True
+    parts = normalized.split()
+    return bool(parts) and all(_ACTION_RE.fullmatch(part) for part in parts)
+
+
 def _normalized_platform(event: MessageEvent) -> str:
     platform = getattr(event.source, "platform", "")
     return str(getattr(platform, "value", platform) or "").strip().lower()
@@ -76,20 +94,7 @@ def is_review_approval_command(event: MessageEvent, config: ReviewApprovalConfig
         return False
     if cfg.chat_type and _normalized_chat_type(event) != cfg.chat_type:
         return False
-    text = normalize_review_approval_text(event.text)
-    if not text:
-        return False
-    upper = text.upper()
-    if upper in _NEXT_PAGE_ALIASES or upper in _PREV_PAGE_ALIASES:
-        return True
-    if _DETAIL_RE.fullmatch(text):
-        return True
-    if _CHINESE_DECISION_RE.search(text) and _CHINESE_DECISION_SEPARATOR_RE.fullmatch(
-        _CHINESE_DECISION_RE.sub("", text)
-    ):
-        return True
-    parts = text.split()
-    return bool(parts) and all(_ACTION_RE.fullmatch(part) for part in parts)
+    return is_review_interaction_text(event.text)
 
 
 def build_review_approval_shell_command(config: ReviewApprovalConfig, message: str) -> str:

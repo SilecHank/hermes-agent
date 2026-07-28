@@ -938,11 +938,9 @@ class TestIsStaleSessionRet:
 
 
 class TestWeixinContentDedup:
-    """Regression tests for Issue #16182 — upstream API sends duplicate content
-    with different message_ids, bypassing message_id deduplication.
-    """
+    """Message IDs are authoritative; content is only a short fallback."""
 
-    def test_duplicate_content_with_different_message_ids_is_dropped(self):
+    def test_duplicate_content_with_different_message_ids_is_preserved(self):
         adapter = _make_adapter()
         adapter._poll_session = object()
         adapter.handle_message = AsyncMock()
@@ -965,11 +963,51 @@ class TestWeixinContentDedup:
 
         asyncio.run(_drive())
 
-        # Content-dedup drops the second (duplicate) message before it is even
-        # enqueued, so only one combined dispatch reaches handle_message.
+        # Both upstream events are real when their IDs differ. The normal text
+        # debounce may combine them, but content dedupe must not discard one.
         assert adapter.handle_message.await_count == 1
         event = adapter.handle_message.await_args[0][0]
-        assert event.text == "hello world"
+        assert event.text == "hello world\nhello world"
+
+    def test_review_commands_with_different_message_ids_dispatch_immediately(self):
+        adapter = _make_adapter()
+        adapter._poll_session = object()
+        adapter.handle_message = AsyncMock()
+
+        base_msg = {
+            "from_user_id": "wxid_user1",
+            "item_list": [{"type": 1, "text_item": {"text": "N"}}],
+        }
+
+        async def _drive():
+            await adapter._process_message({**base_msg, "message_id": "msg-1"})
+            await adapter._process_message({**base_msg, "message_id": "msg-2"})
+
+        asyncio.run(_drive())
+
+        assert adapter.handle_message.await_count == 2
+        assert [call.args[0].text for call in adapter.handle_message.await_args_list] == ["N", "N"]
+
+    def test_duplicate_content_without_message_id_uses_short_fallback_dedup(self):
+        adapter = _make_adapter()
+        adapter._poll_session = object()
+        adapter.handle_message = AsyncMock()
+        adapter._text_batch_delay_seconds = 0.05
+        adapter._text_batch_split_delay_seconds = 0.05
+        message = {
+            "from_user_id": "wxid_user1",
+            "item_list": [{"type": 1, "text_item": {"text": "hello world"}}],
+        }
+
+        async def _drive():
+            await adapter._process_message(message)
+            await adapter._process_message(message)
+            await asyncio.sleep(0.2)
+
+        asyncio.run(_drive())
+
+        assert adapter.handle_message.await_count == 1
+        assert adapter.handle_message.await_args[0][0].text == "hello world"
 
     def test_content_dedup_not_called_for_messages_without_text(self):
         adapter = _make_adapter()
