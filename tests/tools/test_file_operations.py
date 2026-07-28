@@ -757,6 +757,76 @@ class TestSearchFilesFallbackHiddenPaths:
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
 
 
+class TestIVDKnowledgeSearchBoundary:
+    @staticmethod
+    def _ops():
+        env = MagicMock()
+        env.cwd = "/"
+
+        def execute(command, **kwargs):
+            completed = subprocess.run(
+                command,
+                shell=True,
+                executable="/bin/bash",
+                text=True,
+                capture_output=True,
+            )
+            return {"output": completed.stdout + completed.stderr, "returncode": completed.returncode}
+
+        env.execute = execute
+        return ShellFileOperations(env)
+
+    @staticmethod
+    def _kb(tmp_path):
+        kb = tmp_path / "IVD-KnowledgeHub" / "knowledge-base"
+        files = {
+            "formal": kb / "reference" / "formal.md",
+            "extracted": kb / "_extracted" / "truncated.md",
+            "matrix": kb / "matrices" / "case-mechanism-candidates.tsv",
+            "archive": kb / "archive" / "old.md",
+        }
+        for path in files.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("needle\n", encoding="utf-8")
+        return kb, files
+
+    def test_broad_ivd_content_search_excludes_non_formal_layers(self, tmp_path):
+        kb, files = self._kb(tmp_path)
+
+        result = self._ops().search("needle", path=str(kb), target="content")
+
+        paths = {match.path for match in result.matches}
+        assert paths == {str(files["formal"])}
+
+    def test_broad_ivd_file_search_excludes_non_formal_layers(self, tmp_path):
+        kb, files = self._kb(tmp_path)
+
+        result = self._ops().search("*.md", path=str(kb), target="files")
+
+        assert set(result.files) == {str(files["formal"])}
+
+    def test_explicit_candidate_directory_search_remains_available_for_maintenance(self, tmp_path):
+        kb, files = self._kb(tmp_path)
+
+        result = self._ops().search("needle", path=str(kb / "_extracted"), target="content")
+
+        assert {match.path for match in result.matches} == {str(files["extracted"])}
+
+    def test_answer_mode_returns_direct_chinese_budget_signal(self, tmp_path):
+        from gateway.ivd_runtime import begin_ivd_answer_turn, end_ivd_answer_turn
+
+        kb, _ = self._kb(tmp_path)
+        ops = self._ops()
+        token = begin_ivd_answer_turn(max_searches=1, mode="answer")
+        try:
+            assert ops.search("needle", path=str(kb), target="content").error is None
+            blocked = ops.search("needle", path=str(kb), target="content")
+        finally:
+            end_ivd_answer_turn(token)
+
+        assert "检索预算" in blocked.error
+        assert "现有证据" in blocked.error
+
 class TestShellFileOpsWriteDenied:
     def test_write_file_denied_path(self, file_ops):
         result = file_ops.write_file("~/.ssh/authorized_keys", "evil key")

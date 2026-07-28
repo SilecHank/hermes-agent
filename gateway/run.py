@@ -22213,6 +22213,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
+            _ivd_runtime_token = None
+            _after_sales_config = user_config.get("after_sales_guard") or {}
+            _after_sales_platforms = _after_sales_config.get("platforms") or []
+            if isinstance(_after_sales_platforms, str):
+                _after_sales_platforms = [
+                    item.strip() for item in _after_sales_platforms.split(",") if item.strip()
+                ]
+            if (
+                isinstance(_after_sales_config, dict)
+                and _after_sales_config.get("enabled", False)
+                and platform_key in _after_sales_platforms
+            ):
+                from gateway.ivd_runtime import begin_ivd_answer_turn
+
+                _ivd_runtime_token = begin_ivd_answer_turn(
+                    max_searches=1 if (_after_sales_turn and _after_sales_turn.fast_path) else 4,
+                    mode="answer",
+                )
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
@@ -22265,6 +22283,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
+                if _ivd_runtime_token is not None:
+                    from gateway.ivd_runtime import end_ivd_answer_turn
+
+                    end_ivd_answer_turn(_ivd_runtime_token)
                 # Cancel any pending clarify entries so blocked agent
                 # threads don't hang past the end of the run (interrupt,
                 # completion, gateway shutdown).  Idempotent.

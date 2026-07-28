@@ -26,6 +26,7 @@ class AfterSalesTurn:
     facts: dict[str, Any]
     validator: ModuleType | None
     allowed_numeric_claims: tuple[str, ...]
+    fast_path: bool = False
 
     @property
     def has_validator(self) -> bool:
@@ -157,6 +158,7 @@ def prepare_after_sales_turn(
             facts={},
             validator=None,
             allowed_numeric_claims=(),
+            fast_path=True,
         )
 
     context = module.render_fact_context(match)
@@ -184,6 +186,7 @@ def prepare_after_sales_turn(
         facts=match["facts"],
         validator=validator,
         allowed_numeric_claims=tuple(dict.fromkeys(allowed_numeric_claims)),
+        fast_path=bool(fast_context),
     )
 
 

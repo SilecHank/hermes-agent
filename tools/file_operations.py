@@ -2049,6 +2049,31 @@ class ShellFileOperations(FileOperations):
     # =========================================================================
     # SEARCH Implementation
     # =========================================================================
+
+    _IVD_NON_FORMAL_GLOBS = (
+        "!**/_extracted/**",
+        "!**/matrices/**",
+        "!**/archive/**",
+        "!**/deprecated/**",
+        "!**/superseded/**",
+        "!**/*candidate*",
+    )
+
+    @classmethod
+    def _ivd_broad_search_excludes(cls, path: str) -> tuple[str, ...]:
+        """Exclude evaluation-only layers only for broad IVD KB searches."""
+        parts = Path(path).parts
+        if "IVD-KnowledgeHub" not in parts:
+            return ()
+        if Path(path).name not in {"IVD-KnowledgeHub", "knowledge-base"}:
+            return ()
+        return cls._IVD_NON_FORMAL_GLOBS
+
+    def _rg_ivd_exclude_args(self, path: str) -> str:
+        return " ".join(
+            f"-g {self._escape_shell_arg(pattern)}"
+            for pattern in self._ivd_broad_search_excludes(path)
+        )
     
     def search(self, pattern: str, path: str = ".", target: str = "content",
                file_glob: Optional[str] = None, limit: int = 50, offset: int = 0,
@@ -2070,6 +2095,20 @@ class ShellFileOperations(FileOperations):
             SearchResult with matches or file list
         """
         offset, limit = normalize_search_pagination(offset, limit)
+
+        try:
+            from gateway.ivd_runtime import consume_ivd_search
+
+            search_allowed, search_number, search_limit = consume_ivd_search()
+        except Exception:
+            search_allowed, search_number, search_limit = True, 0, 0
+        if not search_allowed:
+            return SearchResult(
+                error=(
+                    f"本轮检索预算已用完（{search_number - 1}/{search_limit}）。"
+                    "请基于现有证据先给结论和边界；只有用户明确要求深挖时再升级检索。"
+                )
+            )
 
         # Expand ~ and other shell paths
         path = self._expand_path(path)
@@ -2215,9 +2254,12 @@ class ShellFileOperations(FileOperations):
             glob_pattern = pattern
 
         fetch_limit = limit + offset
+        exclude_args = self._rg_ivd_exclude_args(path)
+        if exclude_args:
+            exclude_args += " "
         # Try mtime-sorted first (rg 13+); fall back to unsorted if not supported.
         cmd_sorted = (
-            f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} "
+            f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} {exclude_args}"
             f"{self._escape_shell_arg(path)} 2>/dev/null "
             f"| head -n {fetch_limit}"
         )
@@ -2228,7 +2270,7 @@ class ShellFileOperations(FileOperations):
         if not all_files and not limit_reason:
             # --sortr may have failed on older rg; retry without it.
             cmd_plain = (
-                f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
+                f"rg --files -g {self._escape_shell_arg(glob_pattern)} {exclude_args}"
                 f"{self._escape_shell_arg(path)} 2>/dev/null "
                 f"| head -n {fetch_limit}"
             )
@@ -2276,6 +2318,8 @@ class ShellFileOperations(FileOperations):
         # Add file glob filter (must be quoted to prevent shell expansion)
         if file_glob:
             cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
+        for exclude_glob in self._ivd_broad_search_excludes(path):
+            cmd_parts.extend(["--glob", self._escape_shell_arg(exclude_glob)])
         
         # Output mode handling
         if output_mode == "files_only":
