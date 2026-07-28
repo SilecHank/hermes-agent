@@ -27,6 +27,9 @@ class AfterSalesTurn:
     validator: ModuleType | None
     allowed_numeric_claims: tuple[str, ...]
     fast_path: bool = False
+    route_id: str = ""
+    route_version: str = ""
+    source_paths: tuple[str, ...] = ()
 
     @property
     def has_validator(self) -> bool:
@@ -149,7 +152,8 @@ def prepare_after_sales_turn(
         validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
         match = module.match_case_facts(cards_dir, message=message, history=history)
 
-    fast_context = _render_fast_response_context(guard, message=message, match=match)
+    fast_result = _render_fast_response_context(guard, message=message, match=match)
+    fast_context = str(fast_result.get("context") or "")
     if match is None:
         if not fast_context:
             return None
@@ -159,6 +163,9 @@ def prepare_after_sales_turn(
             validator=None,
             allowed_numeric_claims=(),
             fast_path=True,
+            route_id=str(fast_result.get("route_id") or "fast_preflight"),
+            route_version=str(fast_result.get("route_version") or ""),
+            source_paths=tuple(fast_result.get("source_paths") or ()),
         )
 
     context = module.render_fact_context(match)
@@ -187,6 +194,16 @@ def prepare_after_sales_turn(
         validator=validator,
         allowed_numeric_claims=tuple(dict.fromkeys(allowed_numeric_claims)),
         fast_path=bool(fast_context),
+        route_id=str(fast_result.get("route_id") or match["facts"].get("workflow_id") or "facts"),
+        route_version=str(fast_result.get("route_version") or ""),
+        source_paths=tuple(
+            fast_result.get("source_paths")
+            or (
+                source.get("resolved_path", "")
+                for source in match["facts"].get("authoritative_sources", ())
+                if source.get("resolved_path")
+            )
+        ),
     )
 
 
@@ -195,10 +212,10 @@ def _render_fast_response_context(
     *,
     message: str,
     match: dict[str, Any] | None,
-) -> str:
+) -> dict[str, Any]:
     module_path = Path(str(guard.get("fast_response_module") or ""))
     if not module_path.is_file():
-        return ""
+        return {}
     try:
         kb_root = str(module_path.parent.parent)
         if kb_root not in sys.path:
@@ -207,10 +224,10 @@ def _render_fast_response_context(
         question_type = _question_type_from_match(match)
         plan = module.build_fast_response_plan(message, question_type=question_type)
     except Exception:
-        return ""
+        return {}
     runtime_preflight = plan.get("runtime_preflight") or {}
     if not runtime_preflight.get("eligible", False):
-        return ""
+        return {}
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
     initial_files = [
@@ -228,7 +245,13 @@ def _render_fast_response_context(
     if initial_files:
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
     lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
-    return "\n".join(lines)
+    fast_path = plan.get("fast_path") or {}
+    return {
+        "context": "\n".join(lines),
+        "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
+        "route_version": runtime_preflight.get("route_version", ""),
+        "source_paths": tuple(initial_files),
+    }
 
 
 def _question_type_from_match(match: dict[str, Any] | None) -> str:

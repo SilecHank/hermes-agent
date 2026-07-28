@@ -22212,6 +22212,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
 
             _approval_session_key = session_key or ""
+            _ivd_started_at = time.monotonic()
             _approval_session_token = set_current_session_key(_approval_session_key)
             _ivd_runtime_token = None
             _after_sales_config = user_config.get("after_sales_guard") or {}
@@ -22317,6 +22318,70 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+
+            if (
+                isinstance(_after_sales_config, dict)
+                and _after_sales_config.get("enabled", False)
+                and platform_key in _after_sales_platforms
+            ):
+                try:
+                    from gateway.after_sales_telemetry import append_runtime_event, build_runtime_event
+                    from hermes_constants import get_hermes_home
+
+                    _turn_messages = result.get("messages") or []
+                    _recent_turn_messages = []
+                    for _message_item in reversed(_turn_messages):
+                        _recent_turn_messages.append(_message_item)
+                        if _message_item.get("role") == "user":
+                            break
+                    _tool_names = []
+                    for _message_item in reversed(_recent_turn_messages):
+                        for _tool_call in _message_item.get("tool_calls") or []:
+                            _tool_names.append(
+                                str((_tool_call.get("function") or {}).get("name") or "")
+                            )
+                    _validation_status = "not_applicable"
+                    if _after_sales_turn is not None and _after_sales_turn.has_validator:
+                        _validation = _after_sales_turn.validate(
+                            str(final_response or ""),
+                            messages=_turn_messages,
+                        )
+                        _validation_status = "pass" if _validation.get("ok") else "fallback"
+                    _event = build_runtime_event(
+                        platform=platform_key,
+                        session_key=session_key or session_id or "",
+                        product_scope=(
+                            str(_after_sales_turn.facts.get("product") or "")
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        route_id=(
+                            _after_sales_turn.route_id
+                            if _after_sales_turn is not None
+                            else "standard"
+                        ),
+                        route_version=(
+                            _after_sales_turn.route_version
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        fast_path=bool(_after_sales_turn and _after_sales_turn.fast_path),
+                        elapsed_seconds=time.monotonic() - _ivd_started_at,
+                        api_calls=int(result.get("api_calls") or 0),
+                        tool_names=_tool_names,
+                        source_paths=(
+                            _after_sales_turn.source_paths
+                            if _after_sales_turn is not None
+                            else ()
+                        ),
+                        validation_status=_validation_status,
+                    )
+                    _telemetry_path = _after_sales_config.get("runtime_events_path") or (
+                        get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"
+                    )
+                    append_runtime_event(_telemetry_path, _event)
+                except Exception as _telemetry_exc:
+                    logger.warning("IVD runtime telemetry skipped: %s", _telemetry_exc)
 
             # Sync session_id immediately after run_conversation(). Compression
             # can rotate before a follow-up model call fails; the failure return
