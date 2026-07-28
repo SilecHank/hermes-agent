@@ -105,6 +105,57 @@ class TestShouldResetReason:
         source = _make_source()
         assert store._should_reset(entry, source) is None
 
+    def test_prompt_token_limit_preserves_session_below_threshold(self, tmp_path):
+        store = _make_store_with_db(
+            tmp_path,
+            policy=SessionResetPolicy(mode="none", max_prompt_tokens=60_000),
+        )
+        source = _make_source()
+        original = store.get_or_create_session(source)
+        original.last_prompt_tokens = 59_999
+        store._save()
+
+        current = store.get_or_create_session(source)
+
+        assert current.session_id == original.session_id
+        assert current.was_auto_reset is False
+
+    def test_prompt_token_limit_resets_at_threshold_even_when_mode_is_none(
+        self, tmp_path
+    ):
+        store = _make_store_with_db(
+            tmp_path,
+            policy=SessionResetPolicy(mode="none", max_prompt_tokens=60_000),
+        )
+        source = _make_source()
+        original = store.get_or_create_session(source)
+        original.last_prompt_tokens = 60_000
+        store._save()
+
+        replacement = store.get_or_create_session(source)
+
+        assert replacement.session_id != original.session_id
+        assert replacement.was_auto_reset is True
+        assert replacement.auto_reset_reason == "prompt_tokens"
+        assert replacement.prev_session_id == original.session_id
+        assert replacement.reset_had_activity is True
+
+    def test_active_process_blocks_prompt_token_reset(self, tmp_path):
+        store = _make_store(
+            SessionResetPolicy(mode="none", max_prompt_tokens=60_000),
+            tmp_path,
+            has_active_processes_fn=lambda _session_key: True,
+        )
+        source = _make_source()
+        original = store.get_or_create_session(source)
+        original.last_prompt_tokens = 60_000
+        store._save()
+
+        current = store.get_or_create_session(source)
+
+        assert current.session_id == original.session_id
+        assert current.was_auto_reset is False
+
     def test_returns_none_when_active_process_check_raises(self, tmp_path):
         def _raise(_session_key):
             raise RuntimeError("process registry unavailable")

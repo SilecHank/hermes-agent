@@ -17,6 +17,7 @@ stale entry, falling through to `_recover_session_from_db` (which reopens
 transcript) or, failing recovery, to a fresh session.
 """
 
+import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -120,6 +121,44 @@ class TestIsSessionEndedInDb:
 # ---------------------------------------------------------------------------
 
 class TestRuntimeStaleGuard:
+    def test_prompt_token_reset_persists_new_route_and_session_boundary(
+        self, tmp_path
+    ):
+        from hermes_state import SessionDB
+
+        source = _source()
+        config = GatewayConfig(
+            default_reset_policy=SessionResetPolicy(
+                mode="none",
+                max_prompt_tokens=60_000,
+            ),
+        )
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        db = SessionDB(db_path=tmp_path / "state.db")
+        store._db = db
+        store._loaded = True
+
+        original = store.get_or_create_session(source)
+        store.update_session(original.session_key, last_prompt_tokens=60_000)
+
+        replacement = store.get_or_create_session(source)
+
+        assert replacement.session_id != original.session_id
+        assert db.get_session(original.session_id)["end_reason"] == "prompt_tokens"
+        assert db.get_session(replacement.session_id)["end_reason"] is None
+        assert store._entries[original.session_key].session_id == replacement.session_id
+
+        routing = db.load_gateway_routing_entries(scope=store._routing_scope())
+        persisted_entry = json.loads(routing[original.session_key])
+        assert persisted_entry["session_id"] == replacement.session_id
+
+        with (store.sessions_dir / "sessions.json").open(encoding="utf-8") as handle:
+            mirror = json.load(handle)
+        assert mirror[original.session_key]["session_id"] == replacement.session_id
+
+        db.close()
+
     def test_stale_agent_close_entry_recovered_preserving_session_id(self, tmp_path):
         """Stale `agent_close` entry → recovery reopens the SAME session_id."""
         source = _source()

@@ -781,7 +781,7 @@ class SessionEntry:
     # Set when a session was created because the previous one expired;
     # consumed once by the message handler to inject a notice into context
     was_auto_reset: bool = False
-    auto_reset_reason: Optional[str] = None  # "idle" or "daily"
+    auto_reset_reason: Optional[str] = None  # e.g. "idle", "daily", "prompt_tokens"
     reset_had_activity: bool = False  # whether the expired session had any messages
 
     # When this session was created by an auto-reset, the session_id of the
@@ -2021,7 +2021,7 @@ class SessionStore:
         """
         Check if a session should be reset based on policy.
         
-        Returns the reset reason ("idle" or "daily") if a reset is needed,
+        Returns the reset reason ("idle", "daily", or "prompt_tokens") if a reset is needed,
         or None if the session is still valid.
         
         Sessions with active background processes are never reset.
@@ -2038,6 +2038,12 @@ class SessionStore:
             platform=source.platform,
             session_type=source.chat_type
         )
+
+        if (
+            policy.max_prompt_tokens > 0
+            and entry.last_prompt_tokens >= policy.max_prompt_tokens
+        ):
+            return "prompt_tokens"
         
         if policy.mode == "none":
             return None
