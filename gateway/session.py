@@ -949,7 +949,7 @@ def build_channel_continuity_note(
     entry: "SessionEntry",
     source: SessionSource,
 ) -> Optional[str]:
-    """Build a lightweight session-continuity hint for Slack/Discord channels.
+    """Build a lightweight session-continuity hint after an auto-reset.
 
     Slack and Discord channels/threads are long-lived: when the daily/idle
     reset policy starts a fresh session, the agent loses the thread's prior
@@ -958,20 +958,40 @@ def build_channel_continuity_note(
     specific prior session in *this* channel/thread so it recalls that
     context via ``session_search`` before acting.
 
+    Prompt-token rollovers are quality boundaries rather than topic changes.
+    They receive the same scoped pointer on every platform, using
+    ``conversation`` wording outside Slack/Discord.  The pointer deliberately
+    carries only the previous session id; it never embeds history or creates a
+    summary.
+
     Returns ``None`` (and the caller adds nothing) unless **all** hold:
-      - the source platform is Slack or Discord,
       - this session was created by an auto-reset that had real activity,
-      - the previous session_id was recorded on the entry.
+      - the previous session_id was recorded on the entry,
+      - the reset was caused by prompt tokens, or the source is Slack/Discord.
 
     No LLM calls, no extra API/DB lookups — the previous session id is
     already known from :meth:`SessionStore.get_or_create_session`.
     """
-    if source.platform not in (Platform.SLACK, Platform.DISCORD):
-        return None
     if not getattr(entry, "reset_had_activity", False):
         return None
     prev = getattr(entry, "prev_session_id", None)
     if not prev:
+        return None
+
+    is_channel_platform = source.platform in (Platform.SLACK, Platform.DISCORD)
+    if getattr(entry, "auto_reset_reason", None) == "prompt_tokens":
+        where = (
+            "thread" if source.thread_id else "channel"
+        ) if is_channel_platform else "conversation"
+        return (
+            f"[System note: This {where} continues from an earlier Hermes "
+            f"session (session_id: {prev}) after a prompt-token quality "
+            f"rollover. Only if the current request depends on prior context, "
+            f"use the session_search tool for that specific session. Do not "
+            f"load the full prior transcript or create a summary by default.]"
+        )
+
+    if not is_channel_platform:
         return None
 
     where = "thread" if source.thread_id else "channel"
@@ -982,6 +1002,43 @@ def build_channel_continuity_note(
         f"use the session_search tool to recall that prior session before "
         f"acting — do not assume an unrelated recent session is the right "
         f"context.]"
+    )
+
+
+def build_auto_reset_notice(
+    reset_reason: str,
+    policy: SessionResetPolicy,
+) -> str:
+    """Return deterministic user-facing copy for an automatic session reset."""
+    if reset_reason == "prompt_tokens":
+        return (
+            "为保持回答质量，已自动开启新会话。"
+            "旧记录仍保留，仅在当前问题依赖旧上下文时按需检索。"
+        )
+
+    if reset_reason == "suspended":
+        reason_text = "previous session was stopped or interrupted"
+    elif reset_reason == "resume_pending_expired":
+        reason_text = "gateway restart recovery timed out"
+    elif reset_reason == "daily":
+        reason_text = f"daily schedule at {policy.at_hour}:00"
+    else:
+        hours = policy.idle_minutes // 60
+        mins = policy.idle_minutes % 60
+        duration = (
+            f"{hours}h"
+            if not mins
+            else f"{hours}h {mins}m"
+            if hours
+            else f"{mins}m"
+        )
+        reason_text = f"inactive for {duration}"
+
+    return (
+        f"◐ Session automatically reset ({reason_text}). "
+        f"Conversation history cleared.\n"
+        f"Use /resume to browse and restore a previous session.\n"
+        f"Adjust reset timing in config.yaml under session_reset."
     )
 
 

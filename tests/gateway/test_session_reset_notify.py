@@ -16,7 +16,12 @@ from gateway.config import (
     Platform,
     SessionResetPolicy,
 )
-from gateway.session import SessionEntry, SessionSource, SessionStore
+from gateway.session import (
+    SessionEntry,
+    SessionSource,
+    SessionStore,
+    build_auto_reset_notice,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +269,19 @@ class TestSessionEntryReason:
 # ---------------------------------------------------------------------------
 
 class TestResetPolicyNotify:
+    def test_prompt_token_notice_is_plain_chinese_and_keeps_history_available(self):
+        notice = build_auto_reset_notice(
+            "prompt_tokens",
+            SessionResetPolicy(mode="none", max_prompt_tokens=60_000),
+        )
+
+        assert "为保持回答质量" in notice
+        assert "开启新会话" in notice
+        assert "旧记录仍保留" in notice
+        assert "按需检索" in notice
+        assert "history cleared" not in notice.lower()
+        assert "/resume" not in notice
+
     def test_notify_defaults_true(self):
         policy = SessionResetPolicy()
         assert policy.notify is True

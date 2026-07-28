@@ -48,6 +48,15 @@ def _slack_source(thread_id=None):
     )
 
 
+def _weixin_dm_source():
+    return SessionSource(
+        platform=Platform.WEIXIN,
+        chat_id="wx-user-1",
+        chat_type="dm",
+        user_id="wx-user-1",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SessionStore records prev_session_id on auto-reset
 # ---------------------------------------------------------------------------
@@ -96,7 +105,12 @@ class TestPrevSessionIdCapture:
 # build_channel_continuity_note
 # ---------------------------------------------------------------------------
 
-def _reset_entry(platform, prev="20260101_000000_abc", had_activity=True):
+def _reset_entry(
+    platform,
+    prev="20260101_000000_abc",
+    had_activity=True,
+    reason="daily",
+):
     return SessionEntry(
         session_key="k",
         session_id="20260101_010000_def",
@@ -104,13 +118,39 @@ def _reset_entry(platform, prev="20260101_000000_abc", had_activity=True):
         updated_at=datetime.now(),
         platform=platform,
         was_auto_reset=True,
-        auto_reset_reason="daily",
+        auto_reset_reason=reason,
         reset_had_activity=had_activity,
         prev_session_id=prev,
     )
 
 
 class TestBuildChannelContinuityNote:
+    def test_weixin_prompt_token_rollover_emits_scoped_conversation_hint(self):
+        entry = _reset_entry(
+            Platform.WEIXIN,
+            prev="20260728_104924_e19c3fd5",
+            reason="prompt_tokens",
+        )
+        old_transcript_sentinel = "OLD_TRANSCRIPT_MUST_NOT_BE_INJECTED"
+        entry.old_transcript = old_transcript_sentinel
+
+        note = build_channel_continuity_note(entry, _weixin_dm_source())
+
+        assert note is not None
+        assert "conversation" in note
+        assert "session_id: 20260728_104924_e19c3fd5" in note
+        assert "only if the current request depends on prior context" in note.lower()
+        assert "session_search" in note
+        assert old_transcript_sentinel not in note
+
+    @pytest.mark.parametrize("reason", ["idle", "daily"])
+    def test_weixin_ordinary_reset_does_not_append_prior_session_pointer(
+        self, reason
+    ):
+        entry = _reset_entry(Platform.WEIXIN, reason=reason)
+
+        assert build_channel_continuity_note(entry, _weixin_dm_source()) is None
+
     def test_slack_channel_emits_hint(self):
         entry = _reset_entry(Platform.SLACK)
         note = build_channel_continuity_note(entry, _slack_source())
