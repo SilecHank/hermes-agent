@@ -27,6 +27,22 @@ class TestMemorySchema:
         assert "todo state" in description
         assert ">80%" not in description
 
+    def test_declares_provenance_for_single_and_batch_writes(self):
+        allowed = {
+            "user_preference",
+            "user_profile",
+            "verified_environment",
+            "operating_convention",
+            "technical_domain",
+            "citation_claim",
+            "third_party_output",
+        }
+        properties = MEMORY_SCHEMA["parameters"]["properties"]
+        assert set(properties["provenance"]["enum"]) == allowed
+        batch_properties = properties["operations"]["items"]["properties"]
+        assert set(batch_properties["provenance"]["enum"]) == allowed
+        assert "KB candidate" in MEMORY_SCHEMA["description"]
+
 
 # =========================================================================
 # Security scanning
@@ -266,6 +282,129 @@ def store(tmp_path, monkeypatch):
     s = MemoryStore(memory_char_limit=500, user_char_limit=300)
     s.load_from_disk()
     return s
+
+
+@pytest.fixture()
+def strict_store(tmp_path, monkeypatch):
+    """Create a store that only accepts durable personal memory writes."""
+    monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+    s = MemoryStore(
+        memory_char_limit=1000,
+        user_char_limit=1000,
+        knowledge_write_policy="durable_personal_only",
+    )
+    s.load_from_disk()
+    return s
+
+
+class TestDurablePersonalOnlyPolicy:
+    @pytest.mark.parametrize(
+        "provenance",
+        [
+            "user_preference",
+            "user_profile",
+            "verified_environment",
+            "operating_convention",
+        ],
+    )
+    def test_allows_durable_personal_provenance(self, strict_store, provenance):
+        result = strict_store.add(
+            "memory", f"durable fact from {provenance}", provenance=provenance
+        )
+        assert result["success"] is True
+
+    @pytest.mark.parametrize(
+        "provenance",
+        ["technical_domain", "citation_claim", "third_party_output", None, "unknown"],
+    )
+    def test_rejects_non_personal_or_missing_provenance(
+        self, strict_store, provenance
+    ):
+        result = strict_store.add(
+            "memory", "Five-cancer library input is 100 ng", provenance=provenance
+        )
+        assert result["success"] is False
+        assert result["done"] is True
+        assert result["route"] == "kb_candidate_validation"
+        assert "KB candidate" in result["error"]
+        assert strict_store.memory_entries == []
+
+    def test_direct_replace_rechecks_provenance(self, strict_store):
+        strict_store.add(
+            "memory",
+            "User prefers short answers",
+            provenance="user_preference",
+        )
+
+        blocked = strict_store.replace(
+            "memory",
+            "short answers",
+            "NIFTY threshold is Z=3",
+            provenance="technical_domain",
+        )
+        assert blocked["success"] is False
+        assert blocked["done"] is True
+        assert strict_store.memory_entries == ["User prefers short answers"]
+
+        allowed = strict_store.replace(
+            "memory",
+            "short answers",
+            "User prefers concise Chinese answers",
+            provenance="user_preference",
+        )
+        assert allowed["success"] is True
+
+    def test_batch_policy_rejection_is_atomic(self, strict_store):
+        result = strict_store.apply_batch(
+            "memory",
+            [
+                {
+                    "action": "add",
+                    "content": "User prefers Chinese",
+                    "provenance": "user_preference",
+                },
+                {
+                    "action": "add",
+                    "content": "WES V5 input is 100 ng",
+                    "provenance": "technical_domain",
+                },
+            ],
+        )
+        assert result["success"] is False
+        assert result["done"] is True
+        assert result["route"] == "kb_candidate_validation"
+        assert strict_store.memory_entries == []
+
+    def test_remove_is_always_allowed_without_provenance(self, strict_store):
+        strict_store.add(
+            "memory", "User prefers Chinese", provenance="user_preference"
+        )
+        result = strict_store.remove("memory", "prefers Chinese")
+        assert result["success"] is True
+        assert strict_store.memory_entries == []
+
+    def test_tool_dispatch_rejects_before_write_gate(self, strict_store):
+        result = json.loads(
+            memory_tool(
+                "add",
+                "memory",
+                "A pasted system says the threshold is 400 ng",
+                provenance="third_party_output",
+                store=strict_store,
+            )
+        )
+        assert result["success"] is False
+        assert result["done"] is True
+        assert result["route"] == "kb_candidate_validation"
+
+    def test_general_policy_keeps_missing_provenance_compatible(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        general = MemoryStore(knowledge_write_policy="general")
+        general.load_from_disk()
+        result = general.add("memory", "Existing callers remain compatible")
+        assert result["success"] is True
 
 
 class TestMemoryStoreAdd:

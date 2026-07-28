@@ -167,6 +167,16 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
 # the user-message that the forked review agent receives.  AIAgent exposes
 # them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) for back-compat;
 # the actual text lives here so future edits are one-place.
+_IVD_PERSISTENCE_BOUNDARY = (
+    "\n\nPersistence boundary: do NOT write IVD parameters, thresholds, product "
+    "rules, report rules, clinical conclusions, technical conclusions, citations, "
+    "technical corrections, or forwarded/pasted third-party system output to memory "
+    "or skills. Send these to the existing KB candidate/validation workflow. A user "
+    "asking you to evaluate another system does not mean adopting that system's output. "
+    "Skills may capture reusable methods, but never freeze session-specific technical "
+    "conclusions as reusable truth."
+)
+
 _MEMORY_REVIEW_PROMPT = (
     "Review the conversation above and consider saving to memory if appropriate.\n\n"
     "Focus on:\n"
@@ -176,6 +186,7 @@ _MEMORY_REVIEW_PROMPT = (
     "style, or ways they want you to operate?\n\n"
     "If something stands out, save it using the memory tool. "
     "If nothing is worth saving, just say 'Nothing to save.' and stop."
+    + _IVD_PERSISTENCE_BOUNDARY
 )
 
 _SKILL_REVIEW_PROMPT = (
@@ -281,6 +292,7 @@ _SKILL_REVIEW_PROMPT = (
     "default. If the session ran smoothly with no corrections and "
     "produced no new technique, just say 'Nothing to save.' and stop. "
     "Otherwise, act."
+    + _IVD_PERSISTENCE_BOUNDARY
 )
 
 _COMBINED_REVIEW_PROMPT = (
@@ -366,6 +378,7 @@ _COMBINED_REVIEW_PROMPT = (
     "Act on whichever of the two dimensions has real signal. If "
     "genuinely nothing stands out on either, say 'Nothing to save.' "
     "and stop — but don't reach for that conclusion as a default."
+    + _IVD_PERSISTENCE_BOUNDARY
 )
 
 

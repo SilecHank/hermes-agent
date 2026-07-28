@@ -68,6 +68,22 @@ MEMORY_BLOCK_HEADERS = {
 
 ENTRY_DELIMITER = "\n§\n"
 
+_DURABLE_PERSONAL_PROVENANCE = frozenset({
+    "user_preference",
+    "user_profile",
+    "verified_environment",
+    "operating_convention",
+})
+_MEMORY_PROVENANCE_VALUES = (
+    "user_preference",
+    "user_profile",
+    "verified_environment",
+    "operating_convention",
+    "technical_domain",
+    "citation_claim",
+    "third_party_output",
+)
+
 
 # ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
@@ -164,11 +180,21 @@ class MemoryStore:
     # turn to budget exhaustion and suppress the user's reply (issue #42405).
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(
+        self,
+        memory_char_limit: int = 2200,
+        user_char_limit: int = 1375,
+        knowledge_write_policy: str = "general",
+    ):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.knowledge_write_policy = (
+            "durable_personal_only"
+            if knowledge_write_policy == "durable_personal_only"
+            else "general"
+        )
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
         # Per-turn counter of failed at-capacity consolidation attempts; reset
@@ -389,8 +415,53 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
-    def add(self, target: str, content: str) -> Dict[str, Any]:
+    @staticmethod
+    def _knowledge_policy_error(provenance: Optional[str]) -> Dict[str, Any]:
+        label = provenance or "missing"
+        return {
+            "success": False,
+            "done": True,
+            "route": "kb_candidate_validation",
+            "error": (
+                "Persistent memory write rejected by durable_personal_only policy "
+                f"(provenance={label!r}). Memory only accepts user preferences, user "
+                "profile facts, verified environment facts, and operating conventions. "
+                "Send domain knowledge, citations, technical corrections, and pasted "
+                "third-party output to the KB candidate/validation workflow instead. "
+                "Do not retry this content with the memory tool."
+            ),
+        }
+
+    def validate_write_policy(
+        self,
+        action: str,
+        provenance: Optional[str] = None,
+        operations: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a terminal policy error, or ``None`` when a write is allowed."""
+        if self.knowledge_write_policy != "durable_personal_only":
+            return None
+        if operations is not None:
+            for op in operations:
+                op = op or {}
+                if op.get("action") in {"add", "replace"}:
+                    op_provenance = op.get("provenance")
+                    if op_provenance not in _DURABLE_PERSONAL_PROVENANCE:
+                        return self._knowledge_policy_error(op_provenance)
+            return None
+        if action == "remove":
+            return None
+        if action in {"add", "replace"} and provenance not in _DURABLE_PERSONAL_PROVENANCE:
+            return self._knowledge_policy_error(provenance)
+        return None
+
+    def add(
+        self, target: str, content: str, provenance: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
+        policy_error = self.validate_write_policy("add", provenance)
+        if policy_error:
+            return policy_error
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -448,8 +519,17 @@ class MemoryStore:
 
         return self._success_response(target, "Entry added.")
 
-    def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
+    def replace(
+        self,
+        target: str,
+        old_text: str,
+        new_content: str,
+        provenance: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
+        policy_error = self.validate_write_policy("replace", provenance)
+        if policy_error:
+            return policy_error
         old_text = old_text.strip()
         new_content = new_content.strip()
         if not old_text:
@@ -576,6 +656,10 @@ class MemoryStore:
         """
         if not operations:
             return {"success": False, "error": "operations list is empty."}
+
+        policy_error = self.validate_write_policy("batch", operations=operations)
+        if policy_error:
+            return policy_error
 
         # Scan every add/replace content for injection/exfil BEFORE touching
         # disk -- a single poisoned op rejects the whole batch.
@@ -909,10 +993,14 @@ def load_on_disk_store() -> "MemoryStore":
     """
     memory_char_limit = 2200
     user_char_limit = 1375
+    knowledge_write_policy = "general"
     try:
         from hermes_cli.config import load_config
 
         mem_cfg = (load_config() or {}).get("memory", {}) or {}
+        knowledge_write_policy = mem_cfg.get(
+            "knowledge_write_policy", knowledge_write_policy
+        )
         memory_char_limit = int(mem_cfg.get("memory_char_limit", memory_char_limit))
         user_char_limit = int(mem_cfg.get("user_char_limit", user_char_limit))
     except Exception:
@@ -921,13 +1009,19 @@ def load_on_disk_store() -> "MemoryStore":
     store = MemoryStore(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
+        knowledge_write_policy=knowledge_write_policy,
     )
     store.load_from_disk()
     return store
 
 
-def _apply_write_gate(action: str, target: str, content: Optional[str],
-                      old_text: Optional[str]) -> Optional[str]:
+def _apply_write_gate(
+    action: str,
+    target: str,
+    content: Optional[str],
+    old_text: Optional[str],
+    provenance: Optional[str],
+) -> Optional[str]:
     """Evaluate the memory write gate. Returns a JSON tool-result string when
     the write should NOT proceed normally (blocked or staged), or None when the
     caller should perform the real write.
@@ -970,6 +1064,7 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
         "target": target,
         "content": content,
         "old_text": old_text,
+        "provenance": provenance,
     }
     record = wa.stage_write(
         wa.MEMORY, payload,
@@ -1067,6 +1162,7 @@ def memory_tool(
     target: str = "memory",
     content: str = None,
     old_text: str = None,
+    provenance: str = None,
     operations: Optional[List[Dict[str, Any]]] = None,
     store: Optional[MemoryStore] = None,
 ) -> str:
@@ -1096,6 +1192,9 @@ def memory_tool(
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
+        policy_error = store.validate_write_policy("batch", operations=operations)
+        if policy_error:
+            return json.dumps(policy_error, ensure_ascii=False)
         gate_result = _apply_batch_write_gate(target, operations)
         if gate_result is not None:
             return gate_result
@@ -1119,17 +1218,21 @@ def memory_tool(
     if action == "remove" and not old_text:
         return _missing_old_text_error(store, target, "remove")
 
+    policy_error = store.validate_write_policy(action, provenance)
+    if policy_error:
+        return json.dumps(policy_error, ensure_ascii=False)
+
     # Approval gate: when on, stages the write (background/gateway) or prompts
     # inline (interactive CLI); when off (default) passes straight through.
-    gate_result = _apply_write_gate(action, target, content, old_text)
+    gate_result = _apply_write_gate(action, target, content, old_text, provenance)
     if gate_result is not None:
         return gate_result
 
     if action == "add":
-        result = store.add(target, content)
+        result = store.add(target, content, provenance=provenance)
 
     elif action == "replace":
-        result = store.replace(target, old_text, content)
+        result = store.replace(target, old_text, content, provenance=provenance)
 
     elif action == "remove":
         result = store.remove(target, old_text)
@@ -1155,12 +1258,13 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     target = payload.get("target", "memory")
     content = payload.get("content") or ""
     old_text = payload.get("old_text") or ""
+    provenance = payload.get("provenance")
     if action == "batch":
         return store.apply_batch(target, payload.get("operations") or [])
     if action == "add":
-        return store.add(target, content)
+        return store.add(target, content, provenance=provenance)
     if action == "replace":
-        return store.replace(target, old_text, content)
+        return store.replace(target, old_text, content, provenance=provenance)
     if action == "remove":
         return store.remove(target, old_text)
     return {"success": False, "error": f"Unknown staged action '{action}'."}
@@ -1179,10 +1283,16 @@ MEMORY_SCHEMA = {
         "reports current/limit chars and confirms completion; one batch call finishes the "
         "update, so don't repeat it. Use the bare action/content/old_text fields only for a "
         "single lone change.\n\n"
-        "WHEN: save proactively when the user states a preference, correction, or personal "
-        "detail, or you learn a stable fact about their environment, conventions, or workflow. "
-        "Priority: user preferences & corrections > environment facts > procedures. The best "
+        "WHEN: save proactively when the user states a preference, a correction to how you "
+        "should behave, or a personal detail, or you learn a stable fact about their "
+        "environment, conventions, or workflow. Priority: user preferences and behavior "
+        "corrections > environment facts > procedures. The best "
         "memory stops the user repeating themselves.\n\n"
+        "KNOWLEDGE BOUNDARY: never save IVD parameters, thresholds, product rules, report "
+        "rules, clinical conclusions, technical conclusions, citations, technical "
+        "corrections, or forwarded/pasted third-party system output. Route those through "
+        "the KB candidate/validation workflow. A request to evaluate another system does "
+        "not mean its output was adopted as truth.\n\n"
         "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
         "removes or shortens enough stale entries and adds the new one together.\n\n"
         "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
@@ -1212,6 +1322,15 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "description": "REQUIRED for 'replace' and 'remove' (single-op shape): a short unique substring identifying the existing entry to modify. Omit only for 'add'."
             },
+            "provenance": {
+                "type": "string",
+                "enum": list(_MEMORY_PROVENANCE_VALUES),
+                "description": (
+                    "Required for add/replace when durable_personal_only is configured. "
+                    "Classify the proposed memory source; domain, citation, and third-party "
+                    "classes are routed to KB candidate validation instead."
+                ),
+            },
             "operations": {
                 "type": "array",
                 "description": (
@@ -1225,6 +1344,11 @@ MEMORY_SCHEMA = {
                         "action": {"type": "string", "enum": ["add", "replace", "remove"]},
                         "content": {"type": "string", "description": "Entry content for add/replace."},
                         "old_text": {"type": "string", "description": "Substring identifying the entry for replace/remove."},
+                        "provenance": {
+                            "type": "string",
+                            "enum": list(_MEMORY_PROVENANCE_VALUES),
+                            "description": "Source class for this add/replace operation.",
+                        },
                     },
                     "required": ["action"],
                 },
@@ -1247,12 +1371,9 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
+        provenance=args.get("provenance"),
         operations=args.get("operations"),
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
-

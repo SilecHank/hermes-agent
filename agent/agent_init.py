@@ -1620,6 +1620,9 @@ def init_agent(
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
+                    knowledge_write_policy=mem_config.get(
+                        "knowledge_write_policy", "general"
+                    ),
                 )
                 agent._memory_store.load_from_disk()
         except Exception:

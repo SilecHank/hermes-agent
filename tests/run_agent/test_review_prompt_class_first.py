@@ -17,6 +17,26 @@ snapshot the full prompt text (change-detector).
 from run_agent import AIAgent
 
 
+def _assert_ivd_knowledge_boundary(prompt: str, label: str) -> None:
+    lower = prompt.lower()
+    for concept in (
+        "ivd parameters",
+        "thresholds",
+        "product rules",
+        "report rules",
+        "clinical conclusions",
+        "technical conclusions",
+        "citations",
+        "technical corrections",
+        "third-party system output",
+    ):
+        assert concept in lower, f"{label}: missing boundary for {concept}"
+    assert "kb candidate" in lower, f"{label}: must route knowledge to KB candidates"
+    assert "evaluate another system" in lower, (
+        f"{label}: must distinguish evaluation from adoption"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _SKILL_REVIEW_PROMPT
 # ---------------------------------------------------------------------------
@@ -233,3 +253,25 @@ def test_memory_review_prompt_still_focused_on_user_facts():
     assert "skills_list" not in prompt
     assert "SURVEY" not in prompt
     assert "memory tool" in prompt
+
+
+def test_memory_review_prompt_excludes_ivd_knowledge():
+    _assert_ivd_knowledge_boundary(
+        AIAgent._MEMORY_REVIEW_PROMPT, "_MEMORY_REVIEW_PROMPT"
+    )
+
+
+def test_skill_review_prompt_excludes_domain_conclusions():
+    prompt = AIAgent._SKILL_REVIEW_PROMPT
+    _assert_ivd_knowledge_boundary(prompt, "_SKILL_REVIEW_PROMPT")
+    lower = prompt.lower()
+    assert "reusable methods" in lower
+    assert "session-specific technical conclusions" in lower
+
+
+def test_combined_review_prompt_uses_same_knowledge_boundary():
+    prompt = AIAgent._COMBINED_REVIEW_PROMPT
+    _assert_ivd_knowledge_boundary(prompt, "_COMBINED_REVIEW_PROMPT")
+    lower = prompt.lower()
+    assert "reusable methods" in lower
+    assert "session-specific technical conclusions" in lower

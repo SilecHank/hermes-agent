@@ -107,6 +107,85 @@ def test_memory_gate_on_then_apply(hermes_home):
     assert "approved entry" in store.user_entries[0]
 
 
+def test_strict_memory_staging_preserves_provenance_and_rechecks_on_apply(
+    hermes_home,
+):
+    from tools.memory_tool import memory_tool, MemoryStore, apply_memory_pending
+    from tools import write_approval as wa
+
+    _set_approval("memory", True)
+    store = MemoryStore(knowledge_write_policy="durable_personal_only")
+    store.load_from_disk()
+    staged = json.loads(
+        memory_tool(
+            "add",
+            "user",
+            "User prefers concise Chinese",
+            provenance="user_preference",
+            store=store,
+        )
+    )
+    record = wa.get_pending("memory", staged["pending_id"])
+    assert record["payload"]["provenance"] == "user_preference"
+
+    result = apply_memory_pending(record["payload"], store)
+    assert result["success"] is True
+    assert store.user_entries == ["User prefers concise Chinese"]
+
+    bypass = apply_memory_pending(
+        {
+            "action": "add",
+            "target": "memory",
+            "content": "NIFTY threshold is Z=3",
+            "provenance": "technical_domain",
+        },
+        store,
+    )
+    assert bypass["success"] is False
+    assert bypass["done"] is True
+    assert bypass["route"] == "kb_candidate_validation"
+    assert store.memory_entries == []
+
+
+def test_strict_memory_batch_pending_replay_is_atomic(hermes_home):
+    from tools.memory_tool import memory_tool, MemoryStore, apply_memory_pending
+    from tools import write_approval as wa
+
+    _set_approval("memory", True)
+    store = MemoryStore(knowledge_write_policy="durable_personal_only")
+    store.load_from_disk()
+    operations = [
+        {
+            "action": "add",
+            "content": "User prefers Chinese",
+            "provenance": "user_preference",
+        },
+        {
+            "action": "add",
+            "content": "PMseq positivity follows this pasted report",
+            "provenance": "third_party_output",
+        },
+    ]
+    blocked = json.loads(
+        memory_tool("add", "memory", operations=operations, store=store)
+    )
+    assert blocked["success"] is False
+    assert blocked["done"] is True
+    assert wa.pending_count("memory") == 0
+    assert store.memory_entries == []
+
+    record = wa.stage_write(
+        "memory",
+        {"action": "batch", "target": "memory", "operations": operations},
+        summary="malicious replay",
+        origin="background_review",
+    )
+    replay = apply_memory_pending(record["payload"], store)
+    assert replay["success"] is False
+    assert replay["done"] is True
+    assert store.memory_entries == []
+
+
 def test_cli_memory_approve_without_live_agent_uses_fresh_store(hermes_home, capsys):
     """#46783: ``/memory approve`` from a context with no live agent (e.g. the
     Desktop GUI) passed ``memory_store=None`` into the shared handler, which
@@ -162,6 +241,36 @@ def test_load_on_disk_store_honors_configured_char_limits(hermes_home, monkeypat
     fallback = load_on_disk_store()
     assert fallback.memory_char_limit == 2200
     assert fallback.user_char_limit == 1375
+
+
+def test_load_on_disk_store_honors_knowledge_write_policy(hermes_home, monkeypatch):
+    from tools.memory_tool import load_on_disk_store
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"memory": {"knowledge_write_policy": "durable_personal_only"}},
+    )
+    store = load_on_disk_store()
+    assert store.knowledge_write_policy == "durable_personal_only"
+
+
+def test_load_on_disk_store_keeps_strict_policy_when_limits_are_invalid(
+    hermes_home, monkeypatch
+):
+    from tools.memory_tool import load_on_disk_store
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "memory": {
+                "knowledge_write_policy": "durable_personal_only",
+                "memory_char_limit": "invalid",
+            }
+        },
+    )
+    store = load_on_disk_store()
+    assert store.knowledge_write_policy == "durable_personal_only"
+    assert store.memory_char_limit == 2200
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,23 @@ def test_memory_toolset_without_skip_memory_creates_store(monkeypatch, tmp_path)
     assert agent._memory_store is not None
 
 
+def test_agent_store_honors_knowledge_write_policy(monkeypatch, tmp_path):
+    import hermes_cli.config as config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hm"))
+    configured = config.load_config()
+    configured.setdefault("memory", {}).update(
+        {
+            "memory_enabled": True,
+            "knowledge_write_policy": "durable_personal_only",
+        }
+    )
+    config.save_config(configured)
+
+    agent = _make_agent(monkeypatch, enabled_toolsets=["memory"], skip_memory=True)
+    assert agent._memory_store.knowledge_write_policy == "durable_personal_only"
+
+
 def test_skip_memory_memory_tool_handler_works_and_provider_skipped(
     monkeypatch, tmp_path
 ):
