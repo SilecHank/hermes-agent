@@ -53,7 +53,7 @@ def build_default_ivd_maintenance_steps(
         ),
         WorkerStep(
             "kb_conflict_detection",
-            (py, "scripts/detect-kb-conflicts.py", "knowledge-base", "--json"),
+            (py, "scripts/hermes_incremental_conflict_scan.py", "--repo-root", "."),
             allow_failure=True,
         ),
         WorkerStep(

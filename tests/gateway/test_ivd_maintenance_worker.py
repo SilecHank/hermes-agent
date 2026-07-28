@@ -15,7 +15,8 @@ def test_default_worker_steps_are_deterministic_and_pending_safe():
     joined = "\n".join(" ".join(step.argv) for step in steps)
 
     assert "hermes_candidate_promotion_queue.py" in joined
-    assert "detect-kb-conflicts.py" in joined
+    assert "hermes_incremental_conflict_scan.py" in joined
+    assert "scripts/detect-kb-conflicts.py knowledge-base" not in joined
     assert "review-inbox-maintenance.py" in joined
     assert "hermes_daily_maintenance_runner.py" in joined
     assert "--execute" in joined
