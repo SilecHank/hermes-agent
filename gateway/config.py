@@ -509,6 +509,7 @@ class SessionResetPolicy:
     # by the reset guard. Raise this if you run legitimate multi-day jobs whose
     # liveness should pin the conversation open.
     bg_process_max_age_hours: int = 24
+    max_prompt_tokens: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -518,6 +519,7 @@ class SessionResetPolicy:
             "notify": self.notify,
             "notify_exclude_platforms": list(self.notify_exclude_platforms),
             "bg_process_max_age_hours": self.bg_process_max_age_hours,
+            "max_prompt_tokens": self.max_prompt_tokens,
         }
     
     @classmethod
@@ -530,6 +532,9 @@ class SessionResetPolicy:
         notify = data.get("notify")
         exclude = data.get("notify_exclude_platforms")
         bg_max_age = data.get("bg_process_max_age_hours")
+        max_prompt_tokens = _coerce_optional_positive_int(
+            data.get("max_prompt_tokens"), "max_prompt_tokens"
+        )
         return cls(
             mode=mode if mode is not None else "none",
             at_hour=at_hour if at_hour is not None else 4,
@@ -537,6 +542,7 @@ class SessionResetPolicy:
             notify=_coerce_bool(notify, True),
             notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
             bg_process_max_age_hours=bg_max_age if bg_max_age is not None else 24,
+            max_prompt_tokens=max_prompt_tokens or 0,
         )
 
 

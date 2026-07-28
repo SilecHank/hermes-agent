@@ -310,13 +310,16 @@ class TestGetConnectedPlatforms:
 class TestSessionResetPolicy:
     def test_roundtrip(self):
         policy = SessionResetPolicy(mode="idle", at_hour=6, idle_minutes=120,
-                                    bg_process_max_age_hours=48)
+                                    bg_process_max_age_hours=48,
+                                    max_prompt_tokens=60000)
         d = policy.to_dict()
         restored = SessionResetPolicy.from_dict(d)
         assert restored.mode == "idle"
         assert restored.at_hour == 6
         assert restored.idle_minutes == 120
         assert restored.bg_process_max_age_hours == 48
+        assert d["max_prompt_tokens"] == 60000
+        assert restored.max_prompt_tokens == 60000
 
     def test_defaults(self):
         policy = SessionResetPolicy()
@@ -324,16 +327,30 @@ class TestSessionResetPolicy:
         assert policy.at_hour == 4
         assert policy.idle_minutes == 1440
         assert policy.bg_process_max_age_hours == 24
+        assert policy.max_prompt_tokens == 0
 
     def test_from_dict_treats_null_values_as_defaults(self):
         restored = SessionResetPolicy.from_dict(
             {"mode": None, "at_hour": None, "idle_minutes": None,
-             "bg_process_max_age_hours": None}
+             "bg_process_max_age_hours": None, "max_prompt_tokens": None}
         )
         assert restored.mode == "none"
         assert restored.at_hour == 4
         assert restored.idle_minutes == 1440
         assert restored.bg_process_max_age_hours == 24
+        assert restored.max_prompt_tokens == 0
+
+    @pytest.mark.parametrize("data", [{}, {"max_prompt_tokens": None}])
+    def test_from_dict_defaults_missing_or_null_max_prompt_tokens_to_zero(self, data):
+        restored = SessionResetPolicy.from_dict(data)
+
+        assert restored.max_prompt_tokens == 0
+
+    @pytest.mark.parametrize("value", [-1, "invalid", [], {}, float("inf")])
+    def test_from_dict_normalizes_invalid_max_prompt_tokens_to_zero(self, value):
+        restored = SessionResetPolicy.from_dict({"max_prompt_tokens": value})
+
+        assert restored.max_prompt_tokens == 0
 
     def test_from_dict_coerces_quoted_false_notify(self):
         restored = SessionResetPolicy.from_dict({"notify": "false"})
