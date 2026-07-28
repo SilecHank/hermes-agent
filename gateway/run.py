@@ -21905,7 +21905,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         messages=getattr(_agent, "_session_messages", []),
                     )
                 )
-                if _after_sales_turn is not None
+                if _after_sales_turn is not None and _after_sales_turn.has_validator
                 else None
             )
             # Store agent reference for interrupt support

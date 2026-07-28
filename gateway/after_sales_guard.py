@@ -24,8 +24,12 @@ MEASUREMENT_UNIT_RE = re.compile(r"ng\s*/\s*[µuμ]L|%", re.IGNORECASE)
 class AfterSalesTurn:
     context: str
     facts: dict[str, Any]
-    validator: ModuleType
+    validator: ModuleType | None
     allowed_numeric_claims: tuple[str, ...]
+
+    @property
+    def has_validator(self) -> bool:
+        return self.validator is not None and bool(self.facts)
 
     def validate(
         self,
@@ -33,6 +37,9 @@ class AfterSalesTurn:
         *,
         messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        if not self.has_validator:
+            return {"ok": True, "reasons": [], "fallback": ""}
+        assert self.validator is not None
         allowed_numeric_claims = list(self.allowed_numeric_claims)
         allowed_numeric_claims.extend(
             _trusted_tool_numeric_claims(
@@ -134,16 +141,25 @@ def prepare_after_sales_turn(
     module_path = Path(str(guard.get("workflow_module") or ""))
     validator_path = Path(str(guard.get("validator_module") or ""))
     cards_dir = Path(str(guard.get("cards_dir") or ""))
-    if not module_path.is_file() or not validator_path.is_file() or not cards_dir.is_dir():
-        return None
+    match = None
+    validator = None
+    if module_path.is_file() and validator_path.is_file() and cards_dir.is_dir():
+        module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
+        validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
+        match = module.match_case_facts(cards_dir, message=message, history=history)
 
-    module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
-    validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
-    match = module.match_case_facts(cards_dir, message=message, history=history)
-    if match is None:
-        return None
-    context = module.render_fact_context(match)
     fast_context = _render_fast_response_context(guard, message=message, match=match)
+    if match is None:
+        if not fast_context:
+            return None
+        return AfterSalesTurn(
+            context=fast_context,
+            facts={},
+            validator=None,
+            allowed_numeric_claims=(),
+        )
+
+    context = module.render_fact_context(match)
     if fast_context:
         context = f"{context}\n\n{fast_context}"
     recent_user_text = " ".join(
@@ -175,7 +191,7 @@ def _render_fast_response_context(
     guard: dict[str, Any],
     *,
     message: str,
-    match: dict[str, Any],
+    match: dict[str, Any] | None,
 ) -> str:
     module_path = Path(str(guard.get("fast_response_module") or ""))
     if not module_path.is_file():
@@ -189,6 +205,9 @@ def _render_fast_response_context(
         plan = module.build_fast_response_plan(message, question_type=question_type)
     except Exception:
         return ""
+    runtime_preflight = plan.get("runtime_preflight") or {}
+    if not runtime_preflight.get("eligible", False):
+        return ""
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
     initial_files = [
@@ -198,6 +217,7 @@ def _render_fast_response_context(
     ]
     lines = [
         "[快速回答管线]",
+        f"路由版本：{runtime_preflight.get('route_version', '')}",
         f"回答风格：{template.get('style', 'short_first')}",
         f"预算动作：{gate.get('pipeline_action', 'continue_final_answer')}",
         f"首轮文件数：{len(initial_files)}",
@@ -208,7 +228,7 @@ def _render_fast_response_context(
     return "\n".join(lines)
 
 
-def _question_type_from_match(match: dict[str, Any]) -> str:
+def _question_type_from_match(match: dict[str, Any] | None) -> str:
     facts = match.get("facts") if isinstance(match, dict) else {}
     workflow = str((facts or {}).get("workflow_id") or "")
     if "report" in workflow:

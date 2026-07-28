@@ -37,7 +37,7 @@ def test_prepare_after_sales_turn_injects_verified_context():
     assert turn.facts["current_stage"] == "library_qc"
 
 
-def test_prepare_after_sales_turn_appends_fast_response_context_when_configured():
+def test_prepare_after_sales_turn_does_not_label_a_fast_path_miss_as_fast():
     turn = prepare_after_sales_turn(
         _config_with_fast_response(),
         platform="qqbot",
@@ -46,9 +46,33 @@ def test_prepare_after_sales_turn_appends_fast_response_context_when_configured(
     )
 
     assert turn is not None
-    assert "快速回答管线" in turn.context
-    assert "short_first" in turn.context
+    assert "快速回答管线" not in turn.context
     assert "stop_before_final_answer" not in turn.context
+
+
+def test_prepare_after_sales_turn_uses_fast_preflight_without_fact_card_match():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+    )
+
+    assert turn is not None
+    assert "快速回答管线" in turn.context
+    assert "wes-v5-sop-index.md" in turn.context
+    assert turn.has_validator is False
+
+
+def test_prepare_after_sales_turn_does_not_inject_unsafe_context_route():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="需要",
+        history=[],
+    )
+
+    assert turn is None
 
 
 def test_prepare_after_sales_turn_uses_recent_user_context():
@@ -149,6 +173,7 @@ def test_after_sales_turn_validates_before_persistence():
     assert "future_stage:dnb_preparation" in invalid["reasons"]
     assert invalid["fallback"]
     assert allowed["ok"] is True
+    assert turn.has_validator is True
 
 
 def test_prepare_after_sales_turn_infers_unit_for_user_supplied_range():
