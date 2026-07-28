@@ -30,10 +30,13 @@ class AfterSalesTurn:
     route_id: str = ""
     route_version: str = ""
     source_paths: tuple[str, ...] = ()
+    requires_source_validation: bool = False
 
     @property
     def has_validator(self) -> bool:
-        return self.validator is not None and bool(self.facts)
+        return self.validator is not None and (
+            bool(self.facts) or self.requires_source_validation
+        )
 
     def validate(
         self,
@@ -44,14 +47,45 @@ class AfterSalesTurn:
         if not self.has_validator:
             return {"ok": True, "reasons": [], "fallback": ""}
         assert self.validator is not None
-        allowed_numeric_claims = list(self.allowed_numeric_claims)
-        allowed_numeric_claims.extend(
-            _trusted_tool_numeric_claims(
+        if self.requires_source_validation and not self.facts:
+            trusted_claims, source_read = _trusted_tool_numeric_evidence(
                 messages or [],
-                self.facts,
+                self.source_paths,
                 self.validator,
             )
+            if not source_read:
+                return {
+                    "ok": False,
+                    "reasons": ["formal_source_not_read"],
+                    "fallback": "请先读取当前产品路由指定的正式来源，再给出参数结论。",
+                }
+            allowed = tuple(self.allowed_numeric_claims) + trusted_claims
+            allowed_normalized = {_normalize_numeric_claim(item) for item in allowed}
+            unsupported = [
+                claim
+                for claim in self.validator.extract_numeric_claims(answer)
+                if _normalize_numeric_claim(claim) not in allowed_normalized
+            ]
+            if unsupported:
+                return {
+                    "ok": False,
+                    "reasons": [
+                        f"unsupported_numeric_claim:{claim}" for claim in unsupported
+                    ],
+                    "fallback": "当前回答中的参数未在指定正式来源中核实，请重新读取来源后回答。",
+                }
+            return {"ok": True, "reasons": [], "fallback": ""}
+        allowed_numeric_claims = list(self.allowed_numeric_claims)
+        trusted_claims, _ = _trusted_tool_numeric_evidence(
+            messages or [],
+            (
+                source.get("resolved_path", "")
+                for source in self.facts.get("authoritative_sources", ())
+                if source.get("resolved_path")
+            ),
+            self.validator,
         )
+        allowed_numeric_claims.extend(trusted_claims)
         result = self.validator.validate_answer(
             answer,
             self.facts,
@@ -82,18 +116,28 @@ class CriticalAfterSalesValidator:
         return self.turn.validate(answer, messages=self.messages_provider())
 
 
-def _trusted_tool_numeric_claims(
+def _normalize_numeric_claim(value: str) -> str:
+    return (
+        re.sub(r"\s+", "", value)
+        .replace("μ", "µ")
+        .replace(">=", "≥")
+        .replace("<=", "≤")
+        .lower()
+    )
+
+
+def _trusted_tool_numeric_evidence(
     messages: list[dict[str, Any]],
-    facts: dict[str, Any],
+    source_paths: Any,
     validator: ModuleType,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], bool]:
     trusted_paths = {
-        str(Path(source.get("resolved_path", "")).expanduser().resolve())
-        for source in facts.get("authoritative_sources", ())
-        if source.get("resolved_path")
+        str(Path(str(path)).expanduser().resolve())
+        for path in source_paths
+        if path
     }
     if not trusted_paths:
-        return ()
+        return (), False
 
     trusted_call_ids: set[str] = set()
     for message in messages:
@@ -118,13 +162,15 @@ def _trusted_tool_numeric_claims(
                     trusted_call_ids.add(str(call_id))
 
     claims: list[str] = []
+    source_read = False
     for message in messages:
         if message.get("role") != "tool":
             continue
         if str(message.get("tool_call_id") or "") not in trusted_call_ids:
             continue
+        source_read = True
         claims.extend(validator.extract_numeric_claims(str(message.get("content") or "")))
-    return tuple(dict.fromkeys(claims))
+    return tuple(dict.fromkeys(claims)), source_read
 
 
 @lru_cache(maxsize=8)
@@ -173,15 +219,28 @@ def prepare_after_sales_turn(
     if match is None:
         if not fast_context:
             return None
+        route_id = str(fast_result.get("route_id") or "fast_preflight")
+        source_paths = tuple(fast_result.get("source_paths") or ())
+        requires_source_validation = route_id == "sop_parameter_short_answer"
+        source_text = " ".join(
+            str(item.get("content", ""))
+            for item in history[-12:]
+            if item.get("role") == "user"
+        ) + f" {message}"
         return AfterSalesTurn(
             context=fast_context,
             facts={},
-            validator=None,
-            allowed_numeric_claims=(),
+            validator=validator if requires_source_validation else None,
+            allowed_numeric_claims=(
+                tuple(validator.extract_numeric_claims(source_text))
+                if validator is not None and requires_source_validation
+                else ()
+            ),
             fast_path=True,
-            route_id=str(fast_result.get("route_id") or "fast_preflight"),
+            route_id=route_id,
             route_version=str(fast_result.get("route_version") or ""),
-            source_paths=tuple(fast_result.get("source_paths") or ()),
+            source_paths=source_paths,
+            requires_source_validation=requires_source_validation,
         )
 
     context = module.render_fact_context(match)
@@ -246,11 +305,15 @@ def _render_fast_response_context(
         return {}
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
-    initial_files = [
-        str(path)
-        for path in plan.get("initial_files", [])[:3]
-        if "candidate" not in str(path).casefold()
-    ]
+    kb_root = module_path.parent.parent
+    initial_files = []
+    for raw_path in plan.get("initial_files", [])[:3]:
+        if "candidate" in str(raw_path).casefold():
+            continue
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute():
+            path = kb_root / path
+        initial_files.append(str(path.resolve()))
     lines = [
         "[快速回答管线]",
         f"路由版本：{runtime_preflight.get('route_version', '')}",

@@ -61,7 +61,48 @@ def test_prepare_after_sales_turn_uses_fast_preflight_without_fact_card_match():
     assert turn is not None
     assert "快速回答管线" in turn.context
     assert "wes-v5-sop-index.md" in turn.context
-    assert turn.has_validator is False
+    assert turn.has_validator is True
+    assert all(Path(path).is_absolute() for path in turn.source_paths)
+
+
+def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_number():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    missing_source = turn.validate("建库投入量为100ng。", messages=[])
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "' + source_path + '"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "当前正式SOP规定建库投入量为100ng。",
+        },
+    ]
+
+    supported = turn.validate("建库投入量为100ng。", messages=messages)
+    unsupported = turn.validate("建库投入量为400ng。", messages=messages)
+
+    assert missing_source["ok"] is False
+    assert "formal_source_not_read" in missing_source["reasons"]
+    assert supported["ok"] is True
+    assert unsupported["ok"] is False
+    assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
 
 
 def test_prepare_after_sales_turn_does_not_inject_unsafe_context_route():
