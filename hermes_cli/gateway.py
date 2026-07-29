@@ -2884,6 +2884,22 @@ def _normalize_service_definition(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
+def _ivd_service_scope_root() -> Path:
+    return Path("/")
+
+
+def _ivd_service_contract_home() -> Path:
+    return Path.home()
+
+
+def _ivd_service_contract_environ() -> dict[str, str]:
+    return dict(os.environ)
+
+
+def _ivd_service_contract_uid() -> int | None:
+    return os.getuid() if hasattr(os, "getuid") else None
+
+
 def _enforce_embedded_ivd_cron_contract(
     kind: str,
     target_path: Path,
@@ -2897,6 +2913,10 @@ def _enforce_embedded_ivd_cron_contract(
         service_dir=target_path.parent,
         target_path=target_path,
         candidate_definition=candidate_definition,
+        scope_root=_ivd_service_scope_root(),
+        home=_ivd_service_contract_home(),
+        environ=_ivd_service_contract_environ(),
+        uid=_ivd_service_contract_uid(),
     )
 
 

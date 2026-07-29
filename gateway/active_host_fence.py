@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,15 @@ class IndependentIvdCronServiceError(RuntimeError):
 
     def __init__(self, path: Path | str) -> None:
         self.reason = "independent_ivd_cron_forbidden"
+        self.path = str(path)
+        super().__init__(f"{self.reason}:{self.path}")
+
+
+class IvdCronServiceDiscoveryError(RuntimeError):
+    """An effective service scope could not be inspected safely."""
+
+    def __init__(self, reason: str, path: Path | str) -> None:
+        self.reason = reason
         self.path = str(path)
         super().__init__(f"{self.reason}:{self.path}")
 
@@ -445,40 +454,59 @@ def validate_runtime_contract(cron: object) -> FenceDecision:
     return FenceDecision(True, "embedded_cron_owned")
 
 
+_IVD_IDENTITY = re.compile(r"(?<![a-z0-9])(?:ivd|after[-_ ]sales)(?![a-z0-9])", re.IGNORECASE)
+_IVD_RUNNERS = (
+    "hermes_daily_maintenance_runner",
+    "ivd_daily_maintenance",
+    "ivd-maintenance-runner",
+)
+_SYSTEMD_PERIODIC_KEYS = frozenset(
+    (
+        "OnActiveSec",
+        "OnBootSec",
+        "OnStartupSec",
+        "OnUnitActiveSec",
+        "OnUnitInactiveSec",
+        "OnCalendar",
+    )
+)
+_LAUNCHD_PERIODIC_KEYS = frozenset(("StartInterval", "StartCalendarInterval"))
+
+
+def _has_explicit_ivd_identity(text: str) -> bool:
+    lowered = text.lower()
+    return _IVD_IDENTITY.search(lowered) is not None or any(
+        marker in lowered for marker in _IVD_RUNNERS
+    )
+
+
 def _systemd_definition_is_independent_ivd_cron(name: str, text: str) -> bool:
     commands: list[str] = []
-    schedule: list[str] = []
+    identity_values: list[str] = [name]
+    periodic = name.lower().endswith(".timer")
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("#", ";")) or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key.strip() in {"ExecStart", "ExecStartPre", "ExecStartPost"}:
-            commands.append(value.strip())
-        elif key.strip() in {"OnCalendar", "OnBootSec", "OnUnitActiveSec", "OnStartupSec"}:
-            schedule.append(value.strip())
+        key = key.strip()
+        value = value.strip()
+        if key in {"ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecReload"}:
+            commands.append(value)
+        if key in {"Description", "Unit"} or key.startswith("Exec"):
+            identity_values.append(value)
+        if key in _SYSTEMD_PERIODIC_KEYS:
+            periodic = True
     command_text = " ".join(commands).lower()
-    identity = f"{name} {command_text}".lower()
     if "gateway run" in command_text or "gateway serve" in command_text:
         return False
-    exact_runner = any(
-        marker in command_text
-        for marker in (
-            "hermes_daily_maintenance_runner",
-            "ivd_daily_maintenance",
-            "ivd-maintenance-runner",
-        )
-    )
-    ivd_named = any(marker in identity for marker in ("ivd", "after-sales", "after_sales"))
-    scheduled_job = bool(schedule) or name.lower().endswith(".timer")
-    cron_named = any(marker in identity for marker in ("cron", "maintenance", "daily", "schedule"))
-    return exact_runner or (ivd_named and cron_named and (scheduled_job or bool(commands)))
+    return periodic and _has_explicit_ivd_identity(" ".join(identity_values))
 
 
 def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) -> bool:
     try:
         payload = plistlib.loads(text.encode("utf-8") if isinstance(text, str) else text)
-    except (ValueError, TypeError, plistlib.InvalidFileException):
+    except (ValueError, TypeError, IndexError, plistlib.InvalidFileException):
         return False
     if not isinstance(payload, dict):
         return False
@@ -491,21 +519,8 @@ def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) ->
     identity = f"{name} {label} {command_text}".lower()
     if "gateway run" in command_text or "gateway serve" in command_text:
         return False
-    exact_runner = any(
-        marker in command_text
-        for marker in (
-            "hermes_daily_maintenance_runner",
-            "ivd_daily_maintenance",
-            "ivd-maintenance-runner",
-        )
-    )
-    ivd_named = any(marker in identity for marker in ("ivd", "after-sales", "after_sales"))
-    scheduled_job = any(
-        key in payload
-        for key in ("StartInterval", "StartCalendarInterval", "StartOnMount")
-    )
-    cron_named = any(marker in identity for marker in ("cron", "maintenance", "daily", "schedule"))
-    return exact_runner or (ivd_named and cron_named and (scheduled_job or bool(arguments)))
+    periodic = any(key in payload for key in _LAUNCHD_PERIODIC_KEYS)
+    return periodic and _has_explicit_ivd_identity(identity)
 
 
 def _definition_is_independent_ivd_cron(kind: str, name: str, text: str | bytes) -> bool:
@@ -522,14 +537,16 @@ def _definition_is_independent_ivd_cron(kind: str, name: str, text: str | bytes)
 
 
 def _suspicious_ivd_cron_name(name: str) -> bool:
-    lowered = name.lower()
-    return any(marker in lowered for marker in ("ivd", "after-sales", "after_sales")) and any(
-        marker in lowered for marker in ("cron", "maintenance", "daily", "schedule")
+    return _has_explicit_ivd_identity(name)
+
+
+def _read_bounded_service_definition(path: Path, *, dir_fd: int | None = None) -> bytes:
+    open_path: str | Path = path.name if dir_fd is not None else path
+    descriptor = os.open(
+        open_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=dir_fd,
     )
-
-
-def _read_bounded_service_definition(path: Path) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         metadata = os.fstat(descriptor)
         limit = MAX_RECORD_BYTES * 2
@@ -551,12 +568,158 @@ def _read_bounded_service_definition(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def _map_service_scope(scope_root: Path, logical_path: Path) -> Path:
+    if not logical_path.is_absolute():
+        raise ValueError("service_scope_path_not_absolute")
+    logical_path = Path(os.path.normpath(os.fspath(logical_path)))
+    root = Path(os.path.normpath(os.fspath(scope_root)))
+    if root == Path("/"):
+        return logical_path
+    return root.joinpath(*logical_path.parts[1:])
+
+
+def _deduplicate_paths(paths: list[Path]) -> tuple[Path, ...]:
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = os.path.normcase(os.path.normpath(os.fspath(path)))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return tuple(unique)
+
+
+def discover_ivd_cron_service_scopes(
+    kind: str,
+    *,
+    target_path: Path,
+    scope_root: Path = Path("/"),
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    uid: int | None = None,
+    max_scopes: int = 32,
+) -> tuple[Path, ...]:
+    """Return bounded effective service scopes, optionally mapped under a test root."""
+    if kind not in {"systemd", "launchd"}:
+        raise ValueError("service_kind_invalid")
+    environment = os.environ if environ is None else environ
+    home_path = Path.home() if home is None else Path(home)
+    logical_paths: list[Path] = []
+    if kind == "systemd":
+        config_home = Path(environment.get("XDG_CONFIG_HOME", os.fspath(home_path / ".config")))
+        if not config_home.is_absolute():
+            config_home = home_path / ".config"
+        logical_paths.append(config_home / "systemd" / "user")
+        runtime_value = environment.get("XDG_RUNTIME_DIR", "")
+        if runtime_value and Path(runtime_value).is_absolute():
+            logical_paths.append(Path(runtime_value) / "systemd" / "user")
+        else:
+            effective_uid = uid
+            if effective_uid is None and hasattr(os, "getuid"):
+                effective_uid = os.getuid()
+            if effective_uid is not None:
+                logical_paths.append(Path("/run/user") / str(effective_uid) / "systemd" / "user")
+        logical_paths.extend(
+            Path(path)
+            for path in (
+                "/etc/systemd/user",
+                "/run/systemd/user",
+                "/usr/local/lib/systemd/user",
+                "/usr/lib/systemd/user",
+                "/etc/systemd/system",
+                "/run/systemd/system",
+                "/usr/local/lib/systemd/system",
+                "/usr/lib/systemd/system",
+            )
+        )
+    else:
+        logical_paths.extend(
+            (
+                home_path / "Library" / "LaunchAgents",
+                Path("/Library/LaunchAgents"),
+                Path("/Library/LaunchDaemons"),
+                Path("/System/Library/LaunchAgents"),
+                Path("/System/Library/LaunchDaemons"),
+            )
+        )
+    scopes = _deduplicate_paths(
+        [Path(target_path).parent]
+        + [_map_service_scope(Path(scope_root), path) for path in logical_paths]
+    )
+    if len(scopes) > max_scopes:
+        raise IvdCronServiceDiscoveryError("service_scope_limit", target_path)
+    return scopes
+
+
+def _scan_service_scope(
+    *,
+    kind: str,
+    scope: Path,
+    max_entries: int,
+) -> None:
+    try:
+        metadata = scope.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise IvdCronServiceDiscoveryError("service_scope_symlink", scope)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope)
+
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            scope,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("service_scope_not_directory")
+        with os.scandir(descriptor) as entries:
+            names: list[str] = []
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > max_entries:
+                    raise IvdCronServiceDiscoveryError("service_scope_entry_limit", scope)
+        suffixes = (".service", ".timer") if kind == "systemd" else (".plist",)
+        for name in sorted(names):
+            if not name.endswith(suffixes):
+                continue
+            path = scope / name
+            try:
+                raw = _read_bounded_service_definition(path, dir_fd=descriptor)
+            except OSError:
+                if _suspicious_ivd_cron_name(name):
+                    raise IndependentIvdCronServiceError(path)
+                continue
+            if _definition_is_independent_ivd_cron(kind, name, raw):
+                raise IndependentIvdCronServiceError(path)
+    except (IndependentIvdCronServiceError, IvdCronServiceDiscoveryError):
+        raise
+    except OSError as exc:
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def assert_embedded_ivd_cron_service_contract(
     *,
     kind: str,
     service_dir: Path,
     target_path: Path,
     candidate_definition: str | None = None,
+    scope_root: Path = Path("/"),
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    uid: int | None = None,
+    max_entries_per_scope: int = 512,
+    max_scopes: int = 32,
 ) -> FenceDecision:
     """Reject only independent IVD schedulers, preserving unrelated cron jobs."""
     contract = validate_runtime_contract(
@@ -567,21 +730,20 @@ def assert_embedded_ivd_cron_service_contract(
     if kind not in {"systemd", "launchd"}:
         raise ValueError("service_kind_invalid")
 
+    scopes = discover_ivd_cron_service_scopes(
+        kind,
+        target_path=target_path,
+        scope_root=scope_root,
+        home=home,
+        environ=environ,
+        uid=uid,
+        max_scopes=max_scopes,
+    )
     service_dir = Path(service_dir)
-    patterns = ("*.service", "*.timer") if kind == "systemd" else ("*.plist",)
-    if service_dir.is_dir():
-        for pattern in patterns:
-            for path in sorted(service_dir.glob(pattern)):
-                try:
-                    raw = _read_bounded_service_definition(path)
-                except IndependentIvdCronServiceError:
-                    raise
-                except OSError:
-                    if _suspicious_ivd_cron_name(path.name):
-                        raise IndependentIvdCronServiceError(path)
-                    continue
-                if _definition_is_independent_ivd_cron(kind, path.name, raw):
-                    raise IndependentIvdCronServiceError(path)
+    if service_dir not in scopes:
+        scopes = _deduplicate_paths([service_dir, *scopes])
+    for scope in scopes:
+        _scan_service_scope(kind=kind, scope=scope, max_entries=max_entries_per_scope)
 
     if candidate_definition is not None and _definition_is_independent_ivd_cron(
         kind, Path(target_path).name, candidate_definition

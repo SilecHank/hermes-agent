@@ -19,24 +19,35 @@ INDEPENDENT_SYSTEMD = """[Unit]
 Description=IVD daily cron
 [Service]
 ExecStart=/usr/bin/python3 /opt/ivd/scripts/hermes_daily_maintenance_runner.py
+[Timer]
+OnUnitActiveSec=1h
 """
 
 
-def _plist(label: str, arguments: list[str]) -> str:
+def _plist(label: str, arguments: list[str], **extra: object) -> str:
+    payload: dict[str, object] = {
+        "Label": label,
+        "ProgramArguments": arguments,
+        "RunAtLoad": True,
+    }
+    payload.update(extra)
     return plistlib.dumps(
-        {"Label": label, "ProgramArguments": arguments, "RunAtLoad": True},
+        payload,
         fmt=plistlib.FMT_XML,
     ).decode("utf-8")
 
 
 SAFE_LAUNCHD = _plist("com.nous.hermes.gateway", ["/usr/bin/hermes", "gateway", "run"])
 INDEPENDENT_LAUNCHD = _plist(
-    "com.silechank.ivd.daily-maintenance",
+    "com.example.ivd.sync",
     ["/usr/bin/python3", "/opt/ivd/scripts/hermes_daily_maintenance_runner.py"],
+    StartInterval=3600,
 )
 
 
 def _systemd_mocks(monkeypatch, target: Path, generated: str = SAFE_SYSTEMD):
+    scope_root = target.parent.parent / "scope-root"
+    scope_root.mkdir(exist_ok=True)
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: target)
     monkeypatch.setattr(gateway_cli, "has_legacy_hermes_units", lambda: False)
     monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda **kwargs: generated)
@@ -44,13 +55,23 @@ def _systemd_mocks(monkeypatch, target: Path, generated: str = SAFE_SYSTEMD):
     monkeypatch.setattr(gateway_cli, "print_systemd_scope_conflict_warning", lambda: None)
     monkeypatch.setattr(gateway_cli, "print_legacy_unit_warning", lambda: None)
     monkeypatch.setattr(gateway_cli, "_run_systemctl", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_scope_root", lambda: scope_root, raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_home", lambda: Path("/home/test"), raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_environ", lambda: {}, raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_uid", lambda: 1000, raising=False)
 
 
 def _launchd_mocks(monkeypatch, target: Path, generated: str = SAFE_LAUNCHD):
+    scope_root = target.parent.parent / "scope-root"
+    scope_root.mkdir(exist_ok=True)
     monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: target)
     monkeypatch.setattr(gateway_cli, "generate_launchd_plist", lambda: generated)
     monkeypatch.setattr(gateway_cli, "_launchctl_bootstrap", lambda *args, **kwargs: None)
     monkeypatch.setattr(gateway_cli, "_clear_launchd_unsupported_marker", lambda: None)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_scope_root", lambda: scope_root, raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_home", lambda: Path("/Users/test"), raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_environ", lambda: {}, raising=False)
+    monkeypatch.setattr(gateway_cli, "_ivd_service_contract_uid", lambda: 501, raising=False)
 
 
 def test_systemd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
@@ -58,7 +79,10 @@ def test_systemd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
 
     target = tmp_path / "systemd" / "hermes-gateway.service"
     target.parent.mkdir()
-    (target.parent / "ivd-daily-cron.service").write_text(INDEPENDENT_SYSTEMD, encoding="utf-8")
+    (target.parent / "ivd-sync.timer").write_text(
+        "[Unit]\nDescription=IVD sync timer\n[Timer]\nOnCalendar=hourly\nUnit=ivd-sync.service\n",
+        encoding="utf-8",
+    )
     _systemd_mocks(monkeypatch, target)
     with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
         gateway_cli.systemd_install(force=True)
@@ -152,10 +176,47 @@ def test_installers_allow_embedded_gateway_and_unrelated_system_cron(monkeypatch
     assert launchd_target.read_text(encoding="utf-8") == SAFE_LAUNCHD
 
 
+def test_manual_ivd_services_without_periodic_configuration_are_allowed(tmp_path):
+    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+
+    systemd_dir = tmp_path / "systemd"
+    systemd_dir.mkdir()
+    (systemd_dir / "ivd-maintenance.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/manual-maintenance\n",
+        encoding="utf-8",
+    )
+    assert assert_embedded_ivd_cron_service_contract(
+        kind="systemd",
+        service_dir=systemd_dir,
+        target_path=systemd_dir / "hermes-gateway.service",
+        scope_root=tmp_path / "empty-root",
+    ).allowed
+
+    launchd_dir = tmp_path / "LaunchAgents"
+    launchd_dir.mkdir()
+    (launchd_dir / "com.example.ivd.sync.plist").write_text(
+        plistlib.dumps(
+            {
+                "Label": "com.example.ivd.sync",
+                "ProgramArguments": ["/opt/ivd/manual-sync"],
+                "KeepAlive": True,
+            },
+            fmt=plistlib.FMT_XML,
+        ).decode("utf-8"),
+        encoding="utf-8",
+    )
+    assert assert_embedded_ivd_cron_service_contract(
+        kind="launchd",
+        service_dir=launchd_dir,
+        target_path=launchd_dir / "com.nous.hermes.gateway.plist",
+        scope_root=tmp_path / "empty-root",
+    ).allowed
+
+
 @pytest.mark.parametrize(
     ("kind", "name"),
     [
-        ("systemd", "ivd-daily-cron.service"),
+        ("systemd", "ivd-sync.timer"),
         ("launchd", "com.silechank.ivd.maintenance.plist"),
     ],
 )
@@ -176,6 +237,7 @@ def test_contract_blocks_suspicious_service_symlink_without_following(kind, name
             kind=kind,
             service_dir=service_dir,
             target_path=service_dir / target_name,
+            scope_root=tmp_path / "empty-root",
         )
 
 
@@ -202,4 +264,211 @@ def test_launchd_contract_parses_binary_plist_with_program_only(tmp_path):
             kind="launchd",
             service_dir=service_dir,
             target_path=service_dir / "com.nous.hermes.gateway.plist",
+            scope_root=tmp_path / "empty-root",
+        )
+
+
+def test_launchd_contract_leaves_malformed_candidate_to_installer_validation(tmp_path):
+    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+
+    service_dir = tmp_path / "LaunchAgents"
+    service_dir.mkdir()
+    decision = assert_embedded_ivd_cron_service_contract(
+        kind="launchd",
+        service_dir=service_dir,
+        target_path=service_dir / "com.nous.hermes.gateway.plist",
+        candidate_definition=(
+            "<plist>--replace\n<key>HERMES_HOME</key>"
+            "<string>/Users/alice/.hermes</string></plist>"
+        ),
+        scope_root=tmp_path / "empty-root",
+    )
+    assert decision.allowed
+
+
+def _mapped(root: Path, absolute: str) -> Path:
+    return root / absolute.lstrip("/")
+
+
+def test_systemd_discovers_ivd_timer_outside_target_parent(tmp_path):
+    from gateway.active_host_fence import (
+        IndependentIvdCronServiceError,
+        assert_embedded_ivd_cron_service_contract,
+    )
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/usr/lib/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "ivd-sync.timer").write_text(
+        "[Timer]\nOnUnitActiveSec=15m\nUnit=ivd-sync.service\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        assert_embedded_ivd_cron_service_contract(
+            kind="systemd",
+            service_dir=target_dir,
+            target_path=target_dir / "hermes-gateway.service",
+            scope_root=root,
+            home=Path("/home/test"),
+            environ={},
+            uid=1000,
+        )
+
+
+def test_launchd_discovers_periodic_ivd_job_outside_target_parent(tmp_path):
+    from gateway.active_host_fence import (
+        IndependentIvdCronServiceError,
+        assert_embedded_ivd_cron_service_contract,
+    )
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/Library/LaunchDaemons")
+    scope.mkdir(parents=True)
+    (scope / "com.example.ivd.sync.plist").write_text(
+        _plist("com.example.ivd.sync", ["/opt/bin/sync"]),
+        encoding="utf-8",
+    )
+    payload = plistlib.loads((scope / "com.example.ivd.sync.plist").read_bytes())
+    payload["StartCalendarInterval"] = {"Minute": 15}
+    (scope / "com.example.ivd.sync.plist").write_bytes(plistlib.dumps(payload))
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        assert_embedded_ivd_cron_service_contract(
+            kind="launchd",
+            service_dir=target_dir,
+            target_path=target_dir / "com.nous.hermes.gateway.plist",
+            scope_root=root,
+            home=Path("/Users/test"),
+            environ={},
+            uid=501,
+        )
+
+
+def test_scope_discovery_is_complete_mapped_and_deduplicated(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={
+            "XDG_CONFIG_HOME": "/home/test/.config",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+        },
+        uid=1000,
+    )
+    expected = {
+        _mapped(root, path)
+        for path in (
+            "/home/test/.config/systemd/user",
+            "/run/user/1000/systemd/user",
+            "/etc/systemd/user",
+            "/run/systemd/user",
+            "/usr/local/lib/systemd/user",
+            "/usr/lib/systemd/user",
+            "/etc/systemd/system",
+            "/run/systemd/system",
+            "/usr/local/lib/systemd/system",
+            "/usr/lib/systemd/system",
+        )
+    }
+    assert set(scopes) == expected
+    assert len(scopes) == len(set(scopes))
+
+    launchd_scopes = discover_ivd_cron_service_scopes(
+        "launchd",
+        target_path=_mapped(root, "/Users/test/Library/LaunchAgents/com.nous.hermes.gateway.plist"),
+        scope_root=root,
+        home=Path("/Users/test"),
+        environ={},
+        uid=501,
+    )
+    assert set(launchd_scopes) == {
+        _mapped(root, path)
+        for path in (
+            "/Users/test/Library/LaunchAgents",
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/System/Library/LaunchAgents",
+            "/System/Library/LaunchDaemons",
+        )
+    }
+
+
+def test_scope_mapping_normalizes_parent_segments_inside_temporary_root(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=tmp_path / "target" / "hermes-gateway.service",
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={"XDG_CONFIG_HOME": "/home/test/../../etc"},
+        uid=1000,
+    )
+    mapped_scopes = [scope for scope in scopes if scope != tmp_path / "target"]
+    assert _mapped(root, "/etc/systemd/user") in mapped_scopes
+    assert all(".." not in scope.parts for scope in mapped_scopes)
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "unreadable"])
+def test_scope_scan_fails_closed_for_unsafe_scope(tmp_path, unsafe_kind):
+    from gateway.active_host_fence import (
+        IvdCronServiceDiscoveryError,
+        assert_embedded_ivd_cron_service_contract,
+    )
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/system")
+    scope.parent.mkdir(parents=True)
+    if unsafe_kind == "symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        scope.symlink_to(outside, target_is_directory=True)
+        reason = "service_scope_symlink"
+    else:
+        scope.mkdir()
+        scope.chmod(0)
+        reason = "service_scope_unreadable"
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    try:
+        with pytest.raises(IvdCronServiceDiscoveryError, match=reason):
+            assert_embedded_ivd_cron_service_contract(
+                kind="systemd",
+                service_dir=target_dir,
+                target_path=target_dir / "hermes-gateway.service",
+                scope_root=root,
+                home=Path("/home/test"),
+                environ={},
+                uid=1000,
+            )
+    finally:
+        if unsafe_kind == "unreadable":
+            scope.chmod(0o700)
+
+
+def test_scope_scan_has_entry_limit(tmp_path):
+    from gateway.active_host_fence import (
+        IvdCronServiceDiscoveryError,
+        assert_embedded_ivd_cron_service_contract,
+    )
+
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    for index in range(3):
+        (target_dir / f"unrelated-{index}.service").write_text(SAFE_SYSTEMD, encoding="utf-8")
+    with pytest.raises(IvdCronServiceDiscoveryError, match="service_scope_entry_limit"):
+        assert_embedded_ivd_cron_service_contract(
+            kind="systemd",
+            service_dir=target_dir,
+            target_path=target_dir / "hermes-gateway.service",
+            scope_root=tmp_path / "empty-root",
+            max_entries_per_scope=2,
         )
