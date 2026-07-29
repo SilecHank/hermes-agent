@@ -44,9 +44,10 @@ but no normal profile plans to consume it.
 
 1. Use `complex_diagnosis` for explicit cross-product, multi-abnormality, or
    conflicting-version diagnosis. These safety signals override a fast route.
-2. Use `direct` when a verified fast route supplies one or more formal source
-   paths and the question has no explicit conflict or literature-expansion
-   intent. The model reads those paths; file search is not needed.
+2. Use `direct` when a verified fast route supplies one or more existing formal
+   source files inside the IVD KnowledgeHub and the question has no explicit
+   conflict or literature-expansion intent. The model reads those paths; file
+   search is not needed.
 3. Use `evidence_supplement` for mechanism, principle, guideline, literature,
    source-version, or explicit evidence questions that were not fully covered
    by a verified direct route.
@@ -65,9 +66,9 @@ but no normal profile plans to consume it.
 5. Evidence and complex profiles may enter only their declared next stage.
 6. Two consecutive searches with no new formal source paths transition to
    `stop`, even when a numeric allowance remains.
-7. Searches in `_extracted`, candidate matrices, archives, deprecated content,
-   or `pending_verify` layers never count as evidence gain and never unlock an
-   additional stage.
+7. Searches in `_extracted`, `_wechat-mirror`, evaluation output, candidate
+   matrices, archives, deprecated content, or `pending_verify` layers never
+   count as evidence gain and never unlock an additional stage.
 
 ## Query Batching
 
@@ -97,10 +98,10 @@ Each IVD turn records:
 
 - resolved retrieval profile
 - stages entered
-- search signatures
-- result count and novel formal source count
-- stop reason (`direct`, `formal_source_found`, `duplicate`, `no_gain`, or
-  `hard_limit`)
+- search signature count (raw patterns are never persisted)
+- novel formal source count
+- stop reason (`direct`, `formal_source_found`, `duplicate`,
+  `duplicate_intent`, `no_gain`, or `hard_limit`)
 
 Telemetry is diagnostic only and cannot write or promote formal knowledge.
 

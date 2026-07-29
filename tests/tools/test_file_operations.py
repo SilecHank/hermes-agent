@@ -759,9 +759,9 @@ class TestSearchFilesFallbackHiddenPaths:
 
 class TestIVDKnowledgeSearchBoundary:
     @staticmethod
-    def _ops():
+    def _ops(cwd="/"):
         env = MagicMock()
-        env.cwd = "/"
+        env.cwd = cwd
 
         def execute(command, **kwargs):
             completed = subprocess.run(
@@ -770,6 +770,7 @@ class TestIVDKnowledgeSearchBoundary:
                 executable="/bin/bash",
                 text=True,
                 capture_output=True,
+                cwd=kwargs.get("cwd"),
             )
             return {"output": completed.stdout + completed.stderr, "returncode": completed.returncode}
 
@@ -784,6 +785,8 @@ class TestIVDKnowledgeSearchBoundary:
             "extracted": kb / "_extracted" / "truncated.md",
             "matrix": kb / "matrices" / "case-mechanism-candidates.tsv",
             "archive": kb / "archive" / "old.md",
+            "evaluation": kb / "evaluation" / "score.md",
+            "mirror": kb / "_wechat-mirror" / "copied.md",
         }
         for path in files.values():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -813,20 +816,97 @@ class TestIVDKnowledgeSearchBoundary:
         assert {match.path for match in result.matches} == {str(files["extracted"])}
 
     def test_answer_mode_returns_internal_budget_signal(self, tmp_path):
-        from gateway.ivd_runtime import begin_ivd_answer_turn, end_ivd_answer_turn
+        from gateway.ivd_runtime import (
+            INDEX_FALLBACK_POLICY,
+            begin_ivd_answer_turn,
+            end_ivd_answer_turn,
+            get_ivd_retrieval_snapshot,
+        )
 
         kb, _ = self._kb(tmp_path)
         ops = self._ops()
-        token = begin_ivd_answer_turn(max_searches=1, mode="answer")
+        token = begin_ivd_answer_turn(policy=INDEX_FALLBACK_POLICY, mode="answer")
         try:
             assert ops.search("needle", path=str(kb), target="content").error is None
+            snapshot = get_ivd_retrieval_snapshot()
             blocked = ops.search("needle", path=str(kb), target="content")
         finally:
             end_ivd_answer_turn(token)
 
+        assert snapshot["formal_source_count"] == 1
+        assert snapshot["stop_reason"] == "formal_source_found"
         assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in blocked.error
         assert "do not disclose" in blocked.error.lower()
         assert "检索预算已用完" not in blocked.error
+
+    def test_direct_profile_blocks_first_real_file_search(self, tmp_path):
+        from gateway.ivd_runtime import (
+            DIRECT_POLICY,
+            begin_ivd_answer_turn,
+            end_ivd_answer_turn,
+            get_ivd_retrieval_snapshot,
+        )
+
+        kb, _ = self._kb(tmp_path)
+        token = begin_ivd_answer_turn(policy=DIRECT_POLICY, mode="answer")
+        try:
+            blocked = self._ops().search("needle", path=str(kb), target="content")
+            snapshot = get_ivd_retrieval_snapshot()
+        finally:
+            end_ivd_answer_turn(token)
+
+        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in blocked.error
+        assert snapshot["searches"] == 0
+        assert snapshot["stop_reason"] == "direct"
+
+    def test_repeated_real_search_is_rejected_as_duplicate(self, tmp_path):
+        from gateway.ivd_runtime import (
+            EVIDENCE_SUPPLEMENT_POLICY,
+            begin_ivd_answer_turn,
+            end_ivd_answer_turn,
+            get_ivd_retrieval_snapshot,
+        )
+
+        kb, _ = self._kb(tmp_path)
+        ops = self._ops()
+        token = begin_ivd_answer_turn(
+            policy=EVIDENCE_SUPPLEMENT_POLICY, mode="answer"
+        )
+        try:
+            first = ops.search("needle", path=str(kb), target="content")
+            repeated = ops.search("needle", path=str(kb), target="content")
+            snapshot = get_ivd_retrieval_snapshot()
+        finally:
+            end_ivd_answer_turn(token)
+
+        assert first.error is None
+        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in repeated.error
+        assert snapshot["searches"] == 1
+        assert snapshot["formal_source_count"] == 1
+        assert snapshot["stop_reason"] == "duplicate"
+
+    def test_relative_ivd_search_result_is_resolved_against_live_cwd(self, tmp_path):
+        from gateway.ivd_runtime import (
+            INDEX_FALLBACK_POLICY,
+            begin_ivd_answer_turn,
+            end_ivd_answer_turn,
+            get_ivd_retrieval_snapshot,
+        )
+
+        kb, _ = self._kb(tmp_path)
+        project_root = kb.parent
+        token = begin_ivd_answer_turn(policy=INDEX_FALLBACK_POLICY, mode="answer")
+        try:
+            result = self._ops(cwd=str(project_root)).search(
+                "needle", path="knowledge-base", target="content"
+            )
+            snapshot = get_ivd_retrieval_snapshot()
+        finally:
+            end_ivd_answer_turn(token)
+
+        assert result.error is None
+        assert snapshot["formal_source_count"] == 1
+        assert snapshot["stop_reason"] == "formal_source_found"
 
 class TestShellFileOpsWriteDenied:
     def test_write_file_denied_path(self, file_ops):

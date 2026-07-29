@@ -91,7 +91,7 @@ record_ivd_search_result(*, pattern, path, target, result_paths)
 get_ivd_retrieval_snapshot()
 ```
 
-Normalize signatures with collapsed whitespace, case-folded patterns, normalized expanded paths, and target. Track entered stage names, unique formal paths, no-gain streak, and stop reason. Treat `_extracted`, matrices, archive, deprecated, superseded, and candidate paths as non-formal. Preserve the existing three-value return tuple for compatibility.
+Normalize signatures with collapsed whitespace, case-folded patterns, normalized expanded paths, and target. Track entered stage names, unique formal paths, no-gain streak, and stop reason. Treat `_extracted`, `_wechat-mirror`, evaluation output, matrices, archive, deprecated, superseded, and candidate paths as non-formal. Preserve the existing three-value return tuple for compatibility.
 
 - [ ] **Step 4: Run the runtime test and confirm it passes**
 
@@ -139,7 +139,9 @@ Expected: all tests in both files pass.
 
 **Files:**
 - Modify: `gateway/run.py`
+- Modify: `gateway/after_sales_telemetry.py`
 - Modify: `tests/gateway/test_ivd_runtime.py`
+- Modify: `tests/gateway/test_after_sales_telemetry.py`
 
 - [ ] **Step 1: Add a failing telemetry snapshot test**
 
@@ -198,7 +200,7 @@ Expected: both commands exit successfully without diagnostics.
 - [ ] **Step 3: Commit and push**
 
 ```bash
-git add gateway/ivd_runtime.py gateway/run.py tools/file_operations.py tests/gateway/test_ivd_runtime.py tests/tools/test_file_operations.py docs/superpowers/specs/2026-07-29-purpose-driven-retrieval-state-machine-design.md
+git add gateway/ivd_runtime.py gateway/run.py gateway/after_sales_telemetry.py tools/file_operations.py tests/gateway/test_ivd_runtime.py tests/gateway/test_after_sales_telemetry.py tests/tools/test_file_operations.py docs/superpowers/specs/2026-07-29-purpose-driven-retrieval-state-machine-design.md
 git commit -m "Add purpose-driven IVD retrieval states"
 git push hermes-bot ivd-after-sales-guard-20260725
 ```

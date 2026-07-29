@@ -21285,6 +21285,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "After-sales workflow fact injection skipped: %s", _guard_exc
                 )
 
+            _ivd_retrieval_policy = None
+            try:
+                from gateway.ivd_runtime import (
+                    build_ivd_retrieval_context,
+                    resolve_enabled_ivd_retrieval,
+                )
+
+                _ivd_retrieval_policy = resolve_enabled_ivd_retrieval(
+                    user_config,
+                    platform=platform_key,
+                    message=message,
+                    turn=_after_sales_turn,
+                )
+                if _ivd_retrieval_policy is not None:
+                    combined_ephemeral = (
+                        combined_ephemeral
+                        + "\n\n"
+                        + build_ivd_retrieval_context(_ivd_retrieval_policy)
+                    ).strip()
+            except Exception as _retrieval_policy_exc:
+                logger.warning(
+                    "IVD retrieval policy resolution failed; using legacy hard cap: %s",
+                    _retrieval_policy_exc,
+                )
+
             max_iterations = _current_max_iterations()
 
             try:
@@ -22242,6 +22267,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _ivd_started_at = time.monotonic()
             _approval_session_token = set_current_session_key(_approval_session_key)
             _ivd_runtime_token = None
+            _ivd_retrieval_snapshot: dict[str, object] = {}
             _after_sales_config = user_config.get("after_sales_guard") or {}
             _after_sales_platforms = _after_sales_config.get("platforms") or []
             if isinstance(_after_sales_platforms, str):
@@ -22255,10 +22281,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ):
                 from gateway.ivd_runtime import begin_ivd_answer_turn
 
-                _ivd_runtime_token = begin_ivd_answer_turn(
-                    max_searches=1 if (_after_sales_turn and _after_sales_turn.fast_path) else 4,
-                    mode="answer",
-                )
+                if _ivd_retrieval_policy is not None:
+                    _ivd_runtime_token = begin_ivd_answer_turn(
+                        policy=_ivd_retrieval_policy,
+                        mode="answer",
+                    )
+                else:
+                    _ivd_runtime_token = begin_ivd_answer_turn(
+                        max_searches=4,
+                        mode="answer",
+                    )
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
@@ -22312,9 +22344,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 if _ivd_runtime_token is not None:
-                    from gateway.ivd_runtime import end_ivd_answer_turn
+                    from gateway.ivd_runtime import (
+                        end_ivd_answer_turn,
+                        get_ivd_retrieval_snapshot,
+                    )
 
-                    end_ivd_answer_turn(_ivd_runtime_token)
+                    try:
+                        _ivd_retrieval_snapshot = get_ivd_retrieval_snapshot()
+                        logger.info(
+                            "IVD retrieval: profile=%s stages=%s searches=%s "
+                            "signatures=%s formal_sources=%s stop=%s",
+                            _ivd_retrieval_snapshot.get("profile", "inactive"),
+                            ",".join(_ivd_retrieval_snapshot.get("stages", [])),
+                            _ivd_retrieval_snapshot.get("searches", 0),
+                            _ivd_retrieval_snapshot.get("signature_count", 0),
+                            _ivd_retrieval_snapshot.get("formal_source_count", 0),
+                            _ivd_retrieval_snapshot.get("stop_reason", ""),
+                        )
+                    except Exception as _retrieval_snapshot_exc:
+                        logger.debug(
+                            "IVD retrieval snapshot skipped: %s",
+                            _retrieval_snapshot_exc,
+                        )
+                    finally:
+                        end_ivd_answer_turn(_ivd_runtime_token)
                 # Cancel any pending clarify entries so blocked agent
                 # threads don't hang past the end of the run (interrupt,
                 # completion, gateway shutdown).  Idempotent.
@@ -22402,6 +22455,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             else ()
                         ),
                         validation_status=_validation_status,
+                        retrieval_snapshot=_ivd_retrieval_snapshot,
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (
                         get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"

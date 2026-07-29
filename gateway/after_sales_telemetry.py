@@ -24,10 +24,17 @@ def build_runtime_event(
     source_paths: Iterable[str],
     validation_status: str,
     answer_text: str = "",
+    retrieval_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     del answer_text
     tools = [str(name) for name in tool_names if str(name)]
     sources = [str(path) for path in source_paths if str(path)]
+    retrieval = retrieval_snapshot or {}
+    retrieval_stages = [
+        str(stage)[:64]
+        for stage in (retrieval.get("stages") or [])
+        if str(stage)
+    ][:4]
     return {
         "schema_version": 1,
         "event_type": "ivd_answer_turn",
@@ -44,6 +51,19 @@ def build_runtime_event(
         "tool_count": len(tools),
         "source_paths": sources,
         "validation_status": str(validation_status or "unknown"),
+        "retrieval_profile": str(retrieval.get("profile") or "inactive")[:64],
+        "retrieval_stages": retrieval_stages,
+        "retrieval_searches": max(0, int(retrieval.get("searches") or 0)),
+        "retrieval_signature_count": max(
+            0, int(retrieval.get("signature_count") or 0)
+        ),
+        "retrieval_formal_source_count": max(
+            0, int(retrieval.get("formal_source_count") or 0)
+        ),
+        "retrieval_no_gain_streak": max(
+            0, int(retrieval.get("no_gain_streak") or 0)
+        ),
+        "retrieval_stop_reason": str(retrieval.get("stop_reason") or "")[:64],
     }
 
 

@@ -17,6 +17,15 @@ def test_runtime_event_is_sanitized_and_versioned(tmp_path):
         source_paths=["knowledge-base/reference/nifty-troubleshooting-tree.md"],
         validation_status="pass",
         answer_text="患者姓名和完整回答不得写入事件",
+        retrieval_snapshot={
+            "profile": "direct",
+            "stages": [],
+            "searches": 0,
+            "signature_count": 1,
+            "formal_source_count": 0,
+            "no_gain_streak": 0,
+            "stop_reason": "direct",
+        },
     )
 
     assert event["schema_version"] == 1
@@ -24,6 +33,11 @@ def test_runtime_event_is_sanitized_and_versioned(tmp_path):
     assert event["product_scope"] == "NIFTY"
     assert event["fast_path"] is True
     assert event["tool_count"] == 1
+    assert event["retrieval_profile"] == "direct"
+    assert event["retrieval_stages"] == []
+    assert event["retrieval_searches"] == 0
+    assert event["retrieval_signature_count"] == 1
+    assert event["retrieval_stop_reason"] == "direct"
     assert "answer" not in event
     assert "患者" not in json.dumps(event, ensure_ascii=False)
 

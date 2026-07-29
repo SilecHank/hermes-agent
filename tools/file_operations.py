@@ -2052,7 +2052,9 @@ class ShellFileOperations(FileOperations):
 
     _IVD_NON_FORMAL_GLOBS = (
         "!**/_extracted/**",
+        "!**/_wechat-mirror/**",
         "!**/matrices/**",
+        "!**/evaluation/**",
         "!**/archive/**",
         "!**/deprecated/**",
         "!**/superseded/**",
@@ -2096,25 +2098,38 @@ class ShellFileOperations(FileOperations):
         """
         offset, limit = normalize_search_pagination(offset, limit)
 
-        try:
-            from gateway.ivd_runtime import consume_ivd_search
+        # Expand ~ and other shell paths before retrieval-policy signature
+        # normalization so equivalent paths deduplicate consistently.
+        path = self._expand_path(path)
 
-            search_allowed, search_number, search_limit = consume_ivd_search()
+        try:
+            from gateway.ivd_runtime import (
+                consume_ivd_search,
+                get_ivd_retrieval_snapshot,
+            )
+
+            search_allowed, search_number, search_limit = consume_ivd_search(
+                pattern=pattern,
+                path=path,
+                target=target,
+            )
+            stop_reason = str(
+                get_ivd_retrieval_snapshot().get("stop_reason") or "profile_limit"
+            )
         except Exception:
             search_allowed, search_number, search_limit = True, 0, 0
+            stop_reason = "runtime_unavailable"
         if not search_allowed:
             return SearchResult(
                 error=(
                     "[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED "
-                    f"used={search_number - 1} limit={search_limit}]\n"
+                    f"used={search_number - 1} limit={search_limit} "
+                    f"reason={stop_reason}]\n"
                     "Stop file searching and answer from evidence already collected. "
                     "Do not disclose this signal, its counter, or the retrieval budget. "
                     "If evidence is insufficient, state the evidence boundary without guessing."
                 )
             )
-
-        # Expand ~ and other shell paths
-        path = self._expand_path(path)
         
         # Validate that the path exists before searching
         check = self._exec(f"test -e {self._escape_shell_arg(path)} && echo exists || echo not_found")
@@ -2144,16 +2159,56 @@ class ShellFileOperations(FileOperations):
                         hint_parts.append(
                             "Similar paths: " + ", ".join(candidates[:5])
                         )
-            return SearchResult(
+            result = SearchResult(
                 error=". ".join(hint_parts),
                 total_count=0
             )
+            self._record_ivd_search_result(pattern, path, target, result)
+            return result
         
         if target == "files":
-            return self._search_files(pattern, path, limit, offset)
+            result = self._search_files(pattern, path, limit, offset)
         else:
-            return self._search_content(pattern, path, file_glob, limit, offset, 
-                                        output_mode, context)
+            result = self._search_content(
+                pattern,
+                path,
+                file_glob,
+                limit,
+                offset,
+                output_mode,
+                context,
+            )
+        self._record_ivd_search_result(pattern, path, target, result)
+        return result
+
+    def _record_ivd_search_result(
+        self,
+        pattern: str,
+        path: str,
+        target: str,
+        result: SearchResult,
+    ) -> None:
+        result_paths = list(result.files)
+        result_paths.extend(match.path for match in result.matches if match.path)
+        result_paths.extend(str(candidate) for candidate in result.counts if candidate)
+        effective_cwd = getattr(self.env, "cwd", None) or self.cwd
+        normalized_paths = []
+        for candidate in result_paths:
+            candidate_path = os.path.expanduser(str(candidate))
+            if not os.path.isabs(candidate_path):
+                candidate_path = os.path.join(effective_cwd, candidate_path)
+            normalized_paths.append(os.path.normpath(candidate_path))
+        try:
+            from gateway.ivd_runtime import record_ivd_search_result
+
+            record_ivd_search_result(
+                pattern=pattern,
+                path=path,
+                target=target,
+                result_paths=tuple(dict.fromkeys(normalized_paths)),
+            )
+        except Exception:
+            pass
     
     def _search_files(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
         """Search for files by name pattern (glob-like)."""
