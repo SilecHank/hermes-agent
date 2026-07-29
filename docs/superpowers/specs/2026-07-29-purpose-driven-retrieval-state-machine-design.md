@@ -42,12 +42,14 @@ but no normal profile plans to consume it.
 
 ## Profile Resolution
 
-1. Use `direct` when a verified fast route supplies one or more formal source
-   paths. The model reads those paths; file search is not needed.
-2. Use `evidence_supplement` for mechanism, principle, guideline, literature,
-   source-version, or explicit evidence questions.
-3. Use `complex_diagnosis` only for explicit cross-product, multi-abnormality,
-   or conflicting-version diagnosis.
+1. Use `complex_diagnosis` for explicit cross-product, multi-abnormality, or
+   conflicting-version diagnosis. These safety signals override a fast route.
+2. Use `direct` when a verified fast route supplies one or more formal source
+   paths and the question has no explicit conflict or literature-expansion
+   intent. The model reads those paths; file search is not needed.
+3. Use `evidence_supplement` for mechanism, principle, guideline, literature,
+   source-version, or explicit evidence questions that were not fully covered
+   by a verified direct route.
 4. Use `index_fallback` for all remaining unmatched IVD questions.
 5. A route that requires formal-source validation but has no valid source path
    cannot use `direct`; it falls back to `index_fallback` and remains fail-closed.
