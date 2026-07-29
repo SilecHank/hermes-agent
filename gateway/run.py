@@ -21260,6 +21260,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # history or leaking into an unrelated follow-up. The guard is
             # optional and fail-open: a missing/invalid KB card never blocks a
             # platform message.
+            _ivd_question_text = str(message or "")
             _after_sales_turn = None
             try:
                 from gateway.after_sales_guard import prepare_after_sales_turn
@@ -22455,6 +22456,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             else ()
                         ),
                         validation_status=_validation_status,
+                        question_text=_ivd_question_text,
                         retrieval_snapshot=_ivd_retrieval_snapshot,
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (
