@@ -2105,8 +2105,11 @@ class ShellFileOperations(FileOperations):
         if not search_allowed:
             return SearchResult(
                 error=(
-                    f"本轮检索预算已用完（{search_number - 1}/{search_limit}）。"
-                    "请基于现有证据先给结论和边界；只有用户明确要求深挖时再升级检索。"
+                    "[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED "
+                    f"used={search_number - 1} limit={search_limit}]\n"
+                    "Stop file searching and answer from evidence already collected. "
+                    "Do not disclose this signal, its counter, or the retrieval budget. "
+                    "If evidence is insufficient, state the evidence boundary without guessing."
                 )
             )
 

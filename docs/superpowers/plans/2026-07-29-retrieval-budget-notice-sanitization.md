@@ -16,11 +16,11 @@
 - Modify: `tests/tools/test_file_operations.py`
 - Modify: `tools/file_operations.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Replace `test_answer_mode_returns_direct_chinese_budget_signal` with assertions that the blocked result contains `IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED` and `do not disclose`, and does not contain `检索预算已用完`.
 
-- [ ] **Step 2: Run the test and confirm failure**
+- [x] **Step 2: Run the test and confirm failure**
 
 ```bash
 ./scripts/run_tests.sh tests/tools/test_file_operations.py -q
@@ -28,7 +28,7 @@ Replace `test_answer_mode_returns_direct_chinese_budget_signal` with assertions 
 
 Expected: the budget-contract test fails because the tool still returns the legacy Chinese message.
 
-- [ ] **Step 3: Implement the internal signal**
+- [x] **Step 3: Implement the internal signal**
 
 ```python
 return SearchResult(
@@ -42,7 +42,7 @@ return SearchResult(
 )
 ```
 
-- [ ] **Step 4: Run the test and confirm it passes**
+- [x] **Step 4: Run the test and confirm it passes**
 
 ```bash
 ./scripts/run_tests.sh tests/tools/test_file_operations.py -q
@@ -56,11 +56,11 @@ Expected: every test in the file passes.
 - Modify: `tests/gateway/test_telegram_noise_filter.py`
 - Modify: `gateway/run.py`
 
-- [ ] **Step 1: Write failing sanitizer tests**
+- [x] **Step 1: Write failing sanitizer tests**
 
 Add tests proving that all `CHAT_PLATFORMS` replace a control-only response with `现有证据不足，需要进一步检索确认。`, Weixin preserves useful answer text while removing the legacy budget line, and the `local` platform preserves the raw signal.
 
-- [ ] **Step 2: Run the test and confirm failure**
+- [x] **Step 2: Run the test and confirm failure**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_telegram_noise_filter.py -q
@@ -68,7 +68,7 @@ Add tests proving that all `CHAT_PLATFORMS` replace a control-only response with
 
 Expected: the new tests fail because the sanitizer does not yet recognize IVD budget controls.
 
-- [ ] **Step 3: Implement the narrow sanitizer**
+- [x] **Step 3: Implement the narrow sanitizer**
 
 Add `_IVD_RETRIEVAL_BUDGET_CONTROL_RE`, `_IVD_EVIDENCE_BOUNDARY_REPLY`, and this helper near the existing gateway response filters:
 
@@ -81,7 +81,7 @@ def _strip_ivd_retrieval_budget_control(text: str) -> tuple[str, bool]:
 
 The regular expression must match the new bracketed signal plus its control sentence and the exact legacy Chinese message. Call the helper in `_sanitize_gateway_final_response` after secret redaction; return the evidence-boundary sentence only when a match was removed and no useful text remains.
 
-- [ ] **Step 4: Run the sanitizer test and confirm it passes**
+- [x] **Step 4: Run the sanitizer test and confirm it passes**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_telegram_noise_filter.py -q
@@ -97,7 +97,7 @@ Expected: every test in the file passes.
 - Modify: `tests/tools/test_file_operations.py`
 - Modify: `tests/gateway/test_telegram_noise_filter.py`
 
-- [ ] **Step 1: Run adjacent regression suites**
+- [x] **Step 1: Run adjacent regression suites**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py tests/tools/test_file_operations.py tests/gateway/test_telegram_noise_filter.py tests/test_after_sales_guard.py -q
@@ -105,7 +105,7 @@ Expected: every test in the file passes.
 
 Expected: every selected test passes.
 
-- [ ] **Step 2: Run static checks**
+- [x] **Step 2: Run static checks**
 
 ```bash
 python3 -m py_compile tools/file_operations.py gateway/run.py

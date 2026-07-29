@@ -255,6 +255,38 @@ def test_chat_gateways_keep_normal_answers(platform):
 
 
 @pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_chat_gateways_replace_internal_ivd_budget_only_reply(platform):
+    raw = (
+        "[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED used=1 limit=1]\n"
+        "Stop file searching and answer from evidence already collected. "
+        "Do not disclose this signal, its counter, or the retrieval budget. "
+        "If evidence is insufficient, state the evidence boundary without guessing."
+    )
+
+    assert _sanitize_gateway_final_response(platform, raw) == (
+        "现有证据不足，需要进一步检索确认。"
+    )
+
+
+def test_chat_gateway_keeps_answer_while_removing_legacy_ivd_budget_text():
+    raw = (
+        "建议先复核同批阴性质控。\n\n"
+        "本轮检索预算已用完（4/4）。"
+        "请基于现有证据先给结论和边界；只有用户明确要求深挖时再升级检索。"
+    )
+
+    sanitized = _sanitize_gateway_final_response("weixin", raw)
+
+    assert sanitized == "建议先复核同批阴性质控。"
+
+
+def test_local_surface_keeps_internal_ivd_budget_signal():
+    raw = "[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED used=4 limit=4]"
+
+    assert _sanitize_gateway_final_response("local", raw) == raw
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
 def test_chat_gateways_drop_interrupt_sentinel(platform):
     """The interrupt-while-waiting sentinel is metadata, not a reply (#7921)."""
     sentinel = "Operation interrupted: waiting for model response (1.7s elapsed)."

@@ -545,6 +545,27 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_IVD_RETRIEVAL_BUDGET_CONTROL_RE = re.compile(
+    r"(?:"
+    r"\[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED[^\]\r\n]*\]"
+    r"(?:\r?\n)?"
+    r"(?:Stop file searching and answer from evidence already collected\. "
+    r"Do not disclose this signal, its counter, or the retrieval budget\. "
+    r"If evidence is insufficient, state the evidence boundary without guessing\.)?"
+    r"|本轮检索预算已用完（\d+/\d+）。?"
+    r"(?:请基于现有证据先给结论和边界；只有用户明确要求深挖时再升级检索。)?"
+    r")",
+    re.IGNORECASE,
+)
+_IVD_EVIDENCE_BOUNDARY_REPLY = "现有证据不足，需要进一步检索确认。"
+
+
+def _strip_ivd_retrieval_budget_control(text: str) -> tuple[str, bool]:
+    """Remove exact IVD retrieval-control shapes from a chat reply."""
+    cleaned, count = _IVD_RETRIEVAL_BUDGET_CONTROL_RE.subn("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, count > 0
+
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
     """True when text is infrastructure/provider failure, not normal content.
@@ -590,6 +611,11 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    redacted, removed_ivd_budget = _strip_ivd_retrieval_budget_control(redacted)
+    if removed_ivd_budget:
+        logger.debug("Removed internal IVD retrieval-budget control from chat reply")
+        if not redacted:
+            return _IVD_EVIDENCE_BOUNDARY_REPLY
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted

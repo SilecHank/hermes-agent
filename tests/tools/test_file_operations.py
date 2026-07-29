@@ -812,7 +812,7 @@ class TestIVDKnowledgeSearchBoundary:
 
         assert {match.path for match in result.matches} == {str(files["extracted"])}
 
-    def test_answer_mode_returns_direct_chinese_budget_signal(self, tmp_path):
+    def test_answer_mode_returns_internal_budget_signal(self, tmp_path):
         from gateway.ivd_runtime import begin_ivd_answer_turn, end_ivd_answer_turn
 
         kb, _ = self._kb(tmp_path)
@@ -824,8 +824,9 @@ class TestIVDKnowledgeSearchBoundary:
         finally:
             end_ivd_answer_turn(token)
 
-        assert "检索预算" in blocked.error
-        assert "现有证据" in blocked.error
+        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in blocked.error
+        assert "do not disclose" in blocked.error.lower()
+        assert "检索预算已用完" not in blocked.error
 
 class TestShellFileOpsWriteDenied:
     def test_write_file_denied_path(self, file_ops):
