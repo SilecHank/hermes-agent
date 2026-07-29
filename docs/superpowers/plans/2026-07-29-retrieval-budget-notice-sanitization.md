@@ -114,7 +114,7 @@ git diff --check
 
 Expected: both commands exit successfully without diagnostics.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 ```bash
 git add tools/file_operations.py gateway/run.py tests/tools/test_file_operations.py tests/gateway/test_telegram_noise_filter.py
@@ -129,7 +129,7 @@ Expected: the implementation commit is available on the Hermes maintenance branc
 **Files:**
 - No repository files modified.
 
-- [ ] **Step 1: Restart the managed gateway**
+- [x] **Step 1: Restart the managed gateway**
 
 ```bash
 /home/slim/.hermes/hermes-agent/venv/bin/hermes gateway restart
@@ -137,7 +137,7 @@ Expected: the implementation commit is available on the Hermes maintenance branc
 
 Expected: the gateway starts with a new stable PID.
 
-- [ ] **Step 2: Verify live health**
+- [x] **Step 2: Verify live health**
 
 ```bash
 /home/slim/.hermes/hermes-agent/venv/bin/hermes gateway status
