@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import plistlib
 import re
 import stat
 import time
@@ -57,8 +58,24 @@ class FenceError(RuntimeError):
     """A stable, log-safe fence failure."""
 
 
+class IndependentIvdCronServiceError(RuntimeError):
+    """A separate IVD scheduler would bypass the gateway ownership fence."""
+
+    def __init__(self, path: Path | str) -> None:
+        self.reason = "independent_ivd_cron_forbidden"
+        self.path = str(path)
+        super().__init__(f"{self.reason}:{self.path}")
+
+
 class _UnsafePathError(OSError):
     pass
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Stop before urllib creates any redirected request with copied headers."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise FenceError("remote_redirect_forbidden")
 
 
 def _truthy(value: str | None) -> bool:
@@ -188,6 +205,11 @@ def _decode_remote_payload(raw: bytes) -> dict[str, Any]:
     return outer
 
 
+def _open_remote_no_redirect(request: urllib.request.Request, timeout: float):
+    opener = urllib.request.build_opener(_RejectRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 def fetch_active_host_record(
     url: str,
     *,
@@ -212,14 +234,20 @@ def fetch_active_host_record(
     last_error: BaseException | None = None
     for attempt in range(max_attempts):
         try:
-            with urllib.request.urlopen(request, timeout=float(timeout_seconds)) as response:
+            with _open_remote_no_redirect(request, float(timeout_seconds)) as response:
                 raw = response.read(max_response_bytes + 1)
             if len(raw) > max_response_bytes:
                 raise FenceError("remote_response_too_large")
             return _decode_remote_payload(raw)
         except FenceError:
             raise
-        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise FenceError("remote_redirect_forbidden") from exc
+            last_error = exc
+            if attempt + 1 < max_attempts:
+                time.sleep(min(0.1 * (attempt + 1), 0.2))
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
             last_error = exc
             if attempt + 1 < max_attempts:
                 time.sleep(min(0.1 * (attempt + 1), 0.2))
@@ -415,6 +443,151 @@ def validate_runtime_contract(cron: object) -> FenceDecision:
     if cron.get("mode") != "embedded_gateway" or cron.get("independent_ivd_service_allowed") is not False:
         return FenceDecision(False, "independent_ivd_cron_forbidden")
     return FenceDecision(True, "embedded_cron_owned")
+
+
+def _systemd_definition_is_independent_ivd_cron(name: str, text: str) -> bool:
+    commands: list[str] = []
+    schedule: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() in {"ExecStart", "ExecStartPre", "ExecStartPost"}:
+            commands.append(value.strip())
+        elif key.strip() in {"OnCalendar", "OnBootSec", "OnUnitActiveSec", "OnStartupSec"}:
+            schedule.append(value.strip())
+    command_text = " ".join(commands).lower()
+    identity = f"{name} {command_text}".lower()
+    if "gateway run" in command_text or "gateway serve" in command_text:
+        return False
+    exact_runner = any(
+        marker in command_text
+        for marker in (
+            "hermes_daily_maintenance_runner",
+            "ivd_daily_maintenance",
+            "ivd-maintenance-runner",
+        )
+    )
+    ivd_named = any(marker in identity for marker in ("ivd", "after-sales", "after_sales"))
+    scheduled_job = bool(schedule) or name.lower().endswith(".timer")
+    cron_named = any(marker in identity for marker in ("cron", "maintenance", "daily", "schedule"))
+    return exact_runner or (ivd_named and cron_named and (scheduled_job or bool(commands)))
+
+
+def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) -> bool:
+    try:
+        payload = plistlib.loads(text.encode("utf-8") if isinstance(text, str) else text)
+    except (ValueError, TypeError, plistlib.InvalidFileException):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    label = payload.get("Label") if isinstance(payload.get("Label"), str) else ""
+    arguments = payload.get("ProgramArguments")
+    if not isinstance(arguments, list) or not all(isinstance(item, str) for item in arguments):
+        arguments = []
+    program = payload.get("Program") if isinstance(payload.get("Program"), str) else ""
+    command_text = " ".join((program, *arguments)).lower()
+    identity = f"{name} {label} {command_text}".lower()
+    if "gateway run" in command_text or "gateway serve" in command_text:
+        return False
+    exact_runner = any(
+        marker in command_text
+        for marker in (
+            "hermes_daily_maintenance_runner",
+            "ivd_daily_maintenance",
+            "ivd-maintenance-runner",
+        )
+    )
+    ivd_named = any(marker in identity for marker in ("ivd", "after-sales", "after_sales"))
+    scheduled_job = any(
+        key in payload
+        for key in ("StartInterval", "StartCalendarInterval", "StartOnMount")
+    )
+    cron_named = any(marker in identity for marker in ("cron", "maintenance", "daily", "schedule"))
+    return exact_runner or (ivd_named and cron_named and (scheduled_job or bool(arguments)))
+
+
+def _definition_is_independent_ivd_cron(kind: str, name: str, text: str | bytes) -> bool:
+    if kind == "systemd":
+        if isinstance(text, bytes):
+            try:
+                text = text.decode("utf-8")
+            except UnicodeError:
+                return False
+        return _systemd_definition_is_independent_ivd_cron(name, text)
+    if kind == "launchd":
+        return _launchd_definition_is_independent_ivd_cron(name, text)
+    raise ValueError("service_kind_invalid")
+
+
+def _suspicious_ivd_cron_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(marker in lowered for marker in ("ivd", "after-sales", "after_sales")) and any(
+        marker in lowered for marker in ("cron", "maintenance", "daily", "schedule")
+    )
+
+
+def _read_bounded_service_definition(path: Path) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        limit = MAX_RECORD_BYTES * 2
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
+            raise OSError("service_definition_unsafe")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > limit:
+            raise OSError("service_definition_too_large")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def assert_embedded_ivd_cron_service_contract(
+    *,
+    kind: str,
+    service_dir: Path,
+    target_path: Path,
+    candidate_definition: str | None = None,
+) -> FenceDecision:
+    """Reject only independent IVD schedulers, preserving unrelated cron jobs."""
+    contract = validate_runtime_contract(
+        {"mode": "embedded_gateway", "independent_ivd_service_allowed": False}
+    )
+    if not contract.allowed:
+        raise IndependentIvdCronServiceError(target_path)
+    if kind not in {"systemd", "launchd"}:
+        raise ValueError("service_kind_invalid")
+
+    service_dir = Path(service_dir)
+    patterns = ("*.service", "*.timer") if kind == "systemd" else ("*.plist",)
+    if service_dir.is_dir():
+        for pattern in patterns:
+            for path in sorted(service_dir.glob(pattern)):
+                try:
+                    raw = _read_bounded_service_definition(path)
+                except IndependentIvdCronServiceError:
+                    raise
+                except OSError:
+                    if _suspicious_ivd_cron_name(path.name):
+                        raise IndependentIvdCronServiceError(path)
+                    continue
+                if _definition_is_independent_ivd_cron(kind, path.name, raw):
+                    raise IndependentIvdCronServiceError(path)
+
+    if candidate_definition is not None and _definition_is_independent_ivd_cron(
+        kind, Path(target_path).name, candidate_definition
+    ):
+        raise IndependentIvdCronServiceError(f"candidate:{target_path}")
+    return contract
 
 
 def assert_active_host_or_raise() -> FenceDecision:

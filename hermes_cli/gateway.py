@@ -2884,6 +2884,22 @@ def _normalize_service_definition(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
+def _enforce_embedded_ivd_cron_contract(
+    kind: str,
+    target_path: Path,
+    candidate_definition: str | None = None,
+) -> None:
+    """Keep all IVD scheduling behind the fenced gateway process."""
+    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+
+    assert_embedded_ivd_cron_service_contract(
+        kind=kind,
+        service_dir=target_path.parent,
+        target_path=target_path,
+        candidate_definition=candidate_definition,
+    )
+
+
 # Directives that older systemd versions silently ignore/strip.  Normalize
 # them out of stale-check comparisons so a unit that differs only by these
 # directives is not perpetually flagged as outdated.
@@ -3026,6 +3042,7 @@ def _refuse_temp_home_service_write(definition: str, kind: str) -> bool:
 def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     """Rewrite the installed systemd unit when the generated definition has changed."""
     unit_path = get_systemd_unit_path(system=system)
+    _enforce_embedded_ivd_cron_contract("systemd", unit_path)
     if not unit_path.exists():
         return False
 
@@ -3038,6 +3055,7 @@ def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
 
     expected_user = _read_systemd_user_from_unit(unit_path) if system else None
     new_unit = generate_systemd_unit(system=system, run_as_user=expected_user)
+    _enforce_embedded_ivd_cron_contract("systemd", unit_path, new_unit)
 
     # ── Test-environment safety belt ─────────────────────────────────────
     # The user-scope unit path resolves under ``Path.home()``, which is NOT
@@ -3204,6 +3222,10 @@ def systemd_install(
     if system:
         _require_root_for_system_service("install")
 
+    unit_path = get_systemd_unit_path(system=system)
+    scope_flag = " --system" if system else ""
+    _enforce_embedded_ivd_cron_contract("systemd", unit_path)
+
     # Offer to remove legacy units (hermes.service from pre-rename installs)
     # before installing the new hermes-gateway.service. If both remain, they
     # flap-fight for the Telegram bot token on every gateway startup.
@@ -3216,9 +3238,6 @@ def systemd_install(
         if non_interactive or prompt_yes_no("Remove the legacy unit(s) before installing?", True):
             remove_legacy_hermes_units(interactive=False)
             print()
-
-    unit_path = get_systemd_unit_path(system=system)
-    scope_flag = " --system" if system else ""
 
     # Existing system units already pin HERMES_HOME; adopt it before any
     # regenerate. This pre-sync is NOT redundant with the systemd_unit_is_current
@@ -3245,6 +3264,7 @@ def systemd_install(
 
     unit_path.parent.mkdir(parents=True, exist_ok=True)
     new_unit = generate_systemd_unit(system=system, run_as_user=run_as_user)
+    _enforce_embedded_ivd_cron_contract("systemd", unit_path, new_unit)
     if _refuse_temp_home_service_write(new_unit, "systemd unit"):
         return
     print(f"Installing {_service_scope_label(system)} systemd service to: {unit_path}")
@@ -4075,10 +4095,12 @@ def refresh_launchd_plist_if_needed() -> bool:
     bootstrap to make launchd re-read the updated plist immediately.
     """
     plist_path = get_launchd_plist_path()
+    _enforce_embedded_ivd_cron_contract("launchd", plist_path)
     if not plist_path.exists() or launchd_plist_is_current():
         return False
 
     new_plist = generate_launchd_plist()
+    _enforce_embedded_ivd_cron_contract("launchd", plist_path, new_plist)
     if _refuse_temp_home_service_write(new_plist, "launchd plist"):
         return False
 
@@ -4235,6 +4257,7 @@ def refresh_launchd_plist_if_needed() -> bool:
 
 def launchd_install(force: bool = False):
     plist_path = get_launchd_plist_path()
+    _enforce_embedded_ivd_cron_contract("launchd", plist_path)
 
     if plist_path.exists() and not force:
         if not launchd_plist_is_current():
@@ -4248,6 +4271,7 @@ def launchd_install(force: bool = False):
 
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     new_plist = generate_launchd_plist()
+    _enforce_embedded_ivd_cron_contract("launchd", plist_path, new_plist)
     if _refuse_temp_home_service_write(new_plist, "launchd plist"):
         return
     print(f"Installing launchd service to: {plist_path}")
@@ -4293,10 +4317,12 @@ def launchd_uninstall():
 def launchd_start():
     plist_path = get_launchd_plist_path()
     label = get_launchd_label()
+    _enforce_embedded_ivd_cron_contract("launchd", plist_path)
 
     # Self-heal if the plist is missing entirely (e.g., manual cleanup, failed upgrade)
     if not plist_path.exists():
         new_plist = generate_launchd_plist()
+        _enforce_embedded_ivd_cron_contract("launchd", plist_path, new_plist)
         if _refuse_temp_home_service_write(new_plist, "launchd plist"):
             sys.exit(1)
         print("↻ launchd plist missing; regenerating service definition")

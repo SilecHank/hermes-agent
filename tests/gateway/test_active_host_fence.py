@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -90,6 +91,7 @@ class _Response:
 
 
 def test_remote_fetch_uses_bounded_timeout_size_and_github_contents(monkeypatch, tmp_path):
+    import gateway.active_host_fence as fence
     from gateway.active_host_fence import fetch_active_host_record
 
     captured = {}
@@ -108,7 +110,7 @@ def test_remote_fetch_uses_bounded_timeout_size_and_github_contents(monkeypatch,
     token_file = tmp_path / "credential"
     token_file.write_text("private-token\n", encoding="utf-8")
     token_file.chmod(0o600)
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(fence, "_open_remote_no_redirect", fake_urlopen)
     result = fetch_active_host_record(
         "https://api.github.com/repos/example/private/contents/active-host.json",
         timeout_seconds=1.5,
@@ -121,12 +123,13 @@ def test_remote_fetch_uses_bounded_timeout_size_and_github_contents(monkeypatch,
 
 
 def test_remote_fetch_rejects_oversize_invalid_json_and_token_permissions(monkeypatch, tmp_path):
+    import gateway.active_host_fence as fence
     from gateway.active_host_fence import FenceError, fetch_active_host_record
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Response(b"x" * 65))
+    monkeypatch.setattr(fence, "_open_remote_no_redirect", lambda *a, **k: _Response(b"x" * 65))
     with pytest.raises(FenceError, match="remote_response_too_large"):
         fetch_active_host_record("https://example.invalid", max_response_bytes=64, max_attempts=1)
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Response(b"not-json"))
+    monkeypatch.setattr(fence, "_open_remote_no_redirect", lambda *a, **k: _Response(b"not-json"))
     with pytest.raises(FenceError, match="remote_json_invalid"):
         fetch_active_host_record("https://example.invalid", max_attempts=1)
     token_file = tmp_path / "credential"
@@ -134,6 +137,78 @@ def test_remote_fetch_rejects_oversize_invalid_json_and_token_permissions(monkey
     token_file.chmod(0o644)
     with pytest.raises(FenceError, match="credential_permissions_unsafe"):
         fetch_active_host_record("https://example.invalid", token_path=token_file, max_attempts=1)
+
+
+@pytest.mark.parametrize(
+    "redirect_url",
+    [
+        "https://api.github.com/other-path",
+        "https://evil.example/steal",
+        "http://api.github.com/downgrade",
+    ],
+)
+def test_remote_fetch_rejects_redirect_before_authorization_can_leave_first_request(
+    monkeypatch, tmp_path, redirect_url
+):
+    from gateway.active_host_fence import FenceError, fetch_active_host_record
+
+    token_file = tmp_path / "credential"
+    token_file.write_text("private-token", encoding="utf-8")
+    token_file.chmod(0o600)
+    seen = []
+    valid = json.dumps(_record()).encode()
+
+    def leaking_urlopen(request, timeout):
+        seen.append((request.full_url, request.headers.get("Authorization")))
+        second = urllib.request.Request(
+            redirect_url,
+            headers=dict(request.header_items()),
+            method="GET",
+        )
+        seen.append((second.full_url, second.headers.get("Authorization")))
+        return _Response(valid)
+
+    class RedirectingOpener:
+        def __init__(self, handlers):
+            self.handlers = handlers
+
+        def open(self, request, timeout):
+            seen.append((request.full_url, request.headers.get("Authorization")))
+            redirect_handler = next(
+                handler
+                for handler in self.handlers
+                if isinstance(handler, urllib.request.HTTPRedirectHandler)
+            )
+            second = redirect_handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {"Location": redirect_url},
+                request.full_url,
+            )
+            if second is not None:
+                seen.append((second.full_url, second.headers.get("Authorization")))
+            return _Response(valid)
+
+    monkeypatch.setattr(urllib.request, "urlopen", leaking_urlopen)
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *handlers: RedirectingOpener(handlers),
+    )
+    with pytest.raises(FenceError, match="remote_redirect_forbidden"):
+        fetch_active_host_record(
+            "https://api.github.com/repos/example/private/contents/active-host.json",
+            token_path=token_file,
+            max_attempts=1,
+        )
+    assert seen == [
+        (
+            "https://api.github.com/repos/example/private/contents/active-host.json",
+            "Bearer private-token",
+        )
+    ]
 
 
 def test_remote_fetch_rejects_symlink_credential(tmp_path):
