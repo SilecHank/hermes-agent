@@ -481,26 +481,8 @@ def _has_explicit_ivd_identity(text: str) -> bool:
 
 
 def _systemd_definition_is_independent_ivd_cron(name: str, text: str) -> bool:
-    commands: list[str] = []
-    identity_values: list[str] = [name]
-    periodic = name.lower().endswith(".timer")
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(("#", ";")) or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if key in {"ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecReload"}:
-            commands.append(value)
-        if key in {"Description", "Unit"} or key.startswith("Exec"):
-            identity_values.append(value)
-        if key in _SYSTEMD_PERIODIC_KEYS:
-            periodic = True
-    command_text = " ".join(commands).lower()
-    if "gateway run" in command_text or "gateway serve" in command_text:
-        return False
-    return periodic and _has_explicit_ivd_identity(" ".join(identity_values))
+    periodic, _, identity = _systemd_timer_metadata(name, text)
+    return periodic and identity
 
 
 def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) -> bool:
@@ -590,6 +572,63 @@ def _deduplicate_paths(paths: list[Path]) -> tuple[Path, ...]:
     return tuple(unique)
 
 
+def _systemd_service_scope_groups(
+    *,
+    target_path: Path,
+    scope_root: Path,
+    home: Path,
+    environ: Mapping[str, str],
+    uid: int | None,
+) -> tuple[tuple[Path, ...], ...]:
+    config_home = Path(environ.get("XDG_CONFIG_HOME", os.fspath(home / ".config")))
+    if not config_home.is_absolute():
+        config_home = home / ".config"
+    runtime_value = environ.get("XDG_RUNTIME_DIR", "")
+    if runtime_value and Path(runtime_value).is_absolute():
+        runtime_scope = Path(runtime_value) / "systemd" / "user"
+    else:
+        effective_uid = uid
+        if effective_uid is None and hasattr(os, "getuid"):
+            effective_uid = os.getuid()
+        runtime_scope = (
+            Path("/run/user") / str(effective_uid) / "systemd" / "user"
+            if effective_uid is not None
+            else None
+        )
+    user_logical = [
+        config_home / "systemd" / "user",
+        Path("/etc/systemd/user"),
+    ]
+    if runtime_scope is not None:
+        user_logical.append(runtime_scope)
+    user_logical.extend(
+        Path(path)
+        for path in (
+            "/run/systemd/user",
+            "/usr/local/lib/systemd/user",
+            "/usr/lib/systemd/user",
+        )
+    )
+    system_logical = [
+        Path(path)
+        for path in (
+            "/etc/systemd/system",
+            "/run/systemd/system",
+            "/usr/local/lib/systemd/system",
+            "/usr/lib/systemd/system",
+        )
+    ]
+    root = Path(scope_root)
+    user_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in user_logical])
+    system_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in system_logical])
+    target_scope = Path(target_path).parent
+    groups: list[tuple[Path, ...]] = []
+    if target_scope not in user_scopes and target_scope not in system_scopes:
+        groups.append((target_scope,))
+    groups.extend((user_scopes, system_scopes))
+    return tuple(group for group in groups if group)
+
+
 def discover_ivd_cron_service_scopes(
     kind: str,
     *,
@@ -605,51 +644,276 @@ def discover_ivd_cron_service_scopes(
         raise ValueError("service_kind_invalid")
     environment = os.environ if environ is None else environ
     home_path = Path.home() if home is None else Path(home)
-    logical_paths: list[Path] = []
     if kind == "systemd":
-        config_home = Path(environment.get("XDG_CONFIG_HOME", os.fspath(home_path / ".config")))
-        if not config_home.is_absolute():
-            config_home = home_path / ".config"
-        logical_paths.append(config_home / "systemd" / "user")
-        runtime_value = environment.get("XDG_RUNTIME_DIR", "")
-        if runtime_value and Path(runtime_value).is_absolute():
-            logical_paths.append(Path(runtime_value) / "systemd" / "user")
-        else:
-            effective_uid = uid
-            if effective_uid is None and hasattr(os, "getuid"):
-                effective_uid = os.getuid()
-            if effective_uid is not None:
-                logical_paths.append(Path("/run/user") / str(effective_uid) / "systemd" / "user")
-        logical_paths.extend(
-            Path(path)
-            for path in (
-                "/etc/systemd/user",
-                "/run/systemd/user",
-                "/usr/local/lib/systemd/user",
-                "/usr/lib/systemd/user",
-                "/etc/systemd/system",
-                "/run/systemd/system",
-                "/usr/local/lib/systemd/system",
-                "/usr/lib/systemd/system",
-            )
+        groups = _systemd_service_scope_groups(
+            target_path=target_path,
+            scope_root=Path(scope_root),
+            home=home_path,
+            environ=environment,
+            uid=uid,
         )
+        scopes = _deduplicate_paths([scope for group in groups for scope in group])
     else:
-        logical_paths.extend(
-            (
-                home_path / "Library" / "LaunchAgents",
-                Path("/Library/LaunchAgents"),
-                Path("/Library/LaunchDaemons"),
-                Path("/System/Library/LaunchAgents"),
-                Path("/System/Library/LaunchDaemons"),
-            )
+        logical_paths = (
+            home_path / "Library" / "LaunchAgents",
+            Path("/Library/LaunchAgents"),
+            Path("/Library/LaunchDaemons"),
+            Path("/System/Library/LaunchAgents"),
+            Path("/System/Library/LaunchDaemons"),
         )
-    scopes = _deduplicate_paths(
-        [Path(target_path).parent]
-        + [_map_service_scope(Path(scope_root), path) for path in logical_paths]
-    )
+        scopes = _deduplicate_paths(
+            [Path(target_path).parent]
+            + [_map_service_scope(Path(scope_root), path) for path in logical_paths]
+        )
     if len(scopes) > max_scopes:
         raise IvdCronServiceDiscoveryError("service_scope_limit", target_path)
     return scopes
+
+
+@dataclass(frozen=True)
+class _SystemdUnitRecord:
+    name: str
+    path: Path
+    raw: bytes | None = None
+    alias_target: str | None = None
+    read_error: bool = False
+
+
+def _collect_systemd_scope(scope: Path, *, max_entries: int) -> dict[str, _SystemdUnitRecord]:
+    try:
+        metadata = scope.lstat()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise IvdCronServiceDiscoveryError("service_scope_symlink", scope)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope)
+
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            scope,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("service_scope_not_directory")
+        with os.scandir(descriptor) as entries:
+            names: list[str] = []
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > max_entries:
+                    raise IvdCronServiceDiscoveryError("service_scope_entry_limit", scope)
+        records: dict[str, _SystemdUnitRecord] = {}
+        for name in sorted(names):
+            if not name.endswith((".service", ".timer")):
+                continue
+            path = scope / name
+            try:
+                entry_stat = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISLNK(entry_stat.st_mode):
+                    records[name] = _SystemdUnitRecord(
+                        name=name,
+                        path=path,
+                        alias_target=os.readlink(name, dir_fd=descriptor),
+                    )
+                else:
+                    records[name] = _SystemdUnitRecord(
+                        name=name,
+                        path=path,
+                        raw=_read_bounded_service_definition(path, dir_fd=descriptor),
+                    )
+            except OSError:
+                records[name] = _SystemdUnitRecord(name=name, path=path, read_error=True)
+        return records
+    except (IndependentIvdCronServiceError, IvdCronServiceDiscoveryError):
+        raise
+    except OSError as exc:
+        raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _effective_systemd_units(
+    scopes: tuple[Path, ...],
+    *,
+    max_entries: int,
+) -> tuple[dict[str, _SystemdUnitRecord], dict[Path, _SystemdUnitRecord]]:
+    effective: dict[str, _SystemdUnitRecord] = {}
+    by_path: dict[Path, _SystemdUnitRecord] = {}
+    for scope in scopes:
+        records = _collect_systemd_scope(scope, max_entries=max_entries)
+        by_path.update((record.path, record) for record in records.values())
+        for name, record in records.items():
+            effective.setdefault(name, record)
+    return effective, by_path
+
+
+def _resolve_systemd_unit_alias(
+    record: _SystemdUnitRecord,
+    *,
+    records_by_path: Mapping[Path, _SystemdUnitRecord],
+    allowed_scopes: frozenset[Path],
+    scope_root: Path,
+    max_hops: int = 8,
+) -> _SystemdUnitRecord | None:
+    current = record
+    visited: set[Path] = set()
+    for _ in range(max_hops + 1):
+        if current.path in visited:
+            raise IvdCronServiceDiscoveryError("systemd_unit_alias_cycle", current.path)
+        visited.add(current.path)
+        if current.read_error:
+            raise IvdCronServiceDiscoveryError("service_definition_unreadable", current.path)
+        if current.alias_target is None:
+            return current
+        if current.alias_target == "/dev/null":
+            return None
+        target = Path(current.alias_target)
+        if target.is_absolute() and scope_root != Path("/") and not target.is_relative_to(scope_root):
+            target = _map_service_scope(scope_root, target)
+        elif not target.is_absolute():
+            target = current.path.parent / target
+        target = Path(os.path.normpath(os.fspath(target)))
+        if target.parent not in allowed_scopes:
+            raise IvdCronServiceDiscoveryError("systemd_unit_alias_escape", current.path)
+        next_record = records_by_path.get(target)
+        if next_record is None:
+            return None
+        current = next_record
+    raise IvdCronServiceDiscoveryError("systemd_unit_alias_limit", record.path)
+
+
+def _systemd_directives(text: str) -> list[tuple[str, str, str]]:
+    directives: list[tuple[str, str, str]] = []
+    section = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        directives.append((section, key.strip(), value.strip()))
+    return directives
+
+
+def _systemd_identity(name: str, text: str) -> bool:
+    identity_values = [name]
+    commands: list[str] = []
+    for section, key, value in _systemd_directives(text):
+        if section == "Unit" and key == "Description":
+            identity_values.append(value)
+        if section == "Service" and key.startswith("Exec"):
+            commands.append(value)
+            identity_values.append(value)
+    command_text = " ".join(commands).lower()
+    if "gateway run" in command_text or "gateway serve" in command_text:
+        return False
+    return _has_explicit_ivd_identity(" ".join(identity_values))
+
+
+def _systemd_timer_metadata(name: str, text: str) -> tuple[bool, str | None, bool]:
+    periodic = False
+    unit_name: str | None = None
+    for section, key, value in _systemd_directives(text):
+        if section != "Timer":
+            continue
+        if key in _SYSTEMD_PERIODIC_KEYS and value:
+            periodic = True
+        elif key == "Unit":
+            unit_name = value or None
+    return periodic, unit_name, _systemd_identity(name, text)
+
+
+_SYSTEMD_SERVICE_NAME = re.compile(r"[A-Za-z0-9_.:@-]+\.service")
+
+
+def _linked_systemd_service_name(timer_name: str, configured_unit: str | None, path: Path) -> str | None:
+    if configured_unit is None:
+        return f"{timer_name[:-len('.timer')]}.service"
+    if (
+        "/" in configured_unit
+        or "\\" in configured_unit
+        or ".." in configured_unit
+        or any(character.isspace() for character in configured_unit)
+    ):
+        raise IvdCronServiceDiscoveryError("systemd_timer_unit_invalid", path)
+    if not configured_unit.endswith(".service"):
+        return None
+    if _SYSTEMD_SERVICE_NAME.fullmatch(configured_unit) is None:
+        raise IvdCronServiceDiscoveryError("systemd_timer_unit_invalid", path)
+    return configured_unit
+
+
+def _decode_systemd_record(record: _SystemdUnitRecord) -> str:
+    if record.raw is None:
+        raise IvdCronServiceDiscoveryError("service_definition_unreadable", record.path)
+    try:
+        return record.raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise IvdCronServiceDiscoveryError("service_definition_unreadable", record.path) from exc
+
+
+def _assert_systemd_timer_service_contract(
+    groups: tuple[tuple[Path, ...], ...],
+    *,
+    max_entries: int,
+    scope_root: Path,
+) -> None:
+    for scopes in groups:
+        effective, records_by_path = _effective_systemd_units(scopes, max_entries=max_entries)
+        allowed_scopes = frozenset(scopes)
+        for timer_name in sorted(name for name in effective if name.endswith(".timer")):
+            timer_record = effective[timer_name]
+            if timer_record.alias_target is not None and _has_explicit_ivd_identity(timer_name):
+                raise IndependentIvdCronServiceError(timer_record.path)
+            resolved_timer = _resolve_systemd_unit_alias(
+                timer_record,
+                records_by_path=records_by_path,
+                allowed_scopes=allowed_scopes,
+                scope_root=scope_root,
+            )
+            if resolved_timer is None:
+                continue
+            timer_text = _decode_systemd_record(resolved_timer)
+            periodic, configured_unit, timer_is_ivd = _systemd_timer_metadata(
+                resolved_timer.name,
+                timer_text,
+            )
+            if not periodic:
+                continue
+            if timer_is_ivd:
+                raise IndependentIvdCronServiceError(timer_record.path)
+            service_name = _linked_systemd_service_name(
+                timer_name,
+                configured_unit,
+                timer_record.path,
+            )
+            if service_name is None:
+                continue
+            service_record = effective.get(service_name)
+            if service_record is None:
+                continue
+            resolved_service = _resolve_systemd_unit_alias(
+                service_record,
+                records_by_path=records_by_path,
+                allowed_scopes=allowed_scopes,
+                scope_root=scope_root,
+            )
+            if resolved_service is None:
+                continue
+            service_text = _decode_systemd_record(resolved_service)
+            if _systemd_identity(resolved_service.name, service_text):
+                raise IndependentIvdCronServiceError(timer_record.path)
 
 
 def _scan_service_scope(
@@ -742,8 +1006,25 @@ def assert_embedded_ivd_cron_service_contract(
     service_dir = Path(service_dir)
     if service_dir not in scopes:
         scopes = _deduplicate_paths([service_dir, *scopes])
-    for scope in scopes:
-        _scan_service_scope(kind=kind, scope=scope, max_entries=max_entries_per_scope)
+    if kind == "systemd":
+        groups = _systemd_service_scope_groups(
+            target_path=target_path,
+            scope_root=Path(scope_root),
+            home=Path.home() if home is None else Path(home),
+            environ=os.environ if environ is None else environ,
+            uid=uid,
+        )
+        grouped_scopes = {scope for group in groups for scope in group}
+        if service_dir not in grouped_scopes:
+            groups = ((service_dir,), *groups)
+        _assert_systemd_timer_service_contract(
+            groups,
+            max_entries=max_entries_per_scope,
+            scope_root=Path(scope_root),
+        )
+    else:
+        for scope in scopes:
+            _scan_service_scope(kind=kind, scope=scope, max_entries=max_entries_per_scope)
 
     if candidate_definition is not None and _definition_is_independent_ivd_cron(
         kind, Path(target_path).name, candidate_definition

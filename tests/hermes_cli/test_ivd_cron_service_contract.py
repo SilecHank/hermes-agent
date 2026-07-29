@@ -317,6 +317,306 @@ def test_systemd_discovers_ivd_timer_outside_target_parent(tmp_path):
         )
 
 
+def _assert_mapped_systemd_contract(root: Path, target_dir: Path):
+    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+
+    return assert_embedded_ivd_cron_service_contract(
+        kind="systemd",
+        service_dir=target_dir,
+        target_path=target_dir / "hermes-gateway.service",
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={},
+        uid=1000,
+    )
+
+
+def test_systemd_timer_links_explicit_unit_to_ivd_service(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\nUnit=after-sales-sync.service\n",
+        encoding="utf-8",
+    )
+    (scope / "after-sales-sync.service").write_text(
+        "[Service]\nExecStart=/opt/after-sales/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_links_default_basename_to_ivd_service(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnUnitActiveSec=1h\n",
+        encoding="utf-8",
+    )
+    (scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_links_service_across_user_scopes(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    timer_scope = _mapped(root, "/etc/systemd/user")
+    service_scope = _mapped(root, "/usr/lib/systemd/user")
+    timer_scope.mkdir(parents=True)
+    service_scope.mkdir(parents=True)
+    (timer_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=hourly\nUnit=worker.service\n",
+        encoding="utf-8",
+    )
+    (service_scope / "worker.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/worker\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_service_override_uses_highest_priority_same_name(tmp_path):
+    root = tmp_path / "root"
+    high_scope = _mapped(root, "/etc/systemd/user")
+    low_scope = _mapped(root, "/usr/lib/systemd/user")
+    high_scope.mkdir(parents=True)
+    low_scope.mkdir(parents=True)
+    (high_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (high_scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/usr/bin/backup\n",
+        encoding="utf-8",
+    )
+    (low_scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_timer_override_uses_highest_priority_same_name(tmp_path):
+    root = tmp_path / "root"
+    high_scope = _mapped(root, "/etc/systemd/user")
+    low_scope = _mapped(root, "/usr/lib/systemd/user")
+    high_scope.mkdir(parents=True)
+    low_scope.mkdir(parents=True)
+    (high_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\nUnit=backup.service\n",
+        encoding="utf-8",
+    )
+    (high_scope / "backup.service").write_text(
+        "[Service]\nExecStart=/usr/bin/backup\n",
+        encoding="utf-8",
+    )
+    (low_scope / "nightly.timer").write_text(
+        "[Unit]\nDescription=IVD nightly sync\n[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_timer_does_not_cross_user_and_system_domains(tmp_path):
+    root = tmp_path / "root"
+    user_scope = _mapped(root, "/etc/systemd/user")
+    system_scope = _mapped(root, "/etc/systemd/system")
+    user_scope.mkdir(parents=True)
+    system_scope.mkdir(parents=True)
+    (user_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (system_scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_timer_allows_missing_or_non_ivd_linked_service(tmp_path):
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "missing.timer").write_text(
+        "[Timer]\nOnCalendar=daily\nUnit=ivd-missing.service\n",
+        encoding="utf-8",
+    )
+    (scope / "backup.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (scope / "backup.service").write_text(
+        "[Service]\nExecStart=/usr/bin/backup\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_generic_timer_does_not_pair_unrelated_ivd_service(tmp_path):
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "backup.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (scope / "ivd-sync.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_timer_allows_linked_hermes_gateway_service(tmp_path):
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "heartbeat.timer").write_text(
+        "[Timer]\nOnUnitActiveSec=5m\nUnit=hermes-gateway.service\n",
+        encoding="utf-8",
+    )
+    (scope / "hermes-gateway.service").write_text(
+        "[Unit]\nDescription=IVD Hermes Gateway\n"
+        "[Service]\nExecStart=/usr/bin/hermes gateway run\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    assert _assert_mapped_systemd_contract(root, target_dir).allowed
+
+
+def test_systemd_timer_rejects_unit_path_escape(tmp_path):
+    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\nUnit=../../outside/ivd-sync.service\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IvdCronServiceDiscoveryError, match="systemd_timer_unit_invalid"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_resolves_safe_service_alias(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (scope / "ivd-worker.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/worker\n",
+        encoding="utf-8",
+    )
+    (scope / "nightly.service").symlink_to("ivd-worker.service")
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_resolves_mapped_absolute_cross_scope_alias(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    high_scope = _mapped(root, "/etc/systemd/user")
+    low_scope = _mapped(root, "/usr/lib/systemd/user")
+    high_scope.mkdir(parents=True)
+    low_scope.mkdir(parents=True)
+    (high_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (low_scope / "ivd-worker.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/worker\n",
+        encoding="utf-8",
+    )
+    (high_scope / "nightly.service").symlink_to(
+        "/usr/lib/systemd/user/ivd-worker.service"
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_rejects_service_alias_escape(tmp_path):
+    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    outside = tmp_path / "outside.service"
+    outside.write_text("[Service]\nExecStart=/opt/ivd/sync\n", encoding="utf-8")
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (scope / "nightly.service").symlink_to(outside)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IvdCronServiceDiscoveryError, match="systemd_unit_alias_escape"):
+        _assert_mapped_systemd_contract(root, target_dir)
+
+
+def test_systemd_timer_fails_closed_for_unreadable_linked_service(tmp_path):
+    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/etc/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    service = scope / "nightly.service"
+    service.write_text("[Service]\nExecStart=/opt/ivd/sync\n", encoding="utf-8")
+    service.chmod(0)
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    try:
+        with pytest.raises(IvdCronServiceDiscoveryError, match="service_definition_unreadable"):
+            _assert_mapped_systemd_contract(root, target_dir)
+    finally:
+        service.chmod(0o600)
+
+
 def test_launchd_discovers_periodic_ivd_job_outside_target_parent(tmp_path):
     from gateway.active_host_fence import (
         IndependentIvdCronServiceError,
