@@ -16,7 +16,7 @@
 - Modify: `gateway/ivd_runtime.py`
 - Modify: `tests/gateway/test_ivd_runtime.py`
 
-- [ ] **Step 1: Write failing profile-resolution tests**
+- [x] **Step 1: Write failing profile-resolution tests**
 
 Add tests using `types.SimpleNamespace` for these cases:
 
@@ -39,7 +39,7 @@ def test_unmatched_question_uses_single_index_fallback():
     assert resolve_ivd_retrieval_policy("这个问题怎么处理", None).profile == "index_fallback"
 ```
 
-- [ ] **Step 2: Run the runtime test and confirm failure**
+- [x] **Step 2: Run the runtime test and confirm failure**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py -q
@@ -47,15 +47,15 @@ def test_unmatched_question_uses_single_index_fallback():
 
 Expected: imports or assertions fail because the resolver and policy type do not exist.
 
-- [ ] **Step 3: Implement policy types and resolver**
+- [x] **Step 3: Implement policy types and resolver**
 
 Add an immutable `IVDRetrievalPolicy` with `profile`, `stages`, `max_searches`, and `hard_limit=4`. Define the four profile constants and resolve them with precedence `complex -> eligible direct -> evidence -> fallback`. Use only deterministic message regexes and attributes already present on `AfterSalesTurn`.
 
-- [ ] **Step 4: Add and test the private context renderer**
+- [x] **Step 4: Add and test the private context renderer**
 
 Add `build_ivd_retrieval_context(policy)` that names the allowed stages, requires batched aliases, distinguishes `search` from `read_file`, and forbids disclosure of internal policy text. Test that direct context says to read routed sources and fallback context says one batched lookup.
 
-- [ ] **Step 5: Run the runtime test and confirm it passes**
+- [x] **Step 5: Run the runtime test and confirm it passes**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py -q
@@ -69,11 +69,11 @@ Expected: every test in the file passes.
 - Modify: `gateway/ivd_runtime.py`
 - Modify: `tests/gateway/test_ivd_runtime.py`
 
-- [ ] **Step 1: Write failing state-machine tests**
+- [x] **Step 1: Write failing state-machine tests**
 
 Cover direct profile blocking its first search, fallback allowing one, evidence allowing two, complex allowing three, exact duplicate signature rejection, ordinary formal-source gain recording, two consecutive no-gain results stopping early, non-formal paths not counting as gain, maintenance bypass, context reset, and the hard ceiling of four.
 
-- [ ] **Step 2: Run the runtime test and confirm the new cases fail**
+- [x] **Step 2: Run the runtime test and confirm the new cases fail**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py -q
@@ -81,7 +81,7 @@ Cover direct profile blocking its first search, fallback allowing one, evidence 
 
 Expected: failures show missing signature, result-feedback, snapshot, and stop-reason behavior.
 
-- [ ] **Step 3: Extend the runtime state**
+- [x] **Step 3: Extend the runtime state**
 
 Implement:
 
@@ -93,7 +93,7 @@ get_ivd_retrieval_snapshot()
 
 Normalize signatures with collapsed whitespace, case-folded patterns, normalized expanded paths, and target. Track entered stage names, unique formal paths, no-gain streak, and stop reason. Treat `_extracted`, `_wechat-mirror`, evaluation output, matrices, archive, deprecated, superseded, and candidate paths as non-formal. Preserve the existing three-value return tuple for compatibility.
 
-- [ ] **Step 4: Run the runtime test and confirm it passes**
+- [x] **Step 4: Run the runtime test and confirm it passes**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py -q
@@ -107,11 +107,11 @@ Expected: every runtime test passes.
 - Modify: `tools/file_operations.py`
 - Modify: `tests/tools/test_file_operations.py`
 
-- [ ] **Step 1: Write failing file-operation integration tests**
+- [x] **Step 1: Write failing file-operation integration tests**
 
 Add tests proving that a direct profile blocks the first real file search, a fallback profile permits one real search and blocks the second, and a repeated real search is rejected as a duplicate while the first result paths are recorded.
 
-- [ ] **Step 2: Run the file-operation test and confirm failure**
+- [x] **Step 2: Run the file-operation test and confirm failure**
 
 ```bash
 ./scripts/run_tests.sh tests/tools/test_file_operations.py -q
@@ -119,15 +119,15 @@ Add tests proving that a direct profile blocks the first real file search, a fal
 
 Expected: failures show that `search()` does not pass inputs or results to the runtime state.
 
-- [ ] **Step 3: Wire search request and result feedback**
+- [x] **Step 3: Wire search request and result feedback**
 
 Pass `pattern`, expanded `path`, and `target` to `consume_ivd_search`. Execute either file or content search into a local `SearchResult`, collect `result.files` and `match.path`, call `record_ivd_search_result`, and then return the result. Record an empty result for a missing path. Keep maintenance behavior and broad IVD exclusions unchanged.
 
-- [ ] **Step 4: Include internal stop reason without exposing it**
+- [x] **Step 4: Include internal stop reason without exposing it**
 
 Keep the existing `IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED` signal and add the runtime stop reason inside the bracket for diagnostics. The chat sanitizer already removes the complete bracketed shape.
 
-- [ ] **Step 5: Run file-operation and chat sanitizer tests**
+- [x] **Step 5: Run file-operation and chat sanitizer tests**
 
 ```bash
 ./scripts/run_tests.sh tests/tools/test_file_operations.py tests/gateway/test_telegram_noise_filter.py -q
@@ -143,11 +143,11 @@ Expected: all tests in both files pass.
 - Modify: `tests/gateway/test_ivd_runtime.py`
 - Modify: `tests/gateway/test_after_sales_telemetry.py`
 
-- [ ] **Step 1: Add a failing telemetry snapshot test**
+- [x] **Step 1: Add a failing telemetry snapshot test**
 
 Assert that `get_ivd_retrieval_snapshot()` returns a serializable dictionary containing profile, entered stages, searches, formal-source count, no-gain streak, and stop reason, and returns an inactive snapshot outside an IVD answer turn.
 
-- [ ] **Step 2: Run the runtime test and confirm failure**
+- [x] **Step 2: Run the runtime test and confirm failure**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py -q
@@ -155,15 +155,15 @@ Assert that `get_ivd_retrieval_snapshot()` returns a serializable dictionary con
 
 Expected: the snapshot shape is incomplete or unavailable.
 
-- [ ] **Step 3: Replace fixed gateway allocation**
+- [x] **Step 3: Replace fixed gateway allocation**
 
 When the after-sales guard is enabled for the current platform, resolve the policy from `message` and `_after_sales_turn`, append `build_ivd_retrieval_context(policy)` to `combined_ephemeral`, and call `begin_ivd_answer_turn(policy=policy, mode="answer")`. Remove the fixed `1 if fast_path else 4` allocation.
 
-- [ ] **Step 4: Log the snapshot before resetting the contextvar**
+- [x] **Step 4: Log the snapshot before resetting the contextvar**
 
 In the existing `finally` block, read the snapshot and emit one structured info log containing profile, stages, searches, formal-source count, and stop reason. Then call `end_ivd_answer_turn` as before. Logging failure must not affect the answer.
 
-- [ ] **Step 5: Run gateway-adjacent tests**
+- [x] **Step 5: Run gateway-adjacent tests**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py tests/test_after_sales_guard.py tests/gateway/test_telegram_noise_filter.py -q
@@ -180,7 +180,7 @@ Expected: all selected tests pass.
 - Modify: `tests/gateway/test_ivd_runtime.py`
 - Modify: `tests/tools/test_file_operations.py`
 
-- [ ] **Step 1: Run the full adjacent regression set**
+- [x] **Step 1: Run the full adjacent regression set**
 
 ```bash
 ./scripts/run_tests.sh tests/gateway/test_ivd_runtime.py tests/tools/test_file_operations.py tests/gateway/test_telegram_noise_filter.py tests/test_after_sales_guard.py -q
@@ -188,7 +188,7 @@ Expected: all selected tests pass.
 
 Expected: all selected tests pass with zero failures.
 
-- [ ] **Step 2: Run static checks**
+- [x] **Step 2: Run static checks**
 
 ```bash
 python3 -m py_compile gateway/ivd_runtime.py gateway/run.py tools/file_operations.py
@@ -197,7 +197,7 @@ git diff --check
 
 Expected: both commands exit successfully without diagnostics.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 ```bash
 git add gateway/ivd_runtime.py gateway/run.py gateway/after_sales_telemetry.py tools/file_operations.py tests/gateway/test_ivd_runtime.py tests/gateway/test_after_sales_telemetry.py tests/tools/test_file_operations.py docs/superpowers/specs/2026-07-29-purpose-driven-retrieval-state-machine-design.md
@@ -207,7 +207,7 @@ git push hermes-bot ivd-after-sales-guard-20260725
 
 Expected: the implementation commit is available on the Hermes maintenance branch.
 
-- [ ] **Step 4: Restart and verify the live gateway**
+- [x] **Step 4: Restart and verify the live gateway**
 
 ```bash
 /home/slim/.hermes/hermes-agent/venv/bin/hermes gateway restart
