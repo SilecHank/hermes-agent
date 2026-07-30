@@ -2900,6 +2900,12 @@ def _ivd_service_contract_uid() -> int | None:
     return os.getuid() if hasattr(os, "getuid") else None
 
 
+def _ivd_systemd_analyze_path(kind: str) -> Path | None:
+    if kind == "systemd" and sys.platform.startswith("linux"):
+        return Path("/usr/bin/systemd-analyze")
+    return None
+
+
 def _enforce_embedded_ivd_cron_contract(
     kind: str,
     target_path: Path,
@@ -2917,6 +2923,7 @@ def _enforce_embedded_ivd_cron_contract(
         home=_ivd_service_contract_home(),
         environ=_ivd_service_contract_environ(),
         uid=_ivd_service_contract_uid(),
+        systemd_analyze_path=_ivd_systemd_analyze_path(kind),
     )
 
 

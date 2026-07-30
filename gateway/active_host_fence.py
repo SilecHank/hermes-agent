@@ -8,14 +8,17 @@ import logging
 import os
 import plistlib
 import re
+import selectors
+import signal
 import stat
+import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 logger = logging.getLogger(__name__)
@@ -573,6 +576,234 @@ def _deduplicate_paths(paths: list[Path]) -> tuple[Path, ...]:
 
 
 MAX_SYSTEMD_SERVICE_SCOPES = 64
+MAX_SYSTEMD_ANALYZE_OUTPUT_BYTES = 64 * 1024
+MAX_SYSTEMD_ANALYZE_PATH_BYTES = 4096
+SYSTEMD_ANALYZE_TIMEOUT_SECONDS = 2.0
+
+
+def validate_systemd_analyze_binary(path: Path) -> Path:
+    """Require a fixed root-owned executable, never a PATH-resolved candidate."""
+    candidate = Path(path)
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise IvdCronServiceDiscoveryError(
+            "systemd_analyze_binary_untrusted", candidate
+        ) from exc
+    if (
+        not candidate.is_absolute()
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not stat.S_IMODE(metadata.st_mode) & 0o111
+    ):
+        raise IvdCronServiceDiscoveryError(
+            "systemd_analyze_binary_untrusted", candidate
+        )
+    return candidate
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def _systemd_analyze_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    safe = {
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        "LC_ALL": "C",
+    }
+    allowed = (
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+        "XDG_RUNTIME_DIR",
+        "SYSTEMD_UNIT_PATH",
+        "SYSTEMD_USER_UNIT_PATH",
+    )
+    for name in allowed:
+        value = environ.get(name)
+        if isinstance(value, str):
+            safe[name] = value
+    return safe
+
+
+def run_systemd_analyze_unit_paths(
+    *,
+    binary_path: Path,
+    user: bool,
+    timeout_seconds: float = SYSTEMD_ANALYZE_TIMEOUT_SECONDS,
+    max_output_bytes: int = MAX_SYSTEMD_ANALYZE_OUTPUT_BYTES,
+    environ: Mapping[str, str] | None = None,
+) -> bytes:
+    """Run one bounded unit-paths query without a shell or inherited loader hooks."""
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0 < timeout_seconds <= SYSTEMD_ANALYZE_TIMEOUT_SECONDS
+        or type(max_output_bytes) is not int
+        or not 1 <= max_output_bytes <= MAX_SYSTEMD_ANALYZE_OUTPUT_BYTES
+    ):
+        raise IvdCronServiceDiscoveryError(
+            "systemd_unit_paths_invalid", binary_path
+        )
+    command = [os.fspath(binary_path)]
+    if user:
+        command.append("--user")
+    command.append("unit-paths")
+    process: subprocess.Popen[bytes] | None = None
+    selector = selectors.DefaultSelector()
+    output = bytearray()
+    deadline = time.monotonic() + float(timeout_seconds)
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_systemd_analyze_environment(os.environ if environ is None else environ),
+            start_new_session=True,
+            close_fds=True,
+        )
+        if process.stdout is None:
+            raise OSError("systemd_analyze_stdout_unavailable")
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        selector.register(descriptor, selectors.EVENT_READ)
+        stdout_open = True
+        while stdout_open:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_group(process)
+                raise IvdCronServiceDiscoveryError(
+                    "systemd_unit_paths_timeout", binary_path
+                )
+            events = selector.select(min(remaining, 0.1))
+            if not events:
+                continue
+            for key, _ in events:
+                chunk = os.read(key.fd, 8192)
+                if not chunk:
+                    selector.unregister(key.fd)
+                    stdout_open = False
+                    break
+                output.extend(chunk)
+                if len(output) > max_output_bytes:
+                    _terminate_process_group(process)
+                    raise IvdCronServiceDiscoveryError(
+                        "systemd_unit_paths_output_limit", binary_path
+                    )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process_group(process)
+            raise IvdCronServiceDiscoveryError(
+                "systemd_unit_paths_timeout", binary_path
+            )
+        try:
+            return_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(process)
+            raise IvdCronServiceDiscoveryError(
+                "systemd_unit_paths_timeout", binary_path
+            ) from exc
+        if return_code != 0:
+            raise IvdCronServiceDiscoveryError(
+                "systemd_unit_paths_command_failed", binary_path
+            )
+        return bytes(output)
+    except IvdCronServiceDiscoveryError:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if process is not None:
+            _terminate_process_group(process)
+        raise IvdCronServiceDiscoveryError(
+            "systemd_unit_paths_command_failed", binary_path
+        ) from exc
+    finally:
+        selector.close()
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+
+
+def _parse_systemd_unit_paths(raw: bytes, *, source: Path) -> tuple[Path, ...]:
+    if len(raw) > MAX_SYSTEMD_ANALYZE_OUTPUT_BYTES:
+        raise IvdCronServiceDiscoveryError("systemd_unit_paths_output_limit", source)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise IvdCronServiceDiscoveryError("systemd_unit_paths_invalid", source) from exc
+    lines = text.splitlines()
+    if not lines or len(lines) > MAX_SYSTEMD_SERVICE_SCOPES:
+        raise IvdCronServiceDiscoveryError("systemd_unit_paths_invalid", source)
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for line in lines:
+        if (
+            not line
+            or "\x00" in line
+            or len(line.encode("utf-8")) > MAX_SYSTEMD_ANALYZE_PATH_BYTES
+        ):
+            raise IvdCronServiceDiscoveryError("systemd_unit_paths_invalid", source)
+        path = Path(line)
+        normalized = os.path.normpath(line)
+        if not path.is_absolute() or normalized != line or normalized in seen:
+            raise IvdCronServiceDiscoveryError("systemd_unit_paths_invalid", source)
+        seen.add(normalized)
+        paths.append(path)
+    return tuple(paths)
+
+
+def _discover_systemd_unit_paths(
+    *,
+    binary_path: Path,
+    runner: Callable[..., bytes],
+    environ: Mapping[str, str],
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    trusted_binary = validate_systemd_analyze_binary(binary_path)
+    outputs: list[tuple[Path, ...]] = []
+    for user in (False, True):
+        try:
+            raw = runner(
+                binary_path=trusted_binary,
+                user=user,
+                timeout_seconds=SYSTEMD_ANALYZE_TIMEOUT_SECONDS,
+                max_output_bytes=MAX_SYSTEMD_ANALYZE_OUTPUT_BYTES,
+                environ=environ,
+            )
+        except IvdCronServiceDiscoveryError:
+            raise
+        except Exception as exc:
+            raise IvdCronServiceDiscoveryError(
+                "systemd_unit_paths_command_failed", trusted_binary
+            ) from exc
+        if not isinstance(raw, bytes):
+            raise IvdCronServiceDiscoveryError(
+                "systemd_unit_paths_invalid", trusted_binary
+            )
+        outputs.append(_parse_systemd_unit_paths(raw, source=trusted_binary))
+    system_paths, user_paths = outputs
+    return user_paths, system_paths
 
 
 def _absolute_env_path(value: str, *, source: str) -> Path:
@@ -644,6 +875,8 @@ def _systemd_service_scope_groups(
     home: Path,
     environ: Mapping[str, str],
     uid: int | None,
+    discovered_user: tuple[Path, ...] = (),
+    discovered_system: tuple[Path, ...] = (),
 ) -> tuple[tuple[Path, ...], ...]:
     config_home = _xdg_home_path(environ, "XDG_CONFIG_HOME", home / ".config")
     config_dirs = _xdg_directory_list(
@@ -727,6 +960,8 @@ def _systemd_service_scope_groups(
         "SYSTEMD_UNIT_PATH",
         default_system,
     )
+    active_user = _deduplicate_paths([*discovered_user, *active_user])
+    active_system = _deduplicate_paths([*discovered_system, *active_system])
     root = Path(scope_root)
     default_user_scopes = _deduplicate_paths(
         [_map_service_scope(root, path) for path in default_user]
@@ -744,6 +979,35 @@ def _systemd_service_scope_groups(
     return tuple(group for group in groups if group)
 
 
+def _effective_systemd_service_scope_groups(
+    *,
+    target_path: Path,
+    scope_root: Path,
+    home: Path,
+    environ: Mapping[str, str],
+    uid: int | None,
+    systemd_analyze_path: Path | None,
+    systemd_analyze_runner: Callable[..., bytes] | None,
+) -> tuple[tuple[Path, ...], ...]:
+    discovered_user: tuple[Path, ...] = ()
+    discovered_system: tuple[Path, ...] = ()
+    if systemd_analyze_path is not None:
+        discovered_user, discovered_system = _discover_systemd_unit_paths(
+            binary_path=Path(systemd_analyze_path),
+            runner=systemd_analyze_runner or run_systemd_analyze_unit_paths,
+            environ=environ,
+        )
+    return _systemd_service_scope_groups(
+        target_path=target_path,
+        scope_root=scope_root,
+        home=home,
+        environ=environ,
+        uid=uid,
+        discovered_user=discovered_user,
+        discovered_system=discovered_system,
+    )
+
+
 def discover_ivd_cron_service_scopes(
     kind: str,
     *,
@@ -753,6 +1017,8 @@ def discover_ivd_cron_service_scopes(
     environ: Mapping[str, str] | None = None,
     uid: int | None = None,
     max_scopes: int = MAX_SYSTEMD_SERVICE_SCOPES,
+    systemd_analyze_path: Path | None = None,
+    systemd_analyze_runner: Callable[..., bytes] | None = None,
 ) -> tuple[Path, ...]:
     """Return bounded effective service scopes, optionally mapped under a test root."""
     if kind not in {"systemd", "launchd"}:
@@ -760,12 +1026,14 @@ def discover_ivd_cron_service_scopes(
     environment = os.environ if environ is None else environ
     home_path = Path.home() if home is None else Path(home)
     if kind == "systemd":
-        groups = _systemd_service_scope_groups(
+        groups = _effective_systemd_service_scope_groups(
             target_path=target_path,
             scope_root=Path(scope_root),
             home=home_path,
             environ=environment,
             uid=uid,
+            systemd_analyze_path=systemd_analyze_path,
+            systemd_analyze_runner=systemd_analyze_runner,
         )
         scopes = _deduplicate_paths([scope for group in groups for scope in group])
     else:
@@ -1154,6 +1422,8 @@ def assert_embedded_ivd_cron_service_contract(
     uid: int | None = None,
     max_entries_per_scope: int = 512,
     max_scopes: int = MAX_SYSTEMD_SERVICE_SCOPES,
+    systemd_analyze_path: Path | None = None,
+    systemd_analyze_runner: Callable[..., bytes] | None = None,
 ) -> FenceDecision:
     """Reject only independent IVD schedulers, preserving unrelated cron jobs."""
     contract = validate_runtime_contract(
@@ -1164,26 +1434,21 @@ def assert_embedded_ivd_cron_service_contract(
     if kind not in {"systemd", "launchd"}:
         raise ValueError("service_kind_invalid")
 
-    scopes = discover_ivd_cron_service_scopes(
-        kind,
-        target_path=target_path,
-        scope_root=scope_root,
-        home=home,
-        environ=environ,
-        uid=uid,
-        max_scopes=max_scopes,
-    )
     service_dir = Path(service_dir)
-    if service_dir not in scopes:
-        scopes = _deduplicate_paths([service_dir, *scopes])
     if kind == "systemd":
-        groups = _systemd_service_scope_groups(
+        groups = _effective_systemd_service_scope_groups(
             target_path=target_path,
             scope_root=Path(scope_root),
             home=Path.home() if home is None else Path(home),
             environ=os.environ if environ is None else environ,
             uid=uid,
+            systemd_analyze_path=systemd_analyze_path,
+            systemd_analyze_runner=systemd_analyze_runner,
         )
+        scopes = _deduplicate_paths([scope for group in groups for scope in group])
+        scope_limit = min(max_scopes, MAX_SYSTEMD_SERVICE_SCOPES)
+        if scope_limit < 1 or len(scopes) > scope_limit:
+            raise IvdCronServiceDiscoveryError("service_scope_limit", target_path)
         grouped_scopes = {scope for group in groups for scope in group}
         if service_dir not in grouped_scopes:
             groups = ((service_dir,), *groups)
@@ -1193,6 +1458,19 @@ def assert_embedded_ivd_cron_service_contract(
             scope_root=Path(scope_root),
         )
     else:
+        scopes = discover_ivd_cron_service_scopes(
+            kind,
+            target_path=target_path,
+            scope_root=scope_root,
+            home=home,
+            environ=environ,
+            uid=uid,
+            max_scopes=max_scopes,
+            systemd_analyze_path=systemd_analyze_path,
+            systemd_analyze_runner=systemd_analyze_runner,
+        )
+        if service_dir not in scopes:
+            scopes = _deduplicate_paths([service_dir, *scopes])
         for scope in scopes:
             _scan_service_scope(kind=kind, scope=scope, max_entries=max_entries_per_scope)
 
