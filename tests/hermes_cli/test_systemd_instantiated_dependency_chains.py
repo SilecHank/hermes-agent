@@ -371,10 +371,12 @@ def test_activation_node_count_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, "MAX_SYSTEMD_ACTIVATION_NODES", 3, raising=False)
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
-    _write(scope / "host@.service", "[Unit]\nDescription=host\n")
-    _write(scope / "one.service", "[Unit]\nDescription=one\n")
-    _write(scope / "two.service", "[Unit]\nDescription=two\n")
-    _link_source_instance(scope)
+    _write(scope / "worker@.service", "[Unit]\nDescription=worker\n")
+    for instance in ("one", "two", "three", "four"):
+        _link(
+            scope / "owner.target.wants" / f"worker@{instance}.service",
+            "../worker@.service",
+        )
     target = tmp_path / "target"
     target.mkdir()
 

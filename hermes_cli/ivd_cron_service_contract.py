@@ -1443,6 +1443,10 @@ def _register_synthesized_unit(
             else "systemd_activation_node_limit"
         )
         raise IvdCronServiceDiscoveryError(reason, source_path)
+    if len(candidates) >= MAX_SYSTEMD_ACTIVATION_NODES:
+        raise IvdCronServiceDiscoveryError(
+            "systemd_activation_node_limit", source_path
+        )
     candidates[unit_name] = _SynthesizedSystemdUnit(
         record=template_record,
         source_path=source_path,
@@ -1461,12 +1465,8 @@ def _expand_systemd_activation_graph(
 ) -> None:
     allowed_scopes = frozenset(scopes)
     initial_names = sorted(set(effective) | set(candidates))
-    if len(initial_names) > MAX_SYSTEMD_ACTIVATION_NODES:
-        path = (
-            candidates[initial_names[-1]].source_path
-            if initial_names[-1] in candidates
-            else effective[initial_names[-1]].path
-        )
+    if len(candidates) > MAX_SYSTEMD_ACTIVATION_NODES:
+        path = candidates[sorted(candidates)[-1]].source_path
         raise IvdCronServiceDiscoveryError("systemd_activation_node_limit", path)
     queue = deque((name, 0) for name in initial_names)
     queued = set(initial_names)
@@ -1546,10 +1546,6 @@ def _expand_systemd_activation_graph(
             if next_depth > MAX_SYSTEMD_ACTIVATION_DEPTH:
                 raise IvdCronServiceDiscoveryError(
                     "systemd_activation_depth_limit", source_path
-                )
-            if len(queued) >= MAX_SYSTEMD_ACTIVATION_NODES:
-                raise IvdCronServiceDiscoveryError(
-                    "systemd_activation_node_limit", source_path
                 )
             queued.add(unit_name)
             queue.append((unit_name, next_depth))
