@@ -541,6 +541,10 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted Model/Provider lines are stale."""
 
+    platform = str(getattr(agent, "platform", "") or "").strip().lower()
+    if platform in {"weixin", "wecom", "qqbot"} and "# Confidentiality boundary" not in prompt:
+        return False
+
     def line_value(label: str) -> str:
         prefix = f"{label}:"
         value = ""
