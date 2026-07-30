@@ -16,13 +16,13 @@
 - Modify: `/home/slim/IVD-KnowledgeHub/scripts/test_hermes_fast_response_pipeline.py`
 - Modify: `/home/slim/IVD-KnowledgeHub/scripts/hermes_fast_response_pipeline.py`
 
-- [ ] **Step 1: Write the failing routing tests**
+- [x] **Step 1: Write the failing routing tests**
 
 Add one test asserting that `CNV上纳磁提取有48通量的脚本吗` does not return
 `sop_parameter_short_answer`, and one control test asserting that
 `CNV提取后DNA浓度标准是多少` still does.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 `python -m unittest scripts.test_hermes_fast_response_pipeline.HermesFastResponsePipelineTest.test_file_discovery_question_does_not_use_parameter_fast_path -v`
@@ -30,21 +30,21 @@ Run:
 Expected: FAIL because the reproduced question currently returns the parameter
 answer shape.
 
-- [ ] **Step 3: Implement the minimal classifier exclusion**
+- [x] **Step 3: Implement the minimal classifier exclusion**
 
 Add a focused file-discovery expression covering explicit existence/location
 questions for scripts, files, SOPs, procedures, and templates. Make
 `_is_parameter_question()` return false when that expression matches. Do not
 alter parameter terms, product matching, source lists, or numeric validation.
 
-- [ ] **Step 4: Run focused and full fast-response tests**
+- [x] **Step 4: Run focused and full fast-response tests**
 
 Run:
 `python -m unittest scripts.test_hermes_fast_response_pipeline -v`
 
 Expected: all tests pass, including the true-parameter control.
 
-- [ ] **Step 5: Commit only the routing files**
+- [x] **Step 5: Commit only the routing files**
 
 Run:
 `git add scripts/hermes_fast_response_pipeline.py scripts/test_hermes_fast_response_pipeline.py && git commit -m "Route file discovery outside parameter fast path"`
@@ -57,7 +57,7 @@ Run:
 - Modify: `/home/slim/.hermes/hermes-agent/agent/final_response_validation.py`
 - Modify: `/home/slim/.hermes/hermes-agent/gateway/after_sales_guard.py`
 
-- [ ] **Step 1: Write failing retry and fallback tests**
+- [x] **Step 1: Write failing retry and fallback tests**
 
 Add a final-response validation test requiring the first
 `formal_source_not_read` rejection to mention `read_file` and routed formal
@@ -65,7 +65,7 @@ paths. Extend the guard test to require the second-failure fallback to omit
 `请先读取` and explain that the parameter cannot be verified from the formal
 source.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run:
 `scripts/run_tests.sh tests/agent/test_final_response_validation.py tests/test_after_sales_guard.py`
@@ -73,21 +73,21 @@ Run:
 Expected: the new assertions fail against the generic repair instruction and
 internal fallback wording.
 
-- [ ] **Step 3: Implement the minimal recovery behavior**
+- [x] **Step 3: Implement the minimal recovery behavior**
 
 Map `formal_source_not_read` to an explicit instruction to call `read_file` on
 one exact routed formal source before drafting the answer. Replace only that
 guard fallback with a user-facing evidence boundary asking for product version
 or SOP identifier when automatic verification remains impossible.
 
-- [ ] **Step 4: Run the focused Hermes tests**
+- [x] **Step 4: Run the focused Hermes tests**
 
 Run:
 `scripts/run_tests.sh tests/agent/test_final_response_validation.py tests/test_after_sales_guard.py tests/gateway/test_ivd_runtime.py`
 
 Expected: all selected test files pass with no flaky retry report.
 
-- [ ] **Step 5: Commit the recovery behavior**
+- [x] **Step 5: Commit the recovery behavior**
 
 Run:
 `git add agent/final_response_validation.py gateway/after_sales_guard.py tests/agent/test_final_response_validation.py tests/test_after_sales_guard.py && git commit -m "Recover formal source validation internally"`
@@ -97,35 +97,35 @@ Run:
 **Files:**
 - Verify only: both repositories above
 
-- [ ] **Step 1: Run KnowledgeHub governance tests**
+- [x] **Step 1: Run KnowledgeHub governance tests**
 
 Run:
 `python -m unittest scripts.test_hermes_fast_response_pipeline scripts.test_hermes_runtime_integration scripts.test_hermes_structural_guardrails -v`
 
 Expected: all tests pass.
 
-- [ ] **Step 2: Run Hermes regression tests**
+- [x] **Step 2: Run Hermes regression tests**
 
 Run:
 `scripts/run_tests.sh tests/agent/test_final_response_validation.py tests/test_after_sales_guard.py tests/gateway/test_ivd_runtime.py`
 
 Expected: all files pass and report no flaky retry.
 
-- [ ] **Step 3: Run static checks**
+- [x] **Step 3: Run static checks**
 
 Run `python -m py_compile` on the four changed Python modules and `git diff --check`
 in both repositories.
 
 Expected: exit code zero.
 
-- [ ] **Step 4: Push both commits and restart the live gateway**
+- [x] **Step 4: Push both commits and restart the live gateway**
 
 Push the KnowledgeHub `main` commit without including pre-existing unrelated
 working-tree changes. Push the Hermes feature-branch commit, restart
 `hermes-gateway.service`, and verify it is active with all configured platforms
 connected.
 
-- [ ] **Step 5: Reproduce the original route resolution**
+- [x] **Step 5: Reproduce the original route resolution**
 
 Evaluate the KnowledgeHub plan for `CNV上纳磁提取有48通量的脚本吗` and verify
 it is a fast-path miss eligible for one index fallback. Evaluate
