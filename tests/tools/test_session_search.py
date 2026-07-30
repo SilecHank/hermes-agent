@@ -654,9 +654,40 @@ class TestCompactionSummaryFiltering:
         from tools.session_search_tool import _is_compaction_summary
         assert _is_compaction_summary("[CONTEXT COMPACTION — REFERENCE ONLY] foo")
         assert _is_compaction_summary("[CONTEXT SUMMARY]: old summary")
+        assert _is_compaction_summary("[System note: hidden context]")
+        assert _is_compaction_summary("[System validation: hidden rule]")
+        assert _is_compaction_summary("[Internal IVD retrieval policy]\nhidden")
+        assert _is_compaction_summary("[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED]")
         assert not _is_compaction_summary("Hello, how can I help?")
         assert not _is_compaction_summary("")
         assert not _is_compaction_summary(None)
+
+    def test_read_session_excludes_internal_scaffolding(self, db):
+        import json
+        from tools.session_search_tool import _read_session
+
+        db.create_session("s_internal_read", source="qqbot")
+        db.append_message(
+            "s_internal_read",
+            role="user",
+            content="[System note: hidden session lifecycle]",
+        )
+        db.append_message(
+            "s_internal_read",
+            role="user",
+            content="NIFTY胎儿浓度怎么判断？",
+        )
+        db.append_message(
+            "s_internal_read",
+            role="assistant",
+            content="应依据当前产品SOP的质控阈值判断。",
+        )
+
+        payload = json.loads(_read_session(db, "s_internal_read"))
+        contents = [message["content"] for message in payload["messages"]]
+
+        assert len(contents) == 2
+        assert not any("System note" in content for content in contents)
 
     def test_compaction_summary_excluded_from_bookend_start(self, db):
         """Compaction handoff in bookend_start position must be filtered out."""

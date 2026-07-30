@@ -1334,6 +1334,61 @@ class TestEditOverflowSplitAndDeliver:
 
 class TestInterimCommentaryMessages:
     @pytest.mark.asyncio
+    async def test_outbound_sanitizer_suppresses_internal_commentary_and_cleans_final(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        def sanitize(text: str, kind: str):
+            if kind == "interim":
+                return None
+            return text.replace("[System validation]", "").strip()
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(buffer_only=True),
+            outbound_sanitizer=sanitize,
+        )
+
+        consumer.on_commentary("[System validation] hidden")
+        consumer.on_delta("[System validation] visible answer")
+        consumer.finish()
+
+        await consumer.run()
+
+        sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["visible answer"]
+
+    @pytest.mark.asyncio
+    async def test_outbound_sanitizer_runs_before_overflow_splitting(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            side_effect=lambda **_: SimpleNamespace(success=True, message_id="msg")
+        )
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 550
+
+        def sanitize(text: str, kind: str):
+            marker = "[Internal IVD retrieval policy]"
+            return text.split(marker, 1)[0] or None
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(),
+            outbound_sanitizer=sanitize,
+        )
+        consumer.on_delta("A" * 490 + "[Internal IVD retrieval policy]hidden")
+        consumer.finish()
+
+        await consumer.run()
+
+        sent_text = "".join(call[1]["content"] for call in adapter.send.call_args_list)
+        assert sent_text == "A" * 490
+
+    @pytest.mark.asyncio
     async def test_commentary_message_stays_separate_from_final_stream(self):
         adapter = MagicMock()
         adapter.send = AsyncMock(side_effect=[

@@ -63,6 +63,10 @@ _DISCOVER_SCAN_LIMIT = 300
 _COMPACTION_PREFIXES = (
     "[CONTEXT COMPACTION",
     "[CONTEXT SUMMARY]:",
+    "[System note:",
+    "[System validation:",
+    "[Internal IVD retrieval policy]",
+    "[IVD_INTERNAL_",
 )
 
 
@@ -92,11 +96,20 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
 
 
 def _is_compaction_summary(content: str) -> bool:
-    """Return True if *content* looks like a generated compaction handoff."""
+    """Return True if *content* is generated internal session scaffolding."""
     if not content:
         return False
     stripped = content.lstrip()
     return any(stripped.startswith(p) for p in _COMPACTION_PREFIXES)
+
+
+def _without_internal_scaffolding(messages):
+    """Remove machine-generated control/context rows from recall payloads."""
+    return [
+        message
+        for message in (messages or [])
+        if not _is_compaction_summary(message.get("content", ""))
+    ]
 
 
 def _resolve_to_parent(db, session_id: str) -> tuple[str, bool]:
@@ -357,7 +370,7 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10) -> str:
         logging.error("get_messages failed for %s: %s", session_id, e, exc_info=True)
         return tool_error(f"failed to load session: {e}", success=False)
 
-    shaped = [_shape_message(m) for m in rows]
+    shaped = [_shape_message(m) for m in _without_internal_scaffolding(rows)]
     total = len(shaped)
     truncated = total > head + tail
     window = shaped[:head] + shaped[-tail:] if truncated else shaped
@@ -410,7 +423,11 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
                 "started_at": s.get("started_at", ""),
                 "last_active": s.get("last_active", ""),
                 "message_count": s.get("message_count", 0),
-                "preview": s.get("preview", ""),
+                "preview": (
+                    ""
+                    if _is_compaction_summary(s.get("preview", ""))
+                    else s.get("preview", "")
+                ),
             })
             if len(results) >= limit:
                 break
@@ -484,7 +501,7 @@ def _scroll(
         logging.error("get_messages_around failed: %s", e, exc_info=True)
         return tool_error(f"failed to load messages: {e}", success=False)
 
-    messages = view.get("window") or []
+    messages = _without_internal_scaffolding(view.get("window") or [])
 
     # Lineage rebind: caller may have paired a parent session_id with a
     # message id that lives in a descendant (compaction / delegation creates
@@ -509,7 +526,9 @@ def _scroll(
             if a_root and o_root and a_root == o_root:
                 try:
                     rebind_view = db.get_messages_around(owning, around_message_id, window=window)
-                    messages = rebind_view.get("window") or []
+                    messages = _without_internal_scaffolding(
+                        rebind_view.get("window") or []
+                    )
                     if messages:
                         view = rebind_view
                         rebind_warning = (
@@ -587,7 +606,7 @@ def _title_match_result(
         return None
 
     try:
-        messages = db.get_messages(session_id)
+        messages = _without_internal_scaffolding(db.get_messages(session_id))
     except Exception:
         logging.debug("get_messages failed for title match %s", session_id, exc_info=True)
         messages = []
@@ -611,9 +630,24 @@ def _title_match_result(
         "matched_role": "session_title",
         "match_message_id": anchor_id,
         "snippet": f"Session title matched: {session_meta.get('title') or title_query}",
-        "bookend_start": [_shape_message(m) for m in (view.get("bookend_start") or messages[:3])],
-        "messages": [_shape_message(m, anchor_id=anchor_id) for m in (view.get("window") or messages[:5])],
-        "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
+        "bookend_start": [
+            _shape_message(m)
+            for m in _without_internal_scaffolding(
+                view.get("bookend_start") or messages[:3]
+            )
+        ],
+        "messages": [
+            _shape_message(m, anchor_id=anchor_id)
+            for m in _without_internal_scaffolding(
+                view.get("window") or messages[:5]
+            )
+        ],
+        "bookend_end": [
+            _shape_message(m)
+            for m in _without_internal_scaffolding(
+                view.get("bookend_end") or messages[-3:]
+            )
+        ],
         "messages_before": view.get("messages_before", 0),
         "messages_after": view.get("messages_after", max(len(messages) - 5, 0)),
         "_lineage_root": lineage_root,
@@ -682,6 +716,8 @@ def _discover(
         results.append(title_result)
 
     for r in raw_results:
+        if _is_compaction_summary(r.get("content", "")):
+            continue
         if len(seen_sessions) >= limit:
             break
         raw_sid = r["session_id"]
@@ -751,7 +787,10 @@ def _discover(
                 for m in (view.get("bookend_start") or [])
                 if not _is_compaction_summary(m.get("content", ""))
             ],
-            "messages": [_shape_message(m, anchor_id=msg_id, max_content_len=4000) for m in (view.get("window") or [])],
+            "messages": [
+                _shape_message(m, anchor_id=msg_id, max_content_len=4000)
+                for m in _without_internal_scaffolding(view.get("window") or [])
+            ],
             "bookend_end": [
                 _shape_message(m, max_content_len=1200)
                 for m in (view.get("bookend_end") or [])

@@ -200,10 +200,17 @@ class GatewayStreamConsumer:
         on_before_finalize: Optional[Callable[[], Any]] = None,
         initial_reply_to_id: Optional[str] = None,
         run_still_current: Optional[Callable[[], bool]] = None,
+        outbound_sanitizer: Optional[Callable[[str, str], Optional[str]]] = None,
     ):
         self.adapter = adapter
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
+        self._outbound_sanitizer = outbound_sanitizer
+        # A confidentiality sanitizer needs the complete response before it
+        # can decide whether a marker is control text or quoted user content.
+        # Never expose partial frames on guarded human-chat streams.
+        if outbound_sanitizer is not None:
+            self.cfg.buffer_only = True
         self.metadata = metadata
         # Fired whenever a fresh content bubble is created on the platform
         # (first-send of a new message, commentary, overflow chunk, or
@@ -746,6 +753,19 @@ class GatewayStreamConsumer:
                 if got_done:
                     self._flush_think_buffer()
 
+                    # Sanitize the complete answer before any overflow split.
+                    # Per-chunk filtering is too late when a marker straddles
+                    # the platform boundary and could expose its first half.
+                    if self._outbound_sanitizer is not None:
+                        prepared_final = self._prepare_outbound(
+                            self._accumulated,
+                            "final",
+                        )
+                        if prepared_final is None:
+                            await self._suppress_silence_marker()
+                            return
+                        self._accumulated = prepared_final
+
                     # Intentional-silence suppression.  When the agent chose
                     # not to reply it emits a bare control marker (NO_REPLY /
                     # [SILENT] / …).  The gateway's whole-response filter
@@ -1124,6 +1144,17 @@ class GatewayStreamConsumer:
         """
         return _BasePlatformAdapter.strip_media_directives_for_display(text)
 
+    def _prepare_outbound(self, text: str, kind: str) -> Optional[str]:
+        """Apply display cleanup and the caller's human-outbound policy."""
+        cleaned = self._clean_for_display(text)
+        if self._outbound_sanitizer is None:
+            return cleaned
+        try:
+            return self._outbound_sanitizer(cleaned, kind)
+        except Exception:
+            logger.exception("Outbound stream sanitizer failed; suppressing message")
+            return None
+
     async def _send_new_chunk(
         self,
         text: str,
@@ -1135,7 +1166,9 @@ class GatewayStreamConsumer:
 
         Returns the message_id so callers can thread subsequent chunks.
         """
-        text = self._clean_for_display(text)
+        text = self._prepare_outbound(text, "final" if final else "interim")
+        if text is None:
+            return reply_to_id
         if not text.strip():
             return reply_to_id
         try:
@@ -1278,7 +1311,9 @@ class GatewayStreamConsumer:
 
         Retries each chunk once on flood-control failures with a short delay.
         """
-        final_text = self._clean_for_display(text)
+        final_text = self._prepare_outbound(text, "final")
+        if final_text is None:
+            return
         # Ensure balanced code fences before computing continuation,
         # so the closing fence reaches the user even when the fallback
         # only delivers the tail after mid-stream edits failed.
@@ -1653,7 +1688,9 @@ class GatewayStreamConsumer:
         tail = self._accumulated
         if visible and tail.startswith(visible):
             tail = tail[len(visible):].lstrip()
-        tail = self._clean_for_display(tail)
+        tail = self._prepare_outbound(tail, "interim")
+        if tail is None:
+            return
         if not tail.strip():
             return
         try:
@@ -1690,7 +1727,9 @@ class GatewayStreamConsumer:
 
     async def _send_commentary(self, text: str) -> bool:
         """Send a completed interim assistant commentary message."""
-        text = self._clean_for_display(text)
+        text = self._prepare_outbound(text, "interim")
+        if text is None:
+            return False
         if not text.strip():
             return False
         try:
@@ -1939,7 +1978,12 @@ class GatewayStreamConsumer:
         # Strip MEDIA: directives so they don't appear as visible text.
         # Media files are delivered as native attachments after the stream
         # finishes (via _deliver_media_from_response in gateway/run.py).
-        text = self._clean_for_display(text)
+        text = self._prepare_outbound(
+            text,
+            "final" if finalize and is_turn_final else "interim",
+        )
+        if text is None:
+            return True
         # Ensure code fences are balanced before send/edit.  Model output
         # truncated mid-code-block (e.g. finish_reason="length") leaves an
         # orphaned ``` which, on Discord/Slack/Matrix, causes the entire

@@ -22,6 +22,7 @@ from gateway.session import (
     SessionStore,
     build_auto_reset_notice,
 )
+from gateway.run import _auto_reset_notice_should_be_visible
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +270,13 @@ class TestSessionEntryReason:
 # ---------------------------------------------------------------------------
 
 class TestResetPolicyNotify:
+    def test_only_recovery_interrupt_resets_are_user_visible(self):
+        assert _auto_reset_notice_should_be_visible("suspended") is True
+        assert _auto_reset_notice_should_be_visible("resume_pending_expired") is True
+        assert _auto_reset_notice_should_be_visible("idle") is False
+        assert _auto_reset_notice_should_be_visible("daily") is False
+        assert _auto_reset_notice_should_be_visible("prompt_tokens") is False
+
     def test_prompt_token_notice_is_plain_chinese_and_keeps_history_available(self):
         notice = build_auto_reset_notice(
             "prompt_tokens",

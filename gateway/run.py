@@ -605,6 +605,13 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if _gateway_surface_passes_raw_text(platform):
         return text
 
+    from gateway.outbound_policy import sanitize_human_outbound
+
+    policy_text = sanitize_human_outbound(platform, str(text), kind="final")
+    if policy_text is None:
+        return ""
+    text = policy_text
+
     # Cancellation metadata, not assistant prose. ACP/TUI already suppress
     # this sentinel; chat surfaces should too (#7921).
     if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
@@ -633,6 +640,13 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     if _gateway_surface_passes_raw_text(platform):
         return text
 
+    from gateway.outbound_policy import sanitize_human_outbound
+
+    policy_text = sanitize_human_outbound(platform, text, kind="status")
+    if policy_text is None:
+        return None
+    text = policy_text
+
     text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         # Opt-in #52995: `compression.progress_notices: true` lets ROUTINE
@@ -649,6 +663,18 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     if _looks_like_gateway_provider_error(text):
         return _gateway_provider_error_reply(text)
     return text
+
+
+def _sanitize_gateway_stream_response(platform: Any, text: str, kind: str) -> Optional[str]:
+    """Apply the same human-outbound boundary to streamed chat content."""
+    from gateway.outbound_policy import sanitize_human_outbound
+
+    return sanitize_human_outbound(platform, text, kind=kind)
+
+
+def _auto_reset_notice_should_be_visible(reset_reason: str) -> bool:
+    """Only surface resets where the user must know recovery is available."""
+    return reset_reason in {"suspended", "resume_pending_expired"}
 
 
 def render_notice_line(notice) -> str:
@@ -13103,32 +13129,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_type=getattr(source, 'chat_type', 'dm'),
                 )
                 platform_name = source.platform.value if source.platform else ""
-                had_activity = getattr(session_entry, 'reset_had_activity', False)
-                # Suspended and restart-recovery-expired sessions always notify
-                # regardless of policy.notify — the user had an active session
-                # that was silently replaced, so they need to know they can
-                # /resume it.  Idle/daily resets respect the policy flag.
-                should_notify = reset_reason in {"suspended", "resume_pending_expired"} or (
-                    policy.notify
-                    and had_activity
+                should_notify = (
+                    _auto_reset_notice_should_be_visible(reset_reason)
                     and platform_name not in policy.notify_exclude_platforms
                 )
                 if should_notify:
                     adapter = self._adapter_for_source(source)
                     if adapter:
                         notice = build_auto_reset_notice(reset_reason, policy)
-                        try:
-                            session_info = await asyncio.to_thread(
-                                self._reset_notice_session_info, source
-                            )
-                            if session_info:
-                                notice = f"{notice}\n\n{session_info}"
-                        except Exception:
-                            pass
-                        await adapter.send(
-                            source.chat_id, notice,
-                            metadata=self._thread_metadata_for_source(source),
+                        notice = _sanitize_gateway_stream_response(
+                            source.platform,
+                            notice,
+                            "operational",
                         )
+                        if notice:
+                            await adapter.send(
+                                source.chat_id, notice,
+                                metadata=self._thread_metadata_for_source(source),
+                            )
             except Exception as e:
                 logger.debug("Auto-reset notification failed (non-fatal): %s", e)
 
@@ -13547,27 +13565,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                                 session_entry.session_id,
                                                 _hyg_timeout_seconds,
                                             )
-                                            _timeout_msg = (
-                                                "⚠️ 上下文压缩超时"
-                                                f"（已等待 {_hyg_timeout_seconds:.1f} 秒）。"
-                                                "没有删除任何消息，本轮对话会继续处理。"
-                                                "你可以发送 /compress 重试，或发送 /reset 开始一个干净会话；"
-                                                "如果反复出现，请检查 config.yaml 里的 auxiliary.compression 模型配置。"
-                                            )
-                                            try:
-                                                _adapter = self._adapter_for_source(source)
-                                                if _adapter and source.chat_id:
-                                                    await _adapter.send(
-                                                        source.chat_id,
-                                                        _timeout_msg,
-                                                        metadata=_hyg_meta,
-                                                    )
-                                            except Exception as _werr:
-                                                logger.warning(
-                                                    "Failed to deliver compression-timeout "
-                                                    "warning to user: %s",
-                                                    _werr,
-                                                )
                                             raise
 
                                     # _compress_context ends the old session and creates
@@ -13668,12 +13665,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     # If summary generation failed, the
                                     # compressor aborts entirely and returns
                                     # messages unchanged — nothing is dropped.
-                                    # Surface a visible warning to the gateway
-                                    # user — agent.log alone is invisible on
-                                    # TG/Discord/etc. — so they know the chat
-                                    # is "frozen" at the current size and can
-                                    # /compress to retry or /reset to start
-                                    # fresh.
+                                    # Keep automatic maintenance failures in
+                                    # operator logs. The current turn continues
+                                    # with the unchanged transcript, so no user
+                                    # action or chat interruption is required.
                                     _comp = getattr(_hyg_agent, "context_compressor", None)
                                     if _comp is not None and getattr(_comp, "_last_compress_aborted", False):
                                         if _hyg_failure_cooldown_seconds >= 0:
@@ -13681,52 +13676,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                                 session_entry.session_id
                                             ] = time.time() + _hyg_failure_cooldown_seconds
                                         _err = getattr(_comp, "_last_summary_error", None) or "unknown error"
-                                        # Force-redact: provider exception text
-                                        # may contain credentials; this message
-                                        # reaches gateway users directly.
                                         from agent.redact import redact_sensitive_text
                                         _err = redact_sensitive_text(_err, force=True)
-                                        _warn_msg = (
-                                            "⚠️ Context compression aborted "
-                                            f"({_err}). No messages were dropped — "
-                                            "conversation is unchanged. Run /compress "
-                                            "to retry, /reset for a clean session, or "
-                                            "check your auxiliary.compression model "
-                                            "configuration."
+                                        logger.warning(
+                                            "Automatic context compression aborted; "
+                                            "continuing with the unchanged transcript: %s",
+                                            _err,
                                         )
-                                        try:
-                                            _adapter = self._adapter_for_source(source)
-                                            if _adapter and source.chat_id:
-                                                await _adapter.send(source.chat_id, _warn_msg, metadata=_hyg_meta)
-                                        except Exception as _werr:
-                                            logger.warning(
-                                                "Failed to deliver compression-failure warning to user: %s",
-                                                _werr,
-                                            )
                                     # Separately: if the user's CONFIGURED aux
                                     # model failed and we recovered by falling
-                                    # back to the main model, tell them — a
-                                    # misconfigured auxiliary.compression.model
-                                    # is something only they can fix, and
-                                    # silent recovery would hide it.
+                                    # back to the main model, retain the detail
+                                    # in redacted operator logs.
                                     elif _comp is not None and getattr(_comp, "_last_aux_model_failure_model", None):
                                         _aux_model = getattr(_comp, "_last_aux_model_failure_model", "")
                                         _aux_err = getattr(_comp, "_last_aux_model_failure_error", None) or "unknown error"
-                                        _aux_msg = (
-                                            f"ℹ️ Configured compression model `{_aux_model}` "
-                                            f"failed ({_aux_err}). Recovered using your main "
-                                            "model — context is intact — but you may want to "
-                                            "check `auxiliary.compression.model` in config.yaml."
+                                        from agent.redact import redact_sensitive_text
+                                        logger.warning(
+                                            "Configured compression model %s failed; "
+                                            "recovered with the main model: %s",
+                                            redact_sensitive_text(_aux_model, force=True),
+                                            redact_sensitive_text(_aux_err, force=True),
                                         )
-                                        try:
-                                            _adapter = self._adapter_for_source(source)
-                                            if _adapter and source.chat_id:
-                                                await _adapter.send(source.chat_id, _aux_msg, metadata=_hyg_meta)
-                                        except Exception as _werr:
-                                            logger.warning(
-                                                "Failed to deliver aux-model-fallback notice to user: %s",
-                                                _werr,
-                                            )
                                 finally:
                                     # Evict the cached agent so the next turn
                                     # rebuilds its system prompt from current
@@ -19842,6 +19812,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         on_before_finalize=_pause_typing_before_finalize,
                         initial_reply_to_id=event_message_id,
                         run_still_current=_run_still_current,
+                        outbound_sanitizer=(
+                            None
+                            if _gateway_surface_passes_raw_text(source.platform)
+                            else lambda text, kind: _sanitize_gateway_stream_response(
+                                source.platform, text, kind
+                            )
+                        ),
                     )
             except Exception as _sc_err:
                 logger.debug("Proxy: could not set up stream consumer: %s", _sc_err)
@@ -21423,6 +21400,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             on_before_finalize=_pause_typing_before_finalize,
                             initial_reply_to_id=event_message_id,
                             run_still_current=_run_still_current,
+                            outbound_sanitizer=(
+                                None
+                                if _gateway_surface_passes_raw_text(source.platform)
+                                else lambda text, kind: _sanitize_gateway_stream_response(
+                                    source.platform, text, kind
+                                )
+                            ),
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
@@ -21435,7 +21419,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
                     return
-                display_text = text
+                display_text = _sanitize_gateway_stream_response(
+                    source.platform,
+                    text,
+                    "interim",
+                )
+                if not display_text:
+                    return
                 if _stream_consumer is not None:
                     if already_streamed:
                         _stream_consumer.on_segment_break()
@@ -21796,10 +21786,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             def _deliver_bg_review_message(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
                     return
+                safe_message = _sanitize_gateway_stream_response(
+                    source.platform,
+                    message,
+                    "operational",
+                )
+                if not safe_message:
+                    return
                 safe_schedule_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
-                        message,
+                        safe_message,
                         metadata=_non_conversational_metadata(_status_thread_metadata, platform=source.platform),
                     ),
                     _loop_for_step,
@@ -23357,7 +23354,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # _run_agent_task; sending the raw copy bypasses those steps.
                     _delivery_result = response if isinstance(response, dict) else (result or {})
                     _previewed = bool(_delivery_result.get("response_previewed"))
-                    first_response = _delivery_result.get("final_response", "")
+                    first_response = _sanitize_gateway_final_response(
+                        source.platform,
+                        _delivery_result.get("final_response", ""),
+                    )
                     _already_streamed = _stream_confirmed_final_delivery(
                         _sc,
                         first_response,
@@ -23619,10 +23619,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _sc_msg_id = _sc.message_id
                 if _sc_msg_id:
                     try:
+                        _safe_transformed_response = _sanitize_gateway_final_response(
+                            source.platform,
+                            response["final_response"],
+                        )
+                        if not _safe_transformed_response:
+                            raise ValueError("transformed response suppressed by outbound policy")
+                        response["final_response"] = _safe_transformed_response
                         await _sc.adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=_sc_msg_id,
-                            content=response["final_response"],
+                            content=_safe_transformed_response,
                             finalize=True,
                         )
                         response["already_sent"] = True

@@ -286,6 +286,29 @@ def test_local_surface_keeps_internal_ivd_budget_signal():
     assert _sanitize_gateway_final_response("local", raw) == raw
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[Internal IVD retrieval policy]\nProfile: direct.",
+        "[System validation: retry the rejected answer.]",
+        "[System note: internal session lifecycle.]",
+        "[CONTEXT COMPACTION — REFERENCE ONLY] private summary",
+    ],
+)
+def test_chat_gateway_blocks_generic_internal_scaffolding(raw):
+    assert _sanitize_gateway_final_response("weixin", raw) == (
+        "现有证据不足，需要进一步检索确认。"
+    )
+
+
+def test_chat_status_silences_generic_internal_scaffolding():
+    assert _prepare_gateway_status_message(
+        "wecom",
+        "lifecycle",
+        "[System validation: internal retry.]",
+    ) is None
+
+
 @pytest.mark.parametrize("platform", CHAT_PLATFORMS)
 def test_chat_gateways_drop_interrupt_sentinel(platform):
     """The interrupt-while-waiting sentinel is metadata, not a reply (#7921)."""

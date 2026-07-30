@@ -708,6 +708,20 @@ class CommentaryAgent:
         }
 
 
+class InternalCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "[System validation] hidden control text",
+                already_streamed=False,
+            )
+        return {"final_response": "正常答复", "messages": [], "api_calls": 1}
+
+
 class PreviewedResponseAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -796,6 +810,25 @@ class QueuedSilenceAgent:
         }
 
 
+class QueuedInternalAgent:
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        type(self).calls += 1
+        return {
+            "final_response": (
+                "[Internal IVD retrieval policy]\nhidden"
+                if type(self).calls == 1
+                else "follow-up processed"
+            ),
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class QueuedFailedEmptyAgent:
     """First turn fails empty; its normalized error must send before follow-up."""
 
@@ -834,6 +867,17 @@ class BackgroundReviewAgent:
             "messages": [],
             "api_calls": 1,
         }
+
+
+class InternalBackgroundReviewAgent:
+    def __init__(self, **kwargs):
+        self.background_review_callback = kwargs.get("background_review_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.background_review_callback:
+            self.background_review_callback("[System note: hidden maintenance]")
+        return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
 class VerboseAgent:
@@ -1025,6 +1069,24 @@ async def test_run_agent_surfaces_real_interim_commentary(monkeypatch, tmp_path)
 
     assert result.get("already_sent") is not True
     assert any(call["content"] == "I'll inspect the repo first." for call in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_internal_interim_commentary(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        InternalCommentaryAgent,
+        session_id="sess-internal-commentary",
+        config_data={"display": {"interim_assistant_messages": True}},
+        platform=Platform.QQBOT,
+        chat_id="qq-chat",
+        thread_id=None,
+        adapter_cls=NonEditingProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "正常答复"
+    assert not any("System validation" in call["content"] for call in adapter.sent)
 
 
 @pytest.mark.asyncio
@@ -1296,6 +1358,28 @@ async def test_run_agent_suppresses_silent_first_turn_and_processes_queued_follo
     assert QueuedSilenceAgent.calls == 2
     assert result["final_response"] == "follow-up processed"
     assert "NO_REPLY" not in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_run_agent_sanitizes_internal_first_turn_before_queued_followup(
+    monkeypatch, tmp_path,
+):
+    QueuedInternalAgent.calls = 0
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        QueuedInternalAgent,
+        session_id="sess-queued-internal",
+        pending_text="queued follow-up",
+        platform=Platform.QQBOT,
+        chat_id="qq-chat",
+        thread_id=None,
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert result["final_response"] == "follow-up processed"
+    assert "现有证据不足，需要进一步检索确认。" in sent_texts
+    assert not any("Internal IVD retrieval policy" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
