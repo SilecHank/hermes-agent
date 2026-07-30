@@ -42,6 +42,22 @@ class IvdCronServiceDiscoveryError(RuntimeError):
 MAX_SERVICE_DEFINITION_BYTES = 128 * 1024
 MAX_SYSTEMD_DROPIN_LEVELS = 64
 MAX_SYSTEMD_UNIT_NAME_BYTES = 255
+_SYSTEMD_UNIT_SUFFIXES = frozenset(
+    (
+        "service",
+        "socket",
+        "device",
+        "mount",
+        "automount",
+        "swap",
+        "target",
+        "path",
+        "timer",
+        "slice",
+        "scope",
+    )
+)
+_SYSTEMD_DEPENDENCY_DIRECTORY_SUFFIXES = ("wants", "requires", "upholds")
 SYSTEMD_ANALYZE_CANDIDATES = (
     Path("/usr/bin/systemd-analyze"),
     Path("/bin/systemd-analyze"),
@@ -1226,25 +1242,45 @@ def _validate_systemd_instance_dropin(
     return parsed
 
 
-def _is_systemd_target_wants_directory(name: str, source_path: Path) -> bool:
-    if not name.endswith(".target.wants"):
-        return False
-    target_prefix = name[: -len(".target.wants")]
-    target_name = f"{target_prefix}.target"
+def _parse_systemd_dependency_directory(
+    name: str,
+    source_path: Path,
+) -> tuple[str, str] | None:
+    dependency = next(
+        (
+            suffix
+            for suffix in _SYSTEMD_DEPENDENCY_DIRECTORY_SUFFIXES
+            if name.endswith(f".{suffix}")
+        ),
+        None,
+    )
+    if dependency is None:
+        return None
+    source_unit = name[: -len(f".{dependency}")]
+    unit_stem, separator, unit_suffix = source_unit.rpartition(".")
+    try:
+        source_unit_size = len(source_unit.encode("utf-8"))
+    except UnicodeError as exc:
+        raise IvdCronServiceDiscoveryError(
+            "systemd_wants_directory_invalid", source_path
+        ) from exc
     if (
-        len(target_name.encode("utf-8")) > MAX_SYSTEMD_UNIT_NAME_BYTES
-        or not _valid_systemd_unit_stem(target_prefix, template_allowed=True)
+        Path(name).name != name
+        or source_unit_size > MAX_SYSTEMD_UNIT_NAME_BYTES
+        or not separator
+        or unit_suffix not in _SYSTEMD_UNIT_SUFFIXES
+        or not _valid_systemd_unit_stem(unit_stem, template_allowed=True)
     ):
         raise IvdCronServiceDiscoveryError(
             "systemd_wants_directory_invalid", source_path
         )
-    return True
+    return source_unit, dependency
 
 
-def _mapped_systemd_wants_target(
+def _mapped_systemd_dependency_target(
     raw_target: str,
     *,
-    wants_directory: Path,
+    dependency_directory: Path,
     scope_root: Path,
 ) -> Path:
     target = Path(raw_target)
@@ -1252,11 +1288,11 @@ def _mapped_systemd_wants_target(
         if scope_root != Path("/") and not target.is_relative_to(scope_root):
             target = _map_service_scope(scope_root, target)
     else:
-        target = wants_directory / target
+        target = dependency_directory / target
     return Path(os.path.normpath(os.fspath(target)))
 
 
-def _scan_systemd_target_wants(
+def _scan_systemd_dependency_directory(
     scope: Path,
     directory_name: str,
     *,
@@ -1264,8 +1300,9 @@ def _scan_systemd_target_wants(
     records_by_path: Mapping[Path, _SystemdUnitRecord],
     candidates: dict[str, _SynthesizedSystemdTimer],
     max_entries: int,
+    remaining_entries: int,
     scope_root: Path,
-) -> None:
+) -> int:
     directory = scope / directory_name
     try:
         metadata = directory.lstat()
@@ -1295,6 +1332,10 @@ def _scan_systemd_target_wants(
                     raise IvdCronServiceDiscoveryError(
                         "systemd_wants_entry_limit", directory
                     )
+        if len(names) > remaining_entries:
+            raise IvdCronServiceDiscoveryError(
+                "systemd_wants_entry_limit", directory
+            )
 
         allowed_unit_scopes = frozenset(
             record.path.parent for record in records_by_path.values()
@@ -1323,9 +1364,9 @@ def _scan_systemd_target_wants(
                 raise IvdCronServiceDiscoveryError(
                     "systemd_wants_entry_invalid", source_path
                 )
-            target_path = _mapped_systemd_wants_target(
+            target_path = _mapped_systemd_dependency_target(
                 raw_target,
-                wants_directory=directory,
+                dependency_directory=directory,
                 scope_root=scope_root,
             )
             if (
@@ -1359,6 +1400,7 @@ def _scan_systemd_target_wants(
                 source_path=source_path,
                 max_entries=max_entries,
             )
+        return len(names)
     except IvdCronServiceDiscoveryError:
         raise
     except OSError as exc:
@@ -1379,6 +1421,7 @@ def _discover_systemd_template_timer_instances(
     scope_root: Path,
 ) -> dict[str, _SynthesizedSystemdTimer]:
     candidates: dict[str, _SynthesizedSystemdTimer] = {}
+    dependency_entries = 0
     allowed_scopes = frozenset(scopes)
     visited: set[Path] = set()
     for scope in scopes:
@@ -1426,16 +1469,18 @@ def _discover_systemd_template_timer_instances(
                             source_path=source_path,
                             max_entries=max_entries,
                         )
-                elif _is_systemd_target_wants_directory(name, source_path):
-                    _scan_systemd_target_wants(
+                elif _parse_systemd_dependency_directory(name, source_path):
+                    scanned_entries = _scan_systemd_dependency_directory(
                         resolved_scope,
                         name,
                         effective=effective,
                         records_by_path=records_by_path,
                         candidates=candidates,
                         max_entries=max_entries,
+                        remaining_entries=max_entries - dependency_entries,
                         scope_root=scope_root,
                     )
+                    dependency_entries += scanned_entries
         except IvdCronServiceDiscoveryError:
             raise
         except OSError as exc:

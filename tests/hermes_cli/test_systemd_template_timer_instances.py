@@ -315,7 +315,9 @@ def test_wants_directory_entry_count_is_bounded(tmp_path):
         _assert_systemd(root, target, max_entries=3)
 
 
-def test_unrelated_wants_directory_is_not_used_as_instance_source(tmp_path):
+def test_dependency_directory_without_source_unit_fails_closed(tmp_path):
+    from hermes_cli.ivd_cron_service_contract import IvdCronServiceDiscoveryError
+
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
     _write(scope / "backup@.timer", "[Timer]\nOnCalendar=daily\n")
@@ -330,7 +332,11 @@ def test_unrelated_wants_directory_is_not_used_as_instance_source(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
 
-    assert _assert_systemd(root, target).allowed
+    with pytest.raises(
+        IvdCronServiceDiscoveryError,
+        match="systemd_wants_directory_invalid",
+    ):
+        _assert_systemd(root, target)
 
 
 def test_explicit_ivd_template_remains_conservatively_blocked(tmp_path):
