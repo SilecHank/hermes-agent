@@ -40,6 +40,7 @@ class IvdCronServiceDiscoveryError(RuntimeError):
 
 
 MAX_SERVICE_DEFINITION_BYTES = 128 * 1024
+MAX_SYSTEMD_DROPIN_LEVELS = 64
 SYSTEMD_ANALYZE_CANDIDATES = (
     Path("/usr/bin/systemd-analyze"),
     Path("/bin/systemd-analyze"),
@@ -1013,11 +1014,11 @@ def _effective_systemd_dropins(
     max_entries: int,
     scope_root: Path,
 ) -> tuple[_SystemdDropInRecord, ...]:
-    suffix = ".timer" if unit_name.endswith(".timer") else ".service"
-    type_directory = suffix[1:] + ".d"
+    directory_names = _systemd_dropin_directory_names(unit_name)
     selected: dict[str, _SystemdDropInRecord] = {}
     allowed_scopes = frozenset(scopes)
     visited: set[Path] = set()
+    resolved_scopes: list[Path] = []
     for scope in scopes:
         resolved_scope = _resolve_systemd_scope_alias(
             scope,
@@ -1027,7 +1028,12 @@ def _effective_systemd_dropins(
         if resolved_scope is None or resolved_scope in visited:
             continue
         visited.add(resolved_scope)
-        for directory_name in (unit_name + ".d", type_directory):
+        resolved_scopes.append(resolved_scope)
+
+    # Specific unit/template directories beat prefix and type-wide directories.
+    # Scope precedence only breaks ties within the same specificity level.
+    for directory_name in directory_names:
+        for resolved_scope in resolved_scopes:
             records = _collect_systemd_dropin_directory(
                 resolved_scope / directory_name,
                 max_entries=max_entries,
@@ -1035,6 +1041,45 @@ def _effective_systemd_dropins(
             for name, record in records.items():
                 selected.setdefault(name, record)
     return tuple(selected[name] for name in sorted(selected))
+
+
+def _systemd_template_unit_name(unit_name: str) -> str | None:
+    stem, separator, unit_type = unit_name.rpartition(".")
+    if not separator or "@" not in stem:
+        return None
+    template_stem, instance = stem.split("@", 1)
+    if not template_stem or not instance:
+        return None
+    return f"{template_stem}@.{unit_type}"
+
+
+def _systemd_dropin_directory_names(unit_name: str) -> tuple[str, ...]:
+    stem, separator, unit_type = unit_name.rpartition(".")
+    if not separator or unit_type not in {"timer", "service"}:
+        raise IvdCronServiceDiscoveryError("systemd_unit_name_invalid", unit_name)
+
+    names = [f"{unit_name}.d"]
+    template_name = _systemd_template_unit_name(unit_name)
+    hierarchy_stem = stem
+    if template_name is not None:
+        names.append(f"{template_name}.d")
+        hierarchy_stem = template_name.rpartition(".")[0]
+    if hierarchy_stem.endswith("@"):
+        hierarchy_stem = hierarchy_stem[:-1]
+
+    dash_positions = [
+        position
+        for position, character in enumerate(hierarchy_stem)
+        if character == "-"
+    ]
+    for index in reversed(dash_positions):
+        names.append(f"{hierarchy_stem[: index + 1]}.{unit_type}.d")
+    names.append(f"{unit_type}.d")
+
+    deduplicated = tuple(dict.fromkeys(names))
+    if len(deduplicated) > MAX_SYSTEMD_DROPIN_LEVELS:
+        raise IvdCronServiceDiscoveryError("systemd_dropin_level_limit", unit_name)
+    return deduplicated
 
 
 def _effective_systemd_unit_text(
@@ -1179,6 +1224,10 @@ def _assert_systemd_timer_service_contract(
                 continue
             service_record = effective.get(service_name)
             if service_record is None:
+                template_service_name = _systemd_template_unit_name(service_name)
+                if template_service_name is not None:
+                    service_record = effective.get(template_service_name)
+            if service_record is None:
                 continue
             resolved_service = _resolve_systemd_unit_alias(
                 service_record,
@@ -1195,7 +1244,7 @@ def _assert_systemd_timer_service_contract(
                 max_entries=max_entries,
                 scope_root=scope_root,
             )
-            if _systemd_identity(resolved_service.name, service_text):
+            if _systemd_identity(service_name, service_text):
                 raise IndependentIvdCronServiceError(timer_record.path)
 
 
