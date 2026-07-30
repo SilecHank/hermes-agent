@@ -13,6 +13,10 @@ import pytest
 
 
 MANIFEST_SHA256 = "a" * 64
+RECORD_URL = (
+    "https://api.github.com/repos/SilecHank/ivd-hermes-standby/"
+    "contents/active-host.json"
+)
 
 
 def _record(*, host_id: str = "wsl-primary", manifest: str = MANIFEST_SHA256):
@@ -112,7 +116,7 @@ def test_remote_fetch_uses_bounded_timeout_size_and_github_contents(monkeypatch,
     token_file.chmod(0o600)
     monkeypatch.setattr(fence, "_open_remote_no_redirect", fake_urlopen)
     result = fetch_active_host_record(
-        "https://api.github.com/repos/example/private/contents/active-host.json",
+        RECORD_URL,
         timeout_seconds=1.5,
         max_response_bytes=4096,
         token_path=token_file,
@@ -128,15 +132,15 @@ def test_remote_fetch_rejects_oversize_invalid_json_and_token_permissions(monkey
 
     monkeypatch.setattr(fence, "_open_remote_no_redirect", lambda *a, **k: _Response(b"x" * 65))
     with pytest.raises(FenceError, match="remote_response_too_large"):
-        fetch_active_host_record("https://example.invalid", max_response_bytes=64, max_attempts=1)
+        fetch_active_host_record(RECORD_URL, max_response_bytes=64, max_attempts=1)
     monkeypatch.setattr(fence, "_open_remote_no_redirect", lambda *a, **k: _Response(b"not-json"))
     with pytest.raises(FenceError, match="remote_json_invalid"):
-        fetch_active_host_record("https://example.invalid", max_attempts=1)
+        fetch_active_host_record(RECORD_URL, max_attempts=1)
     token_file = tmp_path / "credential"
     token_file.write_text("secret", encoding="utf-8")
     token_file.chmod(0o644)
     with pytest.raises(FenceError, match="credential_permissions_unsafe"):
-        fetch_active_host_record("https://example.invalid", token_path=token_file, max_attempts=1)
+        fetch_active_host_record(RECORD_URL, token_path=token_file, max_attempts=1)
 
 
 @pytest.mark.parametrize(
@@ -199,13 +203,13 @@ def test_remote_fetch_rejects_redirect_before_authorization_can_leave_first_requ
     )
     with pytest.raises(FenceError, match="remote_redirect_forbidden"):
         fetch_active_host_record(
-            "https://api.github.com/repos/example/private/contents/active-host.json",
+            RECORD_URL,
             token_path=token_file,
             max_attempts=1,
         )
     assert seen == [
         (
-            "https://api.github.com/repos/example/private/contents/active-host.json",
+            RECORD_URL,
             "Bearer private-token",
         )
     ]
@@ -220,7 +224,42 @@ def test_remote_fetch_rejects_symlink_credential(tmp_path):
     link = tmp_path / "token"
     link.symlink_to(target)
     with pytest.raises(FenceError, match="credential_path_unsafe"):
-        fetch_active_host_record("https://example.invalid", token_path=link, max_attempts=1)
+        fetch_active_host_record(RECORD_URL, token_path=link, max_attempts=1)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.github.com/repos/SilecHank/ivd-hermes-standby/contents/active-host.json",
+        "https://api.github.com.evil.example/repos/SilecHank/ivd-hermes-standby/contents/active-host.json",
+        "https://user@api.github.com/repos/SilecHank/ivd-hermes-standby/contents/active-host.json",
+        "https://api.github.com:444/repos/SilecHank/ivd-hermes-standby/contents/active-host.json",
+        "https://api.github.com/repos/%53ilecHank/ivd-hermes-standby/contents/active-host.json",
+        RECORD_URL + "?ref=main",
+        RECORD_URL + "#record",
+    ],
+)
+def test_remote_fetch_rejects_noncanonical_record_urls_before_credential_read(
+    monkeypatch, tmp_path, url
+):
+    import gateway.active_host_fence as fence
+    from gateway.active_host_fence import FenceError, fetch_active_host_record
+
+    token_file = tmp_path / "credential"
+    token_file.write_text("must-not-be-read", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setattr(
+        fence,
+        "_read_secure_credential",
+        lambda path: pytest.fail("credential read before URL validation"),
+    )
+    monkeypatch.setattr(
+        fence,
+        "_open_remote_no_redirect",
+        lambda *args, **kwargs: pytest.fail("network used for invalid URL"),
+    )
+    with pytest.raises(FenceError, match="remote_url_invalid"):
+        fetch_active_host_record(url, token_path=token_file, max_attempts=1)
 
 
 def test_credential_read_is_parent_fd_anchored_during_swap(monkeypatch, tmp_path):
@@ -427,7 +466,7 @@ def test_gateway_fence_precedes_runtime_lock_and_embedded_cron():
 
 
 def test_independent_ivd_cron_contract_is_rejected():
-    from gateway.active_host_fence import validate_runtime_contract
+    from hermes_cli.ivd_cron_service_contract import validate_runtime_contract
 
     assert validate_runtime_contract({"mode": "embedded_gateway", "independent_ivd_service_allowed": False}).allowed
     assert validate_runtime_contract({"mode": "external", "independent_ivd_service_allowed": False}).reason == "independent_ivd_cron_forbidden"

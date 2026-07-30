@@ -45,9 +45,20 @@ INDEPENDENT_LAUNCHD = _plist(
 )
 
 
-def _systemd_mocks(monkeypatch, target: Path, generated: str = SAFE_SYSTEMD):
+def _systemd_mocks(
+    monkeypatch,
+    target: Path,
+    generated: str = SAFE_SYSTEMD,
+    *,
+    contract_required: bool = True,
+):
     scope_root = target.parent.parent / "scope-root"
     scope_root.mkdir(exist_ok=True)
+    if contract_required:
+        monkeypatch.setenv("IVD_CRON_SERVICE_CONTRACT_REQUIRED", "true")
+    else:
+        monkeypatch.delenv("IVD_CRON_SERVICE_CONTRACT_REQUIRED", raising=False)
+        monkeypatch.delenv("IVD_ACTIVE_HOST_FENCE_REQUIRED", raising=False)
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: target)
     monkeypatch.setattr(gateway_cli, "has_legacy_hermes_units", lambda: False)
     monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda **kwargs: generated)
@@ -61,9 +72,20 @@ def _systemd_mocks(monkeypatch, target: Path, generated: str = SAFE_SYSTEMD):
     monkeypatch.setattr(gateway_cli, "_ivd_service_contract_uid", lambda: 1000, raising=False)
 
 
-def _launchd_mocks(monkeypatch, target: Path, generated: str = SAFE_LAUNCHD):
+def _launchd_mocks(
+    monkeypatch,
+    target: Path,
+    generated: str = SAFE_LAUNCHD,
+    *,
+    contract_required: bool = True,
+):
     scope_root = target.parent.parent / "scope-root"
     scope_root.mkdir(exist_ok=True)
+    if contract_required:
+        monkeypatch.setenv("IVD_CRON_SERVICE_CONTRACT_REQUIRED", "true")
+    else:
+        monkeypatch.delenv("IVD_CRON_SERVICE_CONTRACT_REQUIRED", raising=False)
+        monkeypatch.delenv("IVD_ACTIVE_HOST_FENCE_REQUIRED", raising=False)
     monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: target)
     monkeypatch.setattr(gateway_cli, "generate_launchd_plist", lambda: generated)
     monkeypatch.setattr(gateway_cli, "_launchctl_bootstrap", lambda *args, **kwargs: None)
@@ -75,7 +97,7 @@ def _launchd_mocks(monkeypatch, target: Path, generated: str = SAFE_LAUNCHD):
 
 
 def test_systemd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "systemd" / "hermes-gateway.service"
     target.parent.mkdir()
@@ -89,8 +111,34 @@ def test_systemd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
     assert not target.exists()
 
 
+def test_default_systemd_install_skips_opt_in_contract(monkeypatch, tmp_path):
+    import hermes_cli.ivd_cron_service_contract as contract
+
+    target = tmp_path / "systemd" / "hermes-gateway.service"
+    target.parent.mkdir()
+    _systemd_mocks(monkeypatch, target, contract_required=False)
+    monkeypatch.setattr(
+        contract,
+        "find_trusted_systemd_analyze",
+        lambda: pytest.fail("disabled install resolved systemd-analyze"),
+    )
+    gateway_cli.systemd_install(force=True)
+    assert target.read_text(encoding="utf-8") == SAFE_SYSTEMD
+
+
+def test_default_launchd_install_skips_bad_plist_scan(monkeypatch, tmp_path):
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    (target.parent / "com.example.generic.plist").write_text(
+        "not a plist", encoding="utf-8"
+    )
+    _launchd_mocks(monkeypatch, target, contract_required=False)
+    gateway_cli.launchd_install(force=True)
+    assert target.read_text(encoding="utf-8") == SAFE_LAUNCHD
+
+
 def test_systemd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "systemd" / "hermes-gateway.service"
     target.parent.mkdir()
@@ -107,7 +155,7 @@ def test_systemd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
 
 
 def test_systemd_install_blocks_proposed_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "systemd" / "hermes-gateway.service"
     target.parent.mkdir()
@@ -118,7 +166,7 @@ def test_systemd_install_blocks_proposed_independent_ivd_cron(monkeypatch, tmp_p
 
 
 def test_launchd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
     target.parent.mkdir()
@@ -130,7 +178,7 @@ def test_launchd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
 
 
 def test_launchd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
     target.parent.mkdir()
@@ -144,7 +192,7 @@ def test_launchd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
 
 
 def test_launchd_install_blocks_proposed_independent_ivd_cron(monkeypatch, tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
     target.parent.mkdir()
@@ -177,7 +225,7 @@ def test_installers_allow_embedded_gateway_and_unrelated_system_cron(monkeypatch
 
 
 def test_manual_ivd_services_without_periodic_configuration_are_allowed(tmp_path):
-    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+    from hermes_cli.ivd_cron_service_contract import assert_embedded_ivd_cron_service_contract
 
     systemd_dir = tmp_path / "systemd"
     systemd_dir.mkdir()
@@ -221,8 +269,9 @@ def test_manual_ivd_services_without_periodic_configuration_are_allowed(tmp_path
     ],
 )
 def test_contract_blocks_suspicious_service_symlink_without_following(kind, name, tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IndependentIvdCronServiceError,
+        IvdCronServiceDiscoveryError,
         assert_embedded_ivd_cron_service_contract,
     )
 
@@ -232,7 +281,17 @@ def test_contract_blocks_suspicious_service_symlink_without_following(kind, name
     outside.write_text("untrusted", encoding="utf-8")
     (service_dir / name).symlink_to(outside)
     target_name = "hermes-gateway.service" if kind == "systemd" else "com.nous.hermes.gateway.plist"
-    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+    expected_error = (
+        IvdCronServiceDiscoveryError
+        if kind == "launchd"
+        else IndependentIvdCronServiceError
+    )
+    expected_reason = (
+        "launchd_plist_unreadable"
+        if kind == "launchd"
+        else "independent_ivd_cron_forbidden"
+    )
+    with pytest.raises(expected_error, match=expected_reason):
         assert_embedded_ivd_cron_service_contract(
             kind=kind,
             service_dir=service_dir,
@@ -242,7 +301,7 @@ def test_contract_blocks_suspicious_service_symlink_without_following(kind, name
 
 
 def test_launchd_contract_parses_binary_plist_with_program_only(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IndependentIvdCronServiceError,
         assert_embedded_ivd_cron_service_contract,
     )
@@ -268,22 +327,25 @@ def test_launchd_contract_parses_binary_plist_with_program_only(tmp_path):
         )
 
 
-def test_launchd_contract_leaves_malformed_candidate_to_installer_validation(tmp_path):
-    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+def test_launchd_contract_rejects_malformed_candidate(tmp_path):
+    from hermes_cli.ivd_cron_service_contract import (
+        IvdCronServiceDiscoveryError,
+        assert_embedded_ivd_cron_service_contract,
+    )
 
     service_dir = tmp_path / "LaunchAgents"
     service_dir.mkdir()
-    decision = assert_embedded_ivd_cron_service_contract(
-        kind="launchd",
-        service_dir=service_dir,
-        target_path=service_dir / "com.nous.hermes.gateway.plist",
-        candidate_definition=(
-            "<plist>--replace\n<key>HERMES_HOME</key>"
-            "<string>/Users/alice/.hermes</string></plist>"
-        ),
-        scope_root=tmp_path / "empty-root",
-    )
-    assert decision.allowed
+    with pytest.raises(IvdCronServiceDiscoveryError, match="launchd_plist_invalid"):
+        assert_embedded_ivd_cron_service_contract(
+            kind="launchd",
+            service_dir=service_dir,
+            target_path=service_dir / "com.nous.hermes.gateway.plist",
+            candidate_definition=(
+                "<plist>--replace\n<key>HERMES_HOME</key>"
+                "<string>/Users/alice/.hermes</string></plist>"
+            ),
+            scope_root=tmp_path / "empty-root",
+        )
 
 
 def _mapped(root: Path, absolute: str) -> Path:
@@ -291,7 +353,7 @@ def _mapped(root: Path, absolute: str) -> Path:
 
 
 def test_systemd_discovers_ivd_timer_outside_target_parent(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IndependentIvdCronServiceError,
         assert_embedded_ivd_cron_service_contract,
     )
@@ -323,7 +385,7 @@ def _assert_mapped_systemd_contract(
     *,
     environ: dict[str, str] | None = None,
 ):
-    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+    from hermes_cli.ivd_cron_service_contract import assert_embedded_ivd_cron_service_contract
 
     return assert_embedded_ivd_cron_service_contract(
         kind="systemd",
@@ -337,7 +399,7 @@ def _assert_mapped_systemd_contract(
 
 
 def test_systemd_timer_links_explicit_unit_to_ivd_service(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -357,7 +419,7 @@ def test_systemd_timer_links_explicit_unit_to_ivd_service(tmp_path):
 
 
 def test_systemd_timer_links_default_basename_to_ivd_service(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -377,7 +439,7 @@ def test_systemd_timer_links_default_basename_to_ivd_service(tmp_path):
 
 
 def test_systemd_timer_links_service_across_user_scopes(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     timer_scope = _mapped(root, "/etc/systemd/user")
@@ -520,7 +582,7 @@ def test_systemd_timer_allows_linked_hermes_gateway_service(tmp_path):
 
 
 def test_systemd_timer_rejects_unit_path_escape(tmp_path):
-    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+    from hermes_cli.ivd_cron_service_contract import IvdCronServiceDiscoveryError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -536,7 +598,7 @@ def test_systemd_timer_rejects_unit_path_escape(tmp_path):
 
 
 def test_systemd_timer_resolves_safe_service_alias(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -557,7 +619,7 @@ def test_systemd_timer_resolves_safe_service_alias(tmp_path):
 
 
 def test_systemd_timer_resolves_mapped_absolute_cross_scope_alias(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     high_scope = _mapped(root, "/etc/systemd/user")
@@ -582,7 +644,7 @@ def test_systemd_timer_resolves_mapped_absolute_cross_scope_alias(tmp_path):
 
 
 def test_systemd_timer_rejects_service_alias_escape(tmp_path):
-    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+    from hermes_cli.ivd_cron_service_contract import IvdCronServiceDiscoveryError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -601,7 +663,7 @@ def test_systemd_timer_rejects_service_alias_escape(tmp_path):
 
 
 def test_systemd_timer_fails_closed_for_unreadable_linked_service(tmp_path):
-    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+    from hermes_cli.ivd_cron_service_contract import IvdCronServiceDiscoveryError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/etc/systemd/user")
@@ -623,7 +685,7 @@ def test_systemd_timer_fails_closed_for_unreadable_linked_service(tmp_path):
 
 
 def test_launchd_discovers_periodic_ivd_job_outside_target_parent(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IndependentIvdCronServiceError,
         assert_embedded_ivd_cron_service_contract,
     )
@@ -653,7 +715,7 @@ def test_launchd_discovers_periodic_ivd_job_outside_target_parent(tmp_path):
 
 
 def test_scope_discovery_is_complete_mapped_and_deduplicated(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -724,7 +786,7 @@ def test_scope_discovery_is_complete_mapped_and_deduplicated(tmp_path):
 
 
 def test_systemd_scans_reviewer_xdg_config_dirs_counterexample(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     scope = _mapped(root, "/opt/custom/systemd/user")
@@ -748,7 +810,7 @@ def test_systemd_scans_reviewer_xdg_config_dirs_counterexample(tmp_path):
 
 
 def test_systemd_discovers_xdg_data_home_and_dirs(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -768,7 +830,7 @@ def test_systemd_discovers_xdg_data_home_and_dirs(tmp_path):
 
 
 def test_systemd_discovers_runtime_transient_and_generators(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -790,7 +852,7 @@ def test_systemd_discovers_runtime_transient_and_generators(tmp_path):
 
 
 def test_systemd_discovers_system_control_attached_and_generators(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -815,7 +877,7 @@ def test_systemd_discovers_system_control_attached_and_generators(tmp_path):
 
 
 def test_systemd_unit_path_overrides_and_trailing_empty_appends_defaults(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     target = _mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service")
@@ -840,7 +902,7 @@ def test_systemd_unit_path_overrides_and_trailing_empty_appends_defaults(tmp_pat
 
 
 def test_systemd_empty_unit_path_override_removes_domain_defaults(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -868,7 +930,7 @@ def test_systemd_empty_unit_path_override_removes_domain_defaults(tmp_path):
     ],
 )
 def test_systemd_rejects_malicious_or_excessive_dynamic_paths(tmp_path, environ, reason):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         discover_ivd_cron_service_scopes,
     )
@@ -886,7 +948,7 @@ def test_systemd_rejects_malicious_or_excessive_dynamic_paths(tmp_path, environ,
 
 
 def test_systemd_default_dynamic_paths_stay_mapped_and_bounded(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -913,7 +975,7 @@ def test_systemd_default_dynamic_paths_stay_mapped_and_bounded(tmp_path):
 
 
 def test_systemd_allows_declared_scope_alias_without_leaving_mapped_root(tmp_path):
-    from gateway.active_host_fence import IndependentIvdCronServiceError
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 
     root = tmp_path / "root"
     alias_scope = _mapped(root, "/etc/xdg/systemd/user")
@@ -936,7 +998,7 @@ def test_systemd_allows_declared_scope_alias_without_leaving_mapped_root(tmp_pat
 
 
 def test_scope_mapping_normalizes_parent_segments_inside_temporary_root(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -954,7 +1016,7 @@ def test_scope_mapping_normalizes_parent_segments_inside_temporary_root(tmp_path
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "unreadable"])
 def test_scope_scan_fails_closed_for_unsafe_scope(tmp_path, unsafe_kind):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         assert_embedded_ivd_cron_service_contract,
     )
@@ -990,7 +1052,7 @@ def test_scope_scan_fails_closed_for_unsafe_scope(tmp_path, unsafe_kind):
 
 
 def test_scope_scan_has_entry_limit(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         assert_embedded_ivd_cron_service_contract,
     )

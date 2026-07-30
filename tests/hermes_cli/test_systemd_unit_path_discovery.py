@@ -18,7 +18,7 @@ def _mapped(root: Path, absolute: str) -> Path:
 
 
 def _discover(tmp_path: Path, runner, *, environ: dict[str, str] | None = None):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     root = tmp_path / "root"
     scopes = discover_ivd_cron_service_scopes(
@@ -81,7 +81,7 @@ def test_dynamic_discovery_uses_fixed_binary_despite_path_fake(tmp_path):
     ],
 )
 def test_dynamic_discovery_rejects_malicious_output(tmp_path, payload):
-    from gateway.active_host_fence import IvdCronServiceDiscoveryError
+    from hermes_cli.ivd_cron_service_contract import IvdCronServiceDiscoveryError
 
     def runner(**kwargs):
         return payload
@@ -95,7 +95,7 @@ def test_dynamic_discovery_rejects_malicious_output(tmp_path, payload):
 
 @pytest.mark.parametrize("kind", ["nonroot", "writable", "symlink"])
 def test_systemd_analyze_binary_must_be_trusted(tmp_path, kind):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         validate_systemd_analyze_binary,
     )
@@ -118,7 +118,7 @@ def _write_tool(path: Path, body: str) -> Path:
 
 
 def test_systemd_analyze_runner_times_out_and_kills_process_group(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         run_systemd_analyze_unit_paths,
     )
@@ -137,7 +137,7 @@ def test_systemd_analyze_runner_times_out_and_kills_process_group(tmp_path):
 
 
 def test_systemd_analyze_timeout_kills_child_after_parent_exits(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         run_systemd_analyze_unit_paths,
     )
@@ -160,7 +160,7 @@ def test_systemd_analyze_timeout_kills_child_after_parent_exits(tmp_path):
 
 
 def test_systemd_analyze_runner_rejects_large_stdout(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         run_systemd_analyze_unit_paths,
     )
@@ -177,7 +177,7 @@ def test_systemd_analyze_runner_rejects_large_stdout(tmp_path):
 
 
 def test_systemd_analyze_runner_fails_closed_on_nonzero_exit(tmp_path):
-    from gateway.active_host_fence import (
+    from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         run_systemd_analyze_unit_paths,
     )
@@ -194,7 +194,7 @@ def test_systemd_analyze_runner_fails_closed_on_nonzero_exit(tmp_path):
 
 
 def test_static_fallback_and_launchd_do_not_call_runner(tmp_path):
-    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+    from hermes_cli.ivd_cron_service_contract import discover_ivd_cron_service_scopes
 
     def forbidden_runner(**kwargs):
         raise AssertionError("runner must not be called")
@@ -223,43 +223,3 @@ def test_static_fallback_and_launchd_do_not_call_runner(tmp_path):
         systemd_analyze_runner=forbidden_runner,
     )
     assert _mapped(root, "/Library/LaunchDaemons") in launchd_scopes
-
-
-@pytest.mark.parametrize(
-    ("platform", "kind", "expected"),
-    [
-        ("linux", "systemd", TRUSTED_SYSTEMD_ANALYZE),
-        ("darwin", "systemd", None),
-        ("linux", "launchd", None),
-    ],
-)
-def test_gateway_selects_systemd_analyze_only_for_linux_systemd(
-    monkeypatch, platform, kind, expected
-):
-    import hermes_cli.gateway as gateway
-
-    monkeypatch.setattr(gateway.sys, "platform", platform)
-    assert gateway._ivd_systemd_analyze_path(kind) == expected
-
-
-def test_gateway_contract_passes_fixed_binary_only_to_systemd(monkeypatch, tmp_path):
-    import gateway.active_host_fence as fence
-    import hermes_cli.gateway as gateway
-
-    calls = []
-
-    def fake_assert(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(fence, "assert_embedded_ivd_cron_service_contract", fake_assert)
-    monkeypatch.setattr(gateway.sys, "platform", "linux")
-    monkeypatch.setattr(gateway, "_ivd_service_scope_root", lambda: tmp_path)
-    gateway._enforce_embedded_ivd_cron_contract(
-        "systemd", tmp_path / "hermes-gateway.service"
-    )
-    gateway._enforce_embedded_ivd_cron_contract(
-        "launchd", tmp_path / "com.example.hermes.plist"
-    )
-
-    assert calls[0]["systemd_analyze_path"] == TRUSTED_SYSTEMD_ANALYZE
-    assert calls[1]["systemd_analyze_path"] is None

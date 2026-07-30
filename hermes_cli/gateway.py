@@ -2900,10 +2900,15 @@ def _ivd_service_contract_uid() -> int | None:
     return os.getuid() if hasattr(os, "getuid") else None
 
 
-def _ivd_systemd_analyze_path(kind: str) -> Path | None:
-    if kind == "systemd" and sys.platform.startswith("linux"):
-        return Path("/usr/bin/systemd-analyze")
-    return None
+def _ivd_cron_service_contract_required() -> bool:
+    enabled = {"1", "true", "yes", "on"}
+    return any(
+        os.environ.get(name, "").strip().lower() in enabled
+        for name in (
+            "IVD_ACTIVE_HOST_FENCE_REQUIRED",
+            "IVD_CRON_SERVICE_CONTRACT_REQUIRED",
+        )
+    )
 
 
 def _enforce_embedded_ivd_cron_contract(
@@ -2912,7 +2917,12 @@ def _enforce_embedded_ivd_cron_contract(
     candidate_definition: str | None = None,
 ) -> None:
     """Keep all IVD scheduling behind the fenced gateway process."""
-    from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
+    if not _ivd_cron_service_contract_required():
+        return
+
+    from hermes_cli.ivd_cron_service_contract import (
+        assert_embedded_ivd_cron_service_contract,
+    )
 
     assert_embedded_ivd_cron_service_contract(
         kind=kind,
@@ -2923,7 +2933,6 @@ def _enforce_embedded_ivd_cron_contract(
         home=_ivd_service_contract_home(),
         environ=_ivd_service_contract_environ(),
         uid=_ivd_service_contract_uid(),
-        systemd_analyze_path=_ivd_systemd_analyze_path(kind),
     )
 
 
