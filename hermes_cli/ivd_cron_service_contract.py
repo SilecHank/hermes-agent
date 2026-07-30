@@ -844,9 +844,11 @@ def _collect_systemd_scope(scope: Path, *, max_entries: int) -> dict[str, _Syste
                     raise IvdCronServiceDiscoveryError("service_scope_entry_limit", scope)
         records: dict[str, _SystemdUnitRecord] = {}
         for name in sorted(names):
-            if not name.endswith((".service", ".timer")):
+            unit_suffix = name.rpartition(".")[2]
+            if unit_suffix not in _SYSTEMD_UNIT_SUFFIXES:
                 continue
             path = scope / name
+            _validate_systemd_source_unit_name(name, path)
             try:
                 entry_stat = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                 if stat.S_ISLNK(entry_stat.st_mode):
@@ -896,6 +898,10 @@ def _effective_systemd_units(
         by_path.update((record.path, record) for record in records.values())
         for name, record in records.items():
             effective.setdefault(name, record)
+            if len(effective) > max_entries:
+                raise IvdCronServiceDiscoveryError(
+                    "systemd_source_unit_limit", record.path
+                )
     return effective, by_path
 
 
@@ -1101,6 +1107,26 @@ def _valid_systemd_unit_stem(value: str, *, template_allowed: bool) -> bool:
     )
 
 
+def _validate_systemd_source_unit_name(unit_name: str, source_path: Path) -> None:
+    stem, separator, unit_type = unit_name.rpartition(".")
+    try:
+        encoded_size = len(unit_name.encode("utf-8"))
+    except UnicodeError as exc:
+        raise IvdCronServiceDiscoveryError(
+            "systemd_source_unit_invalid", source_path
+        ) from exc
+    if (
+        Path(unit_name).name != unit_name
+        or encoded_size > MAX_SYSTEMD_UNIT_NAME_BYTES
+        or not separator
+        or unit_type not in _SYSTEMD_UNIT_SUFFIXES
+        or not _valid_systemd_unit_stem(stem, template_allowed=True)
+    ):
+        raise IvdCronServiceDiscoveryError(
+            "systemd_source_unit_invalid", source_path
+        )
+
+
 def _parse_systemd_template_timer_instance(
     unit_name: str,
     source_path: Path,
@@ -1151,7 +1177,7 @@ def _validate_systemd_timer_template_name(
 
 def _systemd_dropin_directory_names(unit_name: str) -> tuple[str, ...]:
     stem, separator, unit_type = unit_name.rpartition(".")
-    if not separator or unit_type not in {"timer", "service"}:
+    if not separator or unit_type not in _SYSTEMD_UNIT_SUFFIXES:
         raise IvdCronServiceDiscoveryError("systemd_unit_name_invalid", unit_name)
 
     names = [f"{unit_name}.d"]
@@ -1200,6 +1226,145 @@ def _effective_systemd_unit_text(
                 "systemd_dropin_unreadable", dropin.path
             ) from exc
     return "\n".join(parts)
+
+
+_SYSTEMD_LIST_ACTIVATION_FIELDS = frozenset(
+    {
+        ("Unit", "Wants"),
+        ("Unit", "Requires"),
+        ("Unit", "Upholds"),
+        ("Unit", "BindsTo"),
+        ("Unit", "OnFailure"),
+        ("Unit", "OnSuccess"),
+    }
+)
+_SYSTEMD_SCALAR_ACTIVATION_FIELDS = frozenset(
+    {
+        ("Path", "Unit"),
+        ("Socket", "Service"),
+        ("Timer", "Unit"),
+    }
+)
+
+
+def _effective_systemd_activation_references(
+    text: str,
+    source_path: Path,
+) -> tuple[tuple[str, ...], int]:
+    lists: dict[tuple[str, str], list[str]] = {}
+    scalars: dict[tuple[str, str], str | None] = {}
+    observed = 0
+    for section, key, value in _systemd_directives(text):
+        field = (section, key)
+        if field in _SYSTEMD_LIST_ACTIVATION_FIELDS:
+            values = value.split()
+            observed += len(values)
+            current = lists.setdefault(field, [])
+            if values:
+                current.extend(values)
+            else:
+                current.clear()
+        elif field in _SYSTEMD_SCALAR_ACTIVATION_FIELDS:
+            values = value.split()
+            observed += len(values)
+            if len(values) > 1:
+                raise IvdCronServiceDiscoveryError(
+                    "systemd_dependency_reference_invalid", source_path
+                )
+            scalars[field] = values[0] if values else None
+    references = [value for values in lists.values() for value in values]
+    references.extend(value for value in scalars.values() if value is not None)
+    return tuple(references), observed
+
+
+def _systemd_source_instance(unit_name: str) -> str | None:
+    stem = unit_name.rpartition(".")[0]
+    if "@" not in stem:
+        return None
+    _, instance = stem.split("@", 1)
+    return instance or None
+
+
+def _expand_systemd_timer_reference(
+    reference: str,
+    *,
+    source_name: str,
+    source_path: Path,
+) -> str | None:
+    if not reference.endswith(".timer") or "@" not in reference:
+        return None
+    if "%i" in reference:
+        instance = _systemd_source_instance(source_name)
+        if instance is None:
+            return None
+        reference = reference.replace("%i", instance)
+    if "%" in reference:
+        raise IvdCronServiceDiscoveryError(
+            "systemd_dependency_specifier_invalid", source_path
+        )
+    if reference.endswith("@.timer"):
+        _validate_systemd_timer_template_name(reference, source_path)
+        return None
+    return reference
+
+
+def _discover_systemd_timer_instances_from_unit_references(
+    scopes: tuple[Path, ...],
+    *,
+    effective: Mapping[str, _SystemdUnitRecord],
+    records_by_path: Mapping[Path, _SystemdUnitRecord],
+    candidates: dict[str, _SynthesizedSystemdTimer],
+    max_entries: int,
+    scope_root: Path,
+) -> None:
+    allowed_scopes = frozenset(scopes)
+    observed_references = 0
+    for source_name in sorted(effective):
+        source_record = effective[source_name]
+        resolved_source = _resolve_systemd_unit_alias(
+            source_record,
+            records_by_path=records_by_path,
+            allowed_scopes=allowed_scopes,
+            scope_root=scope_root,
+        )
+        if resolved_source is None:
+            continue
+        source_text = _effective_systemd_unit_text(
+            source_name,
+            resolved_source,
+            scopes,
+            max_entries=max_entries,
+            scope_root=scope_root,
+        )
+        references, observed = _effective_systemd_activation_references(
+            source_text,
+            source_record.path,
+        )
+        observed_references += observed
+        if observed_references > max_entries:
+            raise IvdCronServiceDiscoveryError(
+                "systemd_dependency_reference_limit", source_record.path
+            )
+        for raw_reference in references:
+            reference = _expand_systemd_timer_reference(
+                raw_reference,
+                source_name=source_name,
+                source_path=source_record.path,
+            )
+            if reference is None:
+                continue
+            unit_name, template_name = _parse_systemd_template_timer_instance(
+                reference,
+                source_record.path,
+            )
+            _register_synthesized_timer(
+                candidates,
+                effective,
+                unit_name=unit_name,
+                template_name=template_name,
+                source_path=source_record.path,
+                max_entries=max_entries,
+            )
 
 
 def _register_synthesized_timer(
@@ -1421,6 +1586,14 @@ def _discover_systemd_template_timer_instances(
     scope_root: Path,
 ) -> dict[str, _SynthesizedSystemdTimer]:
     candidates: dict[str, _SynthesizedSystemdTimer] = {}
+    _discover_systemd_timer_instances_from_unit_references(
+        scopes,
+        effective=effective,
+        records_by_path=records_by_path,
+        candidates=candidates,
+        max_entries=max_entries,
+        scope_root=scope_root,
+    )
     dependency_entries = 0
     allowed_scopes = frozenset(scopes)
     visited: set[Path] = set()
@@ -1574,6 +1747,13 @@ def _assert_systemd_timer_service_contract(
             max_entries=max_entries,
             scope_root=scope_root,
         )
+        for unit_name, record in effective.items():
+            if (
+                unit_name.endswith(".timer")
+                and record.alias_target is not None
+                and _has_explicit_ivd_identity(unit_name)
+            ):
+                raise IndependentIvdCronServiceError(record.path)
         synthesized = _discover_systemd_template_timer_instances(
             scopes,
             effective=effective,
