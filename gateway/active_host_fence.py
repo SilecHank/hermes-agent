@@ -572,6 +572,71 @@ def _deduplicate_paths(paths: list[Path]) -> tuple[Path, ...]:
     return tuple(unique)
 
 
+MAX_SYSTEMD_SERVICE_SCOPES = 64
+
+
+def _absolute_env_path(value: str, *, source: str) -> Path:
+    path = Path(value)
+    if "\x00" in value or not path.is_absolute():
+        raise IvdCronServiceDiscoveryError("service_scope_env_invalid", source)
+    return Path(os.path.normpath(os.fspath(path)))
+
+
+def _bounded_absolute_components(value: str, *, source: str) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for component in value.split(":"):
+        if not component:
+            continue
+        if len(paths) >= MAX_SYSTEMD_SERVICE_SCOPES:
+            raise IvdCronServiceDiscoveryError("service_scope_limit", source)
+        paths.append(_absolute_env_path(component, source=source))
+    return tuple(paths)
+
+
+def _xdg_home_path(
+    environ: Mapping[str, str],
+    name: str,
+    default: Path,
+) -> Path:
+    value = environ.get(name, "")
+    return default if not value else _absolute_env_path(value, source=name)
+
+
+def _xdg_directory_list(
+    environ: Mapping[str, str],
+    name: str,
+    defaults: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    value = environ.get(name, "")
+    if not value:
+        return defaults
+    paths = _bounded_absolute_components(value, source=name)
+    return paths or defaults
+
+
+def _systemd_user_directory(base: Path) -> Path:
+    if base.parts[-2:] == ("systemd", "user"):
+        return base
+    return base / "systemd" / "user"
+
+
+def _systemd_path_override(
+    environ: Mapping[str, str],
+    name: str,
+    defaults: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    if name not in environ:
+        return defaults
+    value = environ[name]
+    if value == "":
+        return ()
+    append_defaults = value.endswith(":")
+    paths = list(_bounded_absolute_components(value, source=name))
+    if append_defaults:
+        paths.extend(defaults)
+    return _deduplicate_paths(paths)
+
+
 def _systemd_service_scope_groups(
     *,
     target_path: Path,
@@ -580,50 +645,100 @@ def _systemd_service_scope_groups(
     environ: Mapping[str, str],
     uid: int | None,
 ) -> tuple[tuple[Path, ...], ...]:
-    config_home = Path(environ.get("XDG_CONFIG_HOME", os.fspath(home / ".config")))
-    if not config_home.is_absolute():
-        config_home = home / ".config"
+    config_home = _xdg_home_path(environ, "XDG_CONFIG_HOME", home / ".config")
+    config_dirs = _xdg_directory_list(
+        environ,
+        "XDG_CONFIG_DIRS",
+        (Path("/etc/xdg"),),
+    )
+    data_home = _xdg_home_path(environ, "XDG_DATA_HOME", home / ".local" / "share")
+    data_dirs = _xdg_directory_list(
+        environ,
+        "XDG_DATA_DIRS",
+        (Path("/usr/local/share"), Path("/usr/share")),
+    )
     runtime_value = environ.get("XDG_RUNTIME_DIR", "")
-    if runtime_value and Path(runtime_value).is_absolute():
-        runtime_scope = Path(runtime_value) / "systemd" / "user"
+    if runtime_value:
+        runtime_home = _absolute_env_path(runtime_value, source="XDG_RUNTIME_DIR")
     else:
         effective_uid = uid
         if effective_uid is None and hasattr(os, "getuid"):
             effective_uid = os.getuid()
-        runtime_scope = (
-            Path("/run/user") / str(effective_uid) / "systemd" / "user"
-            if effective_uid is not None
-            else None
-        )
+        runtime_home = Path("/run/user") / str(effective_uid) if effective_uid is not None else None
     user_logical = [
-        config_home / "systemd" / "user",
-        Path("/etc/systemd/user"),
+        config_home / "systemd" / "user.control",
     ]
-    if runtime_scope is not None:
-        user_logical.append(runtime_scope)
+    if runtime_home is not None:
+        user_logical.extend(
+            (
+                runtime_home / "systemd" / "user.control",
+                runtime_home / "systemd" / "transient",
+                runtime_home / "systemd" / "generator.early",
+            )
+        )
     user_logical.extend(
-        Path(path)
-        for path in (
-            "/run/systemd/user",
-            "/usr/local/lib/systemd/user",
-            "/usr/lib/systemd/user",
+        (
+            config_home / "systemd" / "user",
+            *(_systemd_user_directory(path) for path in config_dirs),
+            Path("/etc/systemd/user"),
         )
     )
-    system_logical = [
+    if runtime_home is not None:
+        user_logical.append(runtime_home / "systemd" / "user")
+    user_logical.append(Path("/run/systemd/user"))
+    if runtime_home is not None:
+        user_logical.append(runtime_home / "systemd" / "generator")
+    user_logical.extend(
+        (
+            data_home / "systemd" / "user",
+            *(_systemd_user_directory(path) for path in data_dirs),
+            Path("/usr/local/lib/systemd/user"),
+            Path("/usr/lib/systemd/user"),
+        )
+    )
+    if runtime_home is not None:
+        user_logical.append(runtime_home / "systemd" / "generator.late")
+    system_logical = (
         Path(path)
         for path in (
+            "/etc/systemd/system.control",
+            "/run/systemd/system.control",
+            "/run/systemd/transient",
+            "/run/systemd/generator.early",
             "/etc/systemd/system",
+            "/etc/systemd/system.attached",
             "/run/systemd/system",
+            "/run/systemd/system.attached",
+            "/run/systemd/generator",
             "/usr/local/lib/systemd/system",
             "/usr/lib/systemd/system",
+            "/run/systemd/generator.late",
         )
-    ]
+    )
+    default_user = _deduplicate_paths([Path(path) for path in user_logical])
+    default_system = _deduplicate_paths(list(system_logical))
+    active_user = _systemd_path_override(
+        environ,
+        "SYSTEMD_USER_UNIT_PATH",
+        default_user,
+    )
+    active_system = _systemd_path_override(
+        environ,
+        "SYSTEMD_UNIT_PATH",
+        default_system,
+    )
     root = Path(scope_root)
-    user_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in user_logical])
-    system_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in system_logical])
+    default_user_scopes = _deduplicate_paths(
+        [_map_service_scope(root, path) for path in default_user]
+    )
+    default_system_scopes = _deduplicate_paths(
+        [_map_service_scope(root, path) for path in default_system]
+    )
+    user_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in active_user])
+    system_scopes = _deduplicate_paths([_map_service_scope(root, path) for path in active_system])
     target_scope = Path(target_path).parent
     groups: list[tuple[Path, ...]] = []
-    if target_scope not in user_scopes and target_scope not in system_scopes:
+    if target_scope not in default_user_scopes and target_scope not in default_system_scopes:
         groups.append((target_scope,))
     groups.extend((user_scopes, system_scopes))
     return tuple(group for group in groups if group)
@@ -637,7 +752,7 @@ def discover_ivd_cron_service_scopes(
     home: Path | None = None,
     environ: Mapping[str, str] | None = None,
     uid: int | None = None,
-    max_scopes: int = 32,
+    max_scopes: int = MAX_SYSTEMD_SERVICE_SCOPES,
 ) -> tuple[Path, ...]:
     """Return bounded effective service scopes, optionally mapped under a test root."""
     if kind not in {"systemd", "launchd"}:
@@ -665,7 +780,8 @@ def discover_ivd_cron_service_scopes(
             [Path(target_path).parent]
             + [_map_service_scope(Path(scope_root), path) for path in logical_paths]
         )
-    if len(scopes) > max_scopes:
+    scope_limit = min(max_scopes, MAX_SYSTEMD_SERVICE_SCOPES)
+    if scope_limit < 1 or len(scopes) > scope_limit:
         raise IvdCronServiceDiscoveryError("service_scope_limit", target_path)
     return scopes
 
@@ -677,6 +793,45 @@ class _SystemdUnitRecord:
     raw: bytes | None = None
     alias_target: str | None = None
     read_error: bool = False
+
+
+def _resolve_systemd_scope_alias(
+    scope: Path,
+    *,
+    allowed_scopes: frozenset[Path],
+    scope_root: Path,
+    max_hops: int = 8,
+) -> Path | None:
+    current = scope
+    visited: set[Path] = set()
+    for hop in range(max_hops + 1):
+        if current in visited:
+            raise IvdCronServiceDiscoveryError("service_scope_symlink", scope)
+        visited.add(current)
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            if hop == 0:
+                return None
+            raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope)
+        except OSError as exc:
+            raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+        if not stat.S_ISLNK(metadata.st_mode):
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope)
+            return current
+        try:
+            target = Path(os.readlink(current))
+        except OSError as exc:
+            raise IvdCronServiceDiscoveryError("service_scope_unreadable", scope) from exc
+        if target.is_absolute() and scope_root != Path("/") and not target.is_relative_to(scope_root):
+            target = _map_service_scope(scope_root, target)
+        elif not target.is_absolute():
+            target = current.parent / target
+        current = Path(os.path.normpath(os.fspath(target)))
+        if current not in allowed_scopes:
+            raise IvdCronServiceDiscoveryError("service_scope_symlink", scope)
+    raise IvdCronServiceDiscoveryError("service_scope_symlink", scope)
 
 
 def _collect_systemd_scope(scope: Path, *, max_entries: int) -> dict[str, _SystemdUnitRecord]:
@@ -743,11 +898,22 @@ def _effective_systemd_units(
     scopes: tuple[Path, ...],
     *,
     max_entries: int,
+    scope_root: Path,
 ) -> tuple[dict[str, _SystemdUnitRecord], dict[Path, _SystemdUnitRecord]]:
     effective: dict[str, _SystemdUnitRecord] = {}
     by_path: dict[Path, _SystemdUnitRecord] = {}
+    allowed_scopes = frozenset(scopes)
+    visited_scopes: set[Path] = set()
     for scope in scopes:
-        records = _collect_systemd_scope(scope, max_entries=max_entries)
+        resolved_scope = _resolve_systemd_scope_alias(
+            scope,
+            allowed_scopes=allowed_scopes,
+            scope_root=scope_root,
+        )
+        if resolved_scope is None or resolved_scope in visited_scopes:
+            continue
+        visited_scopes.add(resolved_scope)
+        records = _collect_systemd_scope(resolved_scope, max_entries=max_entries)
         by_path.update((record.path, record) for record in records.values())
         for name, record in records.items():
             effective.setdefault(name, record)
@@ -870,7 +1036,11 @@ def _assert_systemd_timer_service_contract(
     scope_root: Path,
 ) -> None:
     for scopes in groups:
-        effective, records_by_path = _effective_systemd_units(scopes, max_entries=max_entries)
+        effective, records_by_path = _effective_systemd_units(
+            scopes,
+            max_entries=max_entries,
+            scope_root=scope_root,
+        )
         allowed_scopes = frozenset(scopes)
         for timer_name in sorted(name for name in effective if name.endswith(".timer")):
             timer_record = effective[timer_name]
@@ -983,7 +1153,7 @@ def assert_embedded_ivd_cron_service_contract(
     environ: Mapping[str, str] | None = None,
     uid: int | None = None,
     max_entries_per_scope: int = 512,
-    max_scopes: int = 32,
+    max_scopes: int = MAX_SYSTEMD_SERVICE_SCOPES,
 ) -> FenceDecision:
     """Reject only independent IVD schedulers, preserving unrelated cron jobs."""
     contract = validate_runtime_contract(

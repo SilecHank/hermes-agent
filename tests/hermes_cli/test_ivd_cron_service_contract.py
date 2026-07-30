@@ -317,7 +317,12 @@ def test_systemd_discovers_ivd_timer_outside_target_parent(tmp_path):
         )
 
 
-def _assert_mapped_systemd_contract(root: Path, target_dir: Path):
+def _assert_mapped_systemd_contract(
+    root: Path,
+    target_dir: Path,
+    *,
+    environ: dict[str, str] | None = None,
+):
     from gateway.active_host_fence import assert_embedded_ivd_cron_service_contract
 
     return assert_embedded_ivd_cron_service_contract(
@@ -326,7 +331,7 @@ def _assert_mapped_systemd_contract(root: Path, target_dir: Path):
         target_path=target_dir / "hermes-gateway.service",
         scope_root=root,
         home=Path("/home/test"),
-        environ={},
+        environ={} if environ is None else environ,
         uid=1000,
     )
 
@@ -665,16 +670,34 @@ def test_scope_discovery_is_complete_mapped_and_deduplicated(tmp_path):
     expected = {
         _mapped(root, path)
         for path in (
+            "/home/test/.config/systemd/user.control",
+            "/run/user/1000/systemd/user.control",
+            "/run/user/1000/systemd/transient",
+            "/run/user/1000/systemd/generator.early",
             "/home/test/.config/systemd/user",
-            "/run/user/1000/systemd/user",
+            "/etc/xdg/systemd/user",
             "/etc/systemd/user",
+            "/run/user/1000/systemd/user",
             "/run/systemd/user",
+            "/run/user/1000/systemd/generator",
+            "/home/test/.local/share/systemd/user",
+            "/usr/local/share/systemd/user",
+            "/usr/share/systemd/user",
             "/usr/local/lib/systemd/user",
             "/usr/lib/systemd/user",
+            "/run/user/1000/systemd/generator.late",
+            "/etc/systemd/system.control",
+            "/run/systemd/system.control",
+            "/run/systemd/transient",
+            "/run/systemd/generator.early",
             "/etc/systemd/system",
+            "/etc/systemd/system.attached",
             "/run/systemd/system",
+            "/run/systemd/system.attached",
+            "/run/systemd/generator",
             "/usr/local/lib/systemd/system",
             "/usr/lib/systemd/system",
+            "/run/systemd/generator.late",
         )
     }
     assert set(scopes) == expected
@@ -698,6 +721,218 @@ def test_scope_discovery_is_complete_mapped_and_deduplicated(tmp_path):
             "/System/Library/LaunchDaemons",
         )
     }
+
+
+def test_systemd_scans_reviewer_xdg_config_dirs_counterexample(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    scope = _mapped(root, "/opt/custom/systemd/user")
+    scope.mkdir(parents=True)
+    (scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(
+            root,
+            target_dir,
+            environ={"XDG_CONFIG_DIRS": "/opt/custom/systemd/user"},
+        )
+
+
+def test_systemd_discovers_xdg_data_home_and_dirs(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={
+            "XDG_DATA_HOME": "/srv/user-data",
+            "XDG_DATA_DIRS": "/opt/data-a:/opt/data-b",
+        },
+        uid=1000,
+    )
+    assert _mapped(root, "/srv/user-data/systemd/user") in scopes
+    assert _mapped(root, "/opt/data-a/systemd/user") in scopes
+    assert _mapped(root, "/opt/data-b/systemd/user") in scopes
+
+
+def test_systemd_discovers_runtime_transient_and_generators(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={"XDG_RUNTIME_DIR": "/run/user/1000"},
+        uid=1000,
+    )
+    for path in (
+        "/run/user/1000/systemd/user",
+        "/run/user/1000/systemd/transient",
+        "/run/user/1000/systemd/generator.early",
+        "/run/user/1000/systemd/generator",
+        "/run/user/1000/systemd/generator.late",
+    ):
+        assert _mapped(root, path) in scopes
+
+
+def test_systemd_discovers_system_control_attached_and_generators(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={},
+        uid=1000,
+    )
+    for path in (
+        "/etc/systemd/system.control",
+        "/run/systemd/system.control",
+        "/run/systemd/transient",
+        "/run/systemd/generator.early",
+        "/etc/systemd/system.attached",
+        "/run/systemd/system.attached",
+        "/run/systemd/generator",
+        "/run/systemd/generator.late",
+    ):
+        assert _mapped(root, path) in scopes
+
+
+def test_systemd_unit_path_overrides_and_trailing_empty_appends_defaults(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    target = _mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service")
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=target,
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={
+            "SYSTEMD_USER_UNIT_PATH": "/opt/user-a::/opt/user-b:",
+            "SYSTEMD_UNIT_PATH": "/opt/system-only",
+        },
+        uid=1000,
+    )
+    assert scopes[0:2] == (
+        _mapped(root, "/opt/user-a"),
+        _mapped(root, "/opt/user-b"),
+    )
+    assert _mapped(root, "/home/test/.config/systemd/user") in scopes
+    assert _mapped(root, "/opt/system-only") in scopes
+    assert _mapped(root, "/etc/systemd/system") not in scopes
+
+
+def test_systemd_empty_unit_path_override_removes_domain_defaults(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={"SYSTEMD_UNIT_PATH": ""},
+        uid=1000,
+    )
+    assert _mapped(root, "/home/test/.config/systemd/user") in scopes
+    assert _mapped(root, "/etc/systemd/system") not in scopes
+    assert _mapped(root, "/usr/lib/systemd/system") not in scopes
+
+
+@pytest.mark.parametrize(
+    ("environ", "reason"),
+    [
+        ({"XDG_CONFIG_DIRS": "relative/path"}, "service_scope_env_invalid"),
+        ({"SYSTEMD_UNIT_PATH": "/opt/ok:relative/path"}, "service_scope_env_invalid"),
+        (
+            {"SYSTEMD_USER_UNIT_PATH": ":".join(f"/opt/unit-{index}" for index in range(65))},
+            "service_scope_limit",
+        ),
+    ],
+)
+def test_systemd_rejects_malicious_or_excessive_dynamic_paths(tmp_path, environ, reason):
+    from gateway.active_host_fence import (
+        IvdCronServiceDiscoveryError,
+        discover_ivd_cron_service_scopes,
+    )
+
+    root = tmp_path / "root"
+    with pytest.raises(IvdCronServiceDiscoveryError, match=reason):
+        discover_ivd_cron_service_scopes(
+            "systemd",
+            target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+            scope_root=root,
+            home=Path("/home/test"),
+            environ=environ,
+            uid=1000,
+        )
+
+
+def test_systemd_default_dynamic_paths_stay_mapped_and_bounded(tmp_path):
+    from gateway.active_host_fence import discover_ivd_cron_service_scopes
+
+    root = tmp_path / "root"
+    scopes = discover_ivd_cron_service_scopes(
+        "systemd",
+        target_path=_mapped(root, "/home/test/.config/systemd/user/hermes-gateway.service"),
+        scope_root=root,
+        home=Path("/home/test"),
+        environ={},
+        uid=1000,
+    )
+    assert len(scopes) <= 64
+    assert len(scopes) == len(set(scopes))
+    assert all(scope.is_relative_to(root) for scope in scopes)
+    for path in (
+        "/home/test/.config/systemd/user",
+        "/etc/xdg/systemd/user",
+        "/home/test/.local/share/systemd/user",
+        "/usr/local/share/systemd/user",
+        "/usr/share/systemd/user",
+        "/etc/systemd/system",
+        "/usr/lib/systemd/system",
+    ):
+        assert _mapped(root, path) in scopes
+
+
+def test_systemd_allows_declared_scope_alias_without_leaving_mapped_root(tmp_path):
+    from gateway.active_host_fence import IndependentIvdCronServiceError
+
+    root = tmp_path / "root"
+    alias_scope = _mapped(root, "/etc/xdg/systemd/user")
+    target_scope = _mapped(root, "/etc/systemd/user")
+    alias_scope.parent.mkdir(parents=True)
+    target_scope.mkdir(parents=True)
+    alias_scope.symlink_to("../../systemd/user", target_is_directory=True)
+    (target_scope / "nightly.timer").write_text(
+        "[Timer]\nOnCalendar=daily\n",
+        encoding="utf-8",
+    )
+    (target_scope / "nightly.service").write_text(
+        "[Service]\nExecStart=/opt/ivd/sync\n",
+        encoding="utf-8",
+    )
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        _assert_mapped_systemd_contract(root, target_dir)
 
 
 def test_scope_mapping_normalizes_parent_segments_inside_temporary_root(tmp_path):
