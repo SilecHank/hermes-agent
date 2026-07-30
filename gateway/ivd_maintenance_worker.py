@@ -76,6 +76,11 @@ def build_default_ivd_maintenance_steps(
                 "--execute",
             ),
         ),
+        WorkerStep(
+            "portable_state_sync",
+            ("bash", "scripts/hermes-portable-state-sync.sh"),
+            allow_failure=True,
+        ),
     )
 
 
