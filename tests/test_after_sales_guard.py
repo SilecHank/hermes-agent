@@ -100,9 +100,13 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
 
     assert missing_source["ok"] is False
     assert "formal_source_not_read" in missing_source["reasons"]
+    assert "请先读取" not in missing_source["fallback"]
+    assert "未能从当前产品的正式来源核实该参数" in missing_source["fallback"]
     assert supported["ok"] is True
     assert unsupported["ok"] is False
     assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
+    assert "请重新读取" not in unsupported["fallback"]
+    assert "与已核实的正式来源不一致" in unsupported["fallback"]
 
 
 def test_prepare_after_sales_turn_does_not_inject_unsafe_context_route():

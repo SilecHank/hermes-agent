@@ -76,6 +76,12 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "Remove the prohibited definite claim and replace it only with a bounded "
                 "possibility supported by the verified facts."
             )
+        elif reason == "formal_source_not_read":
+            instruction = (
+                "Call read_file on one exact routed formal source path from the internal "
+                "IVD context before drafting the answer. Do not use search or an alternate "
+                "path. Do not ask the user to perform this internal step."
+            )
         else:
             instruction = (
                 "Repair only the cited workflow-boundary violation using the verified facts."

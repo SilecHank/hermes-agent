@@ -57,7 +57,10 @@ class AfterSalesTurn:
                 return {
                     "ok": False,
                     "reasons": ["formal_source_not_read"],
-                    "fallback": "请先读取当前产品路由指定的正式来源，再给出参数结论。",
+                    "fallback": (
+                        "当前未能从当前产品的正式来源核实该参数，暂不提供数值结论。"
+                        "请补充产品版本或SOP编号，以便继续核实。"
+                    ),
                 }
             allowed = tuple(self.allowed_numeric_claims) + trusted_claims
             allowed_normalized = {_normalize_numeric_claim(item) for item in allowed}
@@ -72,7 +75,10 @@ class AfterSalesTurn:
                     "reasons": [
                         f"unsupported_numeric_claim:{claim}" for claim in unsupported
                     ],
-                    "fallback": "当前回答中的参数未在指定正式来源中核实，请重新读取来源后回答。",
+                    "fallback": (
+                        "当前回答中的参数与已核实的正式来源不一致，已停止发送该数值结论。"
+                        "请补充产品版本或SOP编号，以便继续核实。"
+                    ),
                 }
             return {"ok": True, "reasons": [], "fallback": ""}
         allowed_numeric_claims = list(self.allowed_numeric_claims)

@@ -32,6 +32,23 @@ def test_first_invalid_response_requests_internal_retry():
     assert "Do not reveal" in decision.retry_prompt
 
 
+def test_missing_formal_source_retry_requires_direct_routed_read():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("formal_source_not_read",),
+            "fallback": "当前未能核实参数。",
+        },
+        "参数是100ng。",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "read_file" in decision.retry_prompt
+    assert "exact routed formal source path" in decision.retry_prompt
+    assert "Do not ask the user to perform this internal step" in decision.retry_prompt
+
+
 def test_numeric_failure_retry_removes_only_the_unsupported_value():
     decision = evaluate_final_response(
         lambda _text: {
