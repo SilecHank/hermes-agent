@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import textwrap
@@ -2750,6 +2751,126 @@ def _systemd_watchdog_service_fields(
     return "notify", f"NotifyAccess=main\nWatchdogSec={seconds}s\n"
 
 
+_IVD_FENCE_SERVICE_KEYS = (
+    "IVD_ACTIVE_HOST_FENCE_REQUIRED",
+    "IVD_ACTIVE_HOST_ID",
+    "IVD_ACTIVE_HOST_RECORD_URL",
+    "IVD_ACTIVE_HOST_TOKEN_FILE",
+    "IVD_DEPLOYMENT_MANIFEST_SHA256",
+)
+
+
+def _validate_ivd_fence_service_environment(values: dict[str, str]) -> dict[str, str]:
+    from gateway.active_host_fence import DEFAULT_RECORD_URL, HOST_IDS, SHA256
+
+    if set(values) != set(_IVD_FENCE_SERVICE_KEYS):
+        raise ValueError("invalid active-host fence service environment")
+    token_path = Path(values["IVD_ACTIVE_HOST_TOKEN_FILE"])
+    valid = bool(
+        values["IVD_ACTIVE_HOST_ID"] in HOST_IDS
+        and values["IVD_ACTIVE_HOST_RECORD_URL"] == DEFAULT_RECORD_URL
+        and token_path.is_absolute()
+        and "\x00" not in values["IVD_ACTIVE_HOST_TOKEN_FILE"]
+        and "\n" not in values["IVD_ACTIVE_HOST_TOKEN_FILE"]
+        and SHA256.fullmatch(values["IVD_DEPLOYMENT_MANIFEST_SHA256"])
+    )
+    if not valid:
+        raise ValueError("invalid active-host fence service environment")
+    values["IVD_ACTIVE_HOST_FENCE_REQUIRED"] = "true"
+    return values
+
+
+def _ivd_fence_config_path() -> Path:
+    return get_hermes_home() / "ivd-state" / "active-host-fence.json"
+
+
+def _read_persisted_ivd_fence_environment() -> dict[str, str]:
+    path = _ivd_fence_config_path()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+        or info.st_size > 16 * 1024
+    ):
+        raise ValueError("invalid persisted active-host fence configuration")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid persisted active-host fence configuration") from exc
+    if not isinstance(payload, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in payload.items()
+    ):
+        raise ValueError("invalid persisted active-host fence configuration")
+    try:
+        return _validate_ivd_fence_service_environment(dict(payload))
+    except ValueError as exc:
+        raise ValueError("invalid persisted active-host fence configuration") from exc
+
+
+def _ivd_fence_service_environment() -> dict[str, str]:
+    """Return the process configuration or the protected persisted fallback."""
+    required = os.environ.get("IVD_ACTIVE_HOST_FENCE_REQUIRED", "").strip().lower()
+    if required in {"1", "true", "yes", "on"}:
+        values = {
+            name: os.environ.get(name, "").strip()
+            for name in _IVD_FENCE_SERVICE_KEYS
+        }
+        return _validate_ivd_fence_service_environment(values)
+    return _read_persisted_ivd_fence_environment()
+
+
+def _persist_ivd_fence_environment_from_process() -> None:
+    required = os.environ.get("IVD_ACTIVE_HOST_FENCE_REQUIRED", "").strip().lower()
+    if required not in {"1", "true", "yes", "on"}:
+        return
+    values = _validate_ivd_fence_service_environment({
+        name: os.environ.get(name, "").strip()
+        for name in _IVD_FENCE_SERVICE_KEYS
+    })
+    path = _ivd_fence_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        encoded = (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short active-host fence configuration write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+
+
+def _systemd_ivd_fence_environment() -> str:
+    lines = []
+    for name, value in _ivd_fence_service_environment().items():
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'Environment="{name}={escaped}"')
+    return "" if not lines else "\n".join(lines) + "\n"
+
+
+def _launchd_ivd_fence_environment() -> str:
+    from xml.sax.saxutils import escape
+
+    entries = []
+    for name, value in _ivd_fence_service_environment().items():
+        entries.append(f"        <key>{name}</key>\n        <string>{escape(value)}</string>")
+    return "" if not entries else "\n".join(entries) + "\n"
+
+
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
     python_path = get_python_path()
     working_dir = _stable_service_working_dir()
@@ -2785,6 +2906,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     # 60s floor, so a configured 45s drain yields 75s rather than 90s.
     _drain_timeout = int(_get_restart_drain_timeout() or 0)
     restart_timeout = max(60, _drain_timeout + 30)
+    ivd_fence_environment = _systemd_ivd_fence_environment()
 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
@@ -2825,7 +2947,7 @@ Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=always
+{ivd_fence_environment}Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}
@@ -2863,7 +2985,7 @@ WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=always
+{ivd_fence_environment}Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}
@@ -3257,6 +3379,7 @@ def systemd_install(
 ):
     if system:
         _require_root_for_system_service("install")
+    _persist_ivd_fence_environment_from_process()
 
     unit_path = get_systemd_unit_path(system=system)
     scope_flag = " --system" if system else ""
@@ -4052,6 +4175,7 @@ def generate_launchd_plist() -> str:
         ]
     )
     prog_args_xml = "\n        ".join(prog_args)
+    ivd_fence_environment = _launchd_ivd_fence_environment()
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -4076,7 +4200,7 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
-    </dict>
+{ivd_fence_environment}    </dict>
 
     <key>LimitLoadToSessionType</key>
     <array>
@@ -4292,6 +4416,7 @@ def refresh_launchd_plist_if_needed() -> bool:
 
 
 def launchd_install(force: bool = False):
+    _persist_ivd_fence_environment_from_process()
     plist_path = get_launchd_plist_path()
     _enforce_embedded_ivd_cron_contract("launchd", plist_path)
 

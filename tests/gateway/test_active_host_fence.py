@@ -45,6 +45,23 @@ def _override(*, host_id: str = "wsl-primary", created_delta=timedelta(), lifeti
     }
 
 
+def _lease(
+    *, host_id: str = "wsl-primary", generation: int = 4,
+    expires_delta: timedelta = timedelta(minutes=2),
+):
+    now = datetime.now(timezone.utc)
+    renewed = now if expires_delta.total_seconds() > 0 else now - timedelta(minutes=2)
+    return {
+        "schema_version": 1,
+        "host_id": host_id,
+        "generation": generation,
+        "deployment_manifest_sha256": MANIFEST_SHA256,
+        "lease_id": "0123456789abcdef0123456789abcdef",
+        "renewed_at": renewed.isoformat(),
+        "expires_at": (now + expires_delta).isoformat(),
+    }
+
+
 def test_gateway_fence_blocks_wrong_host_and_unavailable_remote():
     from gateway.active_host_fence import evaluate_fence
 
@@ -63,6 +80,135 @@ def test_evaluator_strictly_validates_record_and_manifest():
     assert evaluate_fence(invalid, local_host="wsl-primary").reason == "fence_record_invalid"
     invalid = {**_record(), "host_id": ["wsl-primary"]}
     assert evaluate_fence(invalid, local_host="wsl-primary").reason == "fence_record_invalid"
+
+
+def test_runtime_lease_blocks_live_other_owner_and_allows_expired_takeover():
+    from gateway.active_host_fence import evaluate_runtime_lease
+
+    blocked = evaluate_runtime_lease(
+        _lease(host_id="wsl-primary"),
+        local_host="mac-standby",
+        generation=5,
+        expected_manifest_sha256=MANIFEST_SHA256,
+    )
+    assert not blocked.allowed
+    assert blocked.reason == "lease_active_elsewhere"
+
+    expired = evaluate_runtime_lease(
+        _lease(host_id="wsl-primary", expires_delta=timedelta(seconds=-1)),
+        local_host="mac-standby",
+        generation=5,
+        expected_manifest_sha256=MANIFEST_SHA256,
+    )
+    assert expired.allowed
+    assert expired.reason == "lease_expired"
+
+
+def test_runtime_lease_only_allows_same_host_generation_to_move_forward():
+    from gateway.active_host_fence import evaluate_runtime_lease
+
+    older = evaluate_runtime_lease(
+        _lease(generation=3),
+        local_host="wsl-primary",
+        generation=4,
+        expected_manifest_sha256=MANIFEST_SHA256,
+    )
+    future = evaluate_runtime_lease(
+        _lease(generation=5),
+        local_host="wsl-primary",
+        generation=4,
+        expected_manifest_sha256=MANIFEST_SHA256,
+    )
+
+    assert older.allowed
+    assert older.reason == "lease_same_host_generation_advanced"
+    assert not future.allowed
+    assert future.reason == "lease_generation_ahead"
+
+
+def test_required_owner_match_acquires_runtime_lease(monkeypatch, tmp_path):
+    import gateway.active_host_fence as fence
+
+    token_file = tmp_path / "credential"
+    token_file.write_text("private-token", encoding="utf-8")
+    token_file.chmod(0o600)
+    record = _record()
+    monkeypatch.setenv("IVD_ACTIVE_HOST_FENCE_REQUIRED", "true")
+    monkeypatch.setenv("IVD_ACTIVE_HOST_ID", "wsl-primary")
+    monkeypatch.setenv("IVD_ACTIVE_HOST_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("IVD_DEPLOYMENT_MANIFEST_SHA256", MANIFEST_SHA256)
+    monkeypatch.setattr(fence, "fetch_active_host_record", lambda *a, **k: record)
+    captured = []
+    monkeypatch.setattr(
+        fence, "start_active_host_lease_watchdog",
+        lambda payload, **kwargs: captured.append((payload, kwargs)),
+    )
+
+    assert fence.assert_active_host_or_raise().reason == "owner_match"
+    assert captured[0][0] == record
+    assert captured[0][1]["local_host"] == "wsl-primary"
+
+
+def test_lease_api_uses_fixed_actions_variable_and_no_redirect(monkeypatch, tmp_path):
+    import gateway.active_host_fence as fence
+
+    token_file = tmp_path / "credential"
+    token_file.write_text("private-token", encoding="utf-8")
+    token_file.chmod(0o600)
+    seen = []
+
+    def open_request(request, timeout):
+        seen.append((request.full_url, request.method, request.headers.get("Authorization"), timeout))
+        if request.method == "GET":
+            return _Response(json.dumps({
+                "name": "HERMES_ACTIVE_HOST_LEASE",
+                "value": json.dumps(_lease()),
+            }).encode())
+        return _Response(b"")
+
+    monkeypatch.setattr(fence, "_open_remote_no_redirect", open_request)
+    payload = fence.fetch_active_host_lease(token_path=token_file)
+    fence.update_active_host_lease(payload, token_path=token_file)
+
+    assert [item[:2] for item in seen] == [
+        (fence.LEASE_URL, "GET"), (fence.LEASE_URL, "PATCH"),
+    ]
+    assert all(item[2] == "Bearer private-token" for item in seen)
+
+
+def test_lease_watchdog_terminates_immediately_when_owner_changes(monkeypatch, tmp_path):
+    import gateway.active_host_fence as fence
+
+    token_file = tmp_path / "credential"
+    token_file.write_text("private-token", encoding="utf-8")
+    token_file.chmod(0o600)
+    stopped = []
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def is_alive(self):
+            return False
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(fence, "_lease_watchdog", None)
+    monkeypatch.setattr(fence.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(fence.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(fence, "fetch_active_host_lease", lambda **_kwargs: _lease())
+    monkeypatch.setattr(fence, "update_active_host_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        fence, "fetch_active_host_record", lambda *_args, **_kwargs: _record(host_id="mac-standby"),
+    )
+    monkeypatch.setattr(fence, "_terminate_for_lease_loss", stopped.append)
+
+    fence.start_active_host_lease_watchdog(
+        _record(), local_host="wsl-primary", token_path=token_file,
+    )
+
+    assert stopped == ["owner_changed"]
 
 
 def test_optional_mode_does_no_io(monkeypatch):

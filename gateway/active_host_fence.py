@@ -7,10 +7,13 @@ import json
 import logging
 import os
 import re
+import signal
 import stat
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,8 +49,20 @@ OVERRIDE_FIELDS = frozenset(
 DEFAULT_RECORD_URL = "https://api.github.com/repos/SilecHank/ivd-hermes-standby/contents/active-host.json"
 RECORD_URL_HOST = "api.github.com"
 RECORD_URL_PATH = "/repos/SilecHank/ivd-hermes-standby/contents/active-host.json"
+LEASE_URL = "https://api.github.com/repos/SilecHank/ivd-hermes-standby/actions/variables/HERMES_ACTIVE_HOST_LEASE"
+LEASE_URL_PATH = "/repos/SilecHank/ivd-hermes-standby/actions/variables/HERMES_ACTIVE_HOST_LEASE"
+LEASE_FIELDS = frozenset(
+    (
+        "schema_version", "host_id", "generation", "deployment_manifest_sha256",
+        "lease_id", "renewed_at", "expires_at",
+    )
+)
+LEASE_TTL_SECONDS = 120
+LEASE_RENEW_SECONDS = 30
 MAX_RECORD_BYTES = 64 * 1024
 EXIT_CONFIG = 78
+_lease_watchdog: threading.Thread | None = None
+_lease_watchdog_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -128,6 +143,53 @@ def evaluate_fence(
     if expected_manifest_sha256 and payload["deployment_manifest_sha256"] != expected_manifest_sha256:
         return FenceDecision(False, "manifest_mismatch")
     return FenceDecision(True, "owner_match")
+
+
+def _valid_lease(payload: object) -> bool:
+    if not isinstance(payload, dict) or set(payload) != LEASE_FIELDS:
+        return False
+    renewed = _utc_datetime(payload.get("renewed_at"))
+    expires = _utc_datetime(payload.get("expires_at"))
+    return bool(
+        payload.get("schema_version") == 1
+        and type(payload.get("generation")) is int
+        and payload["generation"] >= 1
+        and payload.get("host_id") in HOST_IDS
+        and isinstance(payload.get("deployment_manifest_sha256"), str)
+        and SHA256.fullmatch(payload["deployment_manifest_sha256"]) is not None
+        and isinstance(payload.get("lease_id"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", payload["lease_id"]) is not None
+        and renewed is not None
+        and expires is not None
+        and renewed < expires
+        and (expires - renewed).total_seconds() <= LEASE_TTL_SECONDS + 5
+    )
+
+
+def evaluate_runtime_lease(
+    payload: dict[str, Any] | None,
+    *,
+    local_host: str,
+    generation: int,
+    expected_manifest_sha256: str,
+    now: datetime | None = None,
+) -> FenceDecision:
+    if not _valid_lease(payload):
+        return FenceDecision(False, "lease_record_invalid")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    expires = _utc_datetime(payload["expires_at"])
+    assert expires is not None
+    if expires <= current:
+        return FenceDecision(True, "lease_expired")
+    if payload["host_id"] != local_host:
+        return FenceDecision(False, "lease_active_elsewhere")
+    if payload["deployment_manifest_sha256"] != expected_manifest_sha256:
+        return FenceDecision(False, "lease_manifest_mismatch")
+    if payload["generation"] > generation:
+        return FenceDecision(False, "lease_generation_ahead")
+    if payload["generation"] < generation:
+        return FenceDecision(True, "lease_same_host_generation_advanced")
+    return FenceDecision(True, "lease_owner_match")
 
 
 def _read_secure_credential(path: Path) -> str:
@@ -266,6 +328,158 @@ def fetch_active_host_record(
             if attempt + 1 < max_attempts:
                 time.sleep(min(0.1 * (attempt + 1), 0.2))
     raise FenceError("remote_unavailable") from last_error
+
+
+def _lease_request(
+    *, token_path: Path, method: str, payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    token = _read_secure_credential(token_path)
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "hermes-active-host-lease/1",
+    }
+    body = None if payload is None else json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(LEASE_URL, headers=headers, data=body, method=method)
+    try:
+        with _open_remote_no_redirect(request, 3.0) as response:
+            raw = response.read(MAX_RECORD_BYTES + 1)
+    except FenceError:
+        raise
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise FenceError("remote_redirect_forbidden") from exc
+        raise FenceError("lease_remote_unavailable") from exc
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise FenceError("lease_remote_unavailable") from exc
+    if len(raw) > MAX_RECORD_BYTES:
+        raise FenceError("lease_response_too_large")
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise FenceError("lease_remote_invalid") from exc
+    if not isinstance(decoded, dict):
+        raise FenceError("lease_remote_invalid")
+    return decoded
+
+
+def fetch_active_host_lease(*, token_path: Path) -> dict[str, Any]:
+    outer = _lease_request(token_path=token_path, method="GET")
+    if not isinstance(outer, dict) or outer.get("name") != "HERMES_ACTIVE_HOST_LEASE":
+        raise FenceError("lease_remote_invalid")
+    value = outer.get("value")
+    if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_RECORD_BYTES:
+        raise FenceError("lease_remote_invalid")
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise FenceError("lease_remote_invalid") from exc
+    if not isinstance(payload, dict):
+        raise FenceError("lease_remote_invalid")
+    return payload
+
+
+def update_active_host_lease(payload: dict[str, Any], *, token_path: Path) -> None:
+    if not _valid_lease(payload):
+        raise FenceError("lease_record_invalid")
+    value = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    _lease_request(
+        token_path=token_path,
+        method="PATCH",
+        payload={"name": "HERMES_ACTIVE_HOST_LEASE", "value": value},
+    )
+
+
+def _new_lease(
+    record: dict[str, Any], *, local_host: str, lease_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    renewed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return {
+        "schema_version": 1,
+        "host_id": local_host,
+        "generation": int(record["generation"]),
+        "deployment_manifest_sha256": str(record["deployment_manifest_sha256"]),
+        "lease_id": lease_id,
+        "renewed_at": renewed.isoformat(),
+        "expires_at": datetime.fromtimestamp(
+            renewed.timestamp() + LEASE_TTL_SECONDS, tz=timezone.utc,
+        ).isoformat(),
+    }
+
+
+def _terminate_for_lease_loss(reason: str) -> None:
+    logger.critical("IVD active-host lease lost: %s", reason)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def start_active_host_lease_watchdog(
+    record: dict[str, Any], *, local_host: str, token_path: Path | None,
+) -> None:
+    """Acquire a short external lease and stop this process if renewal is lost."""
+    global _lease_watchdog
+    if token_path is None:
+        raise FenceError("lease_credential_required")
+    with _lease_watchdog_lock:
+        if _lease_watchdog is not None and _lease_watchdog.is_alive():
+            return
+        lease_id = uuid.uuid4().hex
+        existing = fetch_active_host_lease(token_path=token_path)
+        decision = evaluate_runtime_lease(
+            existing,
+            local_host=local_host,
+            generation=int(record["generation"]),
+            expected_manifest_sha256=str(record["deployment_manifest_sha256"]),
+        )
+        if not decision.allowed:
+            raise FenceError(decision.reason)
+        lease = _new_lease(record, local_host=local_host, lease_id=lease_id)
+        update_active_host_lease(lease, token_path=token_path)
+
+        def renew() -> None:
+            current_expiry = _utc_datetime(lease["expires_at"])
+            assert current_expiry is not None
+            while True:
+                time.sleep(LEASE_RENEW_SECONDS)
+                try:
+                    latest_record = fetch_active_host_record(
+                        os.environ.get("IVD_ACTIVE_HOST_RECORD_URL", DEFAULT_RECORD_URL).strip(),
+                        timeout_seconds=3.0,
+                        max_response_bytes=MAX_RECORD_BYTES,
+                        token_path=token_path,
+                        max_attempts=2,
+                    )
+                    owner = evaluate_fence(
+                        latest_record,
+                        local_host=local_host,
+                        required=True,
+                        expected_manifest_sha256=str(record["deployment_manifest_sha256"]),
+                    )
+                    if not owner.allowed or latest_record.get("generation") != record.get("generation"):
+                        _terminate_for_lease_loss("owner_changed")
+                        return
+                    current = fetch_active_host_lease(token_path=token_path)
+                    if current.get("lease_id") != lease_id:
+                        _terminate_for_lease_loss("lease_superseded")
+                        return
+                    renewed = _new_lease(latest_record, local_host=local_host, lease_id=lease_id)
+                    update_active_host_lease(renewed, token_path=token_path)
+                    current_expiry = _utc_datetime(renewed["expires_at"])
+                    assert current_expiry is not None
+                except FenceError:
+                    if datetime.now(timezone.utc) >= current_expiry:
+                        _terminate_for_lease_loss("renewal_expired")
+                        return
+
+        _lease_watchdog = threading.Thread(
+            target=renew, name="ivd-active-host-lease", daemon=True,
+        )
+        _lease_watchdog.start()
 
 
 def _open_readonly_beneath(path: Path, trusted_root: Path) -> int:
@@ -485,6 +699,13 @@ def assert_active_host_or_raise() -> FenceDecision:
             expected_manifest_sha256=expected_manifest,
         )
         if decision.allowed:
+            try:
+                start_active_host_lease_watchdog(
+                    payload, local_host=local_host, token_path=token_path,
+                )
+            except FenceError as exc:
+                logger.error("IVD active-host fence blocked startup: %s", str(exc))
+                raise SystemExit(EXIT_CONFIG)
             return decision
         logger.error("IVD active-host fence blocked startup: %s", decision.reason)
         raise SystemExit(EXIT_CONFIG)
