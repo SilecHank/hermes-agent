@@ -1,9 +1,23 @@
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from gateway.after_sales_guard import CriticalAfterSalesValidator, prepare_after_sales_turn
 
 
-KB = Path("/home/slim/IVD-KnowledgeHub")
+def _knowledgehub_root():
+    configured = os.environ.get("IVD_KB_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.home() / "IVD-KnowledgeHub"
+
+
+KB = _knowledgehub_root()
+
+
+def test_knowledgehub_root_honors_cross_platform_override():
+    with patch.dict("os.environ", {"IVD_KB_ROOT": "/tmp/ivd-kb"}):
+        assert _knowledgehub_root() == Path("/tmp/ivd-kb")
 
 
 def _config(enabled=True):
