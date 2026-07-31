@@ -286,7 +286,7 @@ class _BlockingClarifyAgent:
 
 
 @pytest.mark.asyncio
-async def test_qq_clarify_wait_has_one_chinese_state_and_no_working_heartbeat(
+async def test_qq_clarify_wait_state_is_immediate_and_independent_of_heartbeat(
     monkeypatch, tmp_path,
 ):
     adapter = _ClarifyCaptureAdapter()
@@ -315,7 +315,10 @@ async def test_qq_clarify_wait_has_one_chinese_state_and_no_working_heartbeat(
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.03")
+    # The waiting state belongs to clarify delivery, not the long-running
+    # heartbeat.  A heartbeat interval beyond the whole clarify lifetime must
+    # not suppress the explicit waiting state.
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "999")
     monkeypatch.setattr(clarify_gateway, "get_clarify_timeout", lambda: 0.12)
 
     source = _qq_group_source("group-1", "member-a")

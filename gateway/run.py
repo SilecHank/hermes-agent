@@ -21973,6 +21973,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _clarify_mod.clear_session(session_key or "")
                     return "[clarify prompt could not be delivered]"
 
+                # Enter the user-visible waiting state as part of clarify
+                # delivery itself.  This must not depend on the long-running
+                # heartbeat interval: QQ's bounded clarify lifetime can be
+                # shorter than that interval, and coupling the two made this
+                # notice racy (or absent altogether).
+                wait_notice = safe_schedule_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        "⏸️ 等待回复 — 请直接回答上方问题；收到后会继续原任务。",
+                        metadata=_non_conversational_metadata(
+                            _status_thread_metadata,
+                            platform=source.platform,
+                        ),
+                    ),
+                    _loop_for_step,
+                    logger=logger,
+                    log_message="Clarify waiting-state notification failed to schedule",
+                )
+                if wait_notice is not None:
+                    try:
+                        wait_notice.result(timeout=15)
+                    except Exception as exc:
+                        logger.debug(
+                            "Clarify waiting-state notification error: %s", exc
+                        )
+
                 timeout = _clarify_timeout_for_platform(
                     source.platform,
                     _clarify_mod.get_clarify_timeout(),
@@ -22908,10 +22934,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if _long_running_mode == "off":
             _NOTIFY_INTERVAL = None
         _notify_start = time.time()
-        _clarify_wait_notice_sent = False
 
         async def _notify_long_running():
-            nonlocal _clarify_wait_notice_sent
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
             _notify_adapter = self._adapter_for_source(source)
@@ -22948,22 +22972,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception:
                     _waiting_for_clarify = False
                 if _waiting_for_clarify:
-                    if not _clarify_wait_notice_sent:
-                        _clarify_wait_notice_sent = True
-                        try:
-                            await _notify_adapter.send(
-                                source.chat_id,
-                                "⏸️ 等待回复 — 请直接回答上方问题；收到后会继续原任务。",
-                                metadata=_non_conversational_metadata(
-                                    _status_thread_metadata,
-                                    platform=source.platform,
-                                ),
-                            )
-                        except Exception as _clarify_notice_exc:
-                            logger.debug(
-                                "Clarify waiting-state notification error: %s",
-                                _clarify_notice_exc,
-                            )
                     continue
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available. Default
