@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -150,3 +151,91 @@ def test_user_messages_are_plain_chinese(policy, identity):
     assert "Reply with the number" not in text
     assert "Working — clarify" not in text
     assert "Traceback" not in text
+
+
+def test_write_action_first_call_returns_waiting_confirmation(policy, identity):
+    calls = []
+    result = execute_action(
+        {"action": "sync"}, policy, identity,
+        runner=lambda *a, **k: calls.append(1),
+    )
+    assert result["status"] == "waiting_confirmation"
+    assert "等待你的确认" in result["message_zh"]
+    assert result["confirmation_task_id"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("mismatch", ["profile", "chat", "user", "action", "generation"])
+def test_confirmation_requires_exact_identity_action_and_generation(
+    policy, identity, mismatch,
+):
+    first = execute_action({"action": "sync"}, policy, identity)
+    task_id = first["confirmation_task_id"]
+    confirm_identity = identity
+    args = {"action": "sync", "confirmation_task_id": task_id}
+    preflight = lambda: ("wsl-primary", "10", True)
+    if mismatch == "profile":
+        confirm_identity = SessionIdentity("telegram", "other", "chat", "owner", True)
+    elif mismatch == "chat":
+        confirm_identity = SessionIdentity("telegram", "telegram", "other", "owner", True)
+    elif mismatch == "user":
+        confirm_identity = SessionIdentity("telegram", "telegram", "chat", "other", True)
+    elif mismatch == "action":
+        args["action"] = "deploy"
+    elif mismatch == "generation":
+        preflight = lambda: ("wsl-primary", "11", True)
+    calls = []
+    result = execute_action(
+        args, policy, confirm_identity, runner=lambda *a, **k: calls.append(1),
+        preflight=preflight,
+    )
+    assert result["status"] == "blocked"
+    assert calls == []
+
+
+def test_expired_confirmation_is_blocked_and_removed(policy, identity):
+    now = [1000.0]
+    first = execute_action({"action": "repair"}, policy, identity, clock=lambda: now[0])
+    now[0] += policy.confirmation_ttl_seconds + 1
+    result = execute_action(
+        {"action": "repair", "confirmation_task_id": first["confirmation_task_id"]},
+        policy, identity, clock=lambda: now[0],
+    )
+    assert result["status"] == "blocked"
+    assert not (policy.state_dir / "confirmations" / f"{first['confirmation_task_id']}.json").exists()
+
+
+def test_gateway_restart_does_not_replay_pending_write(policy, identity):
+    first = execute_action({"action": "deploy"}, policy, identity)
+    calls = []
+    second = execute_action({"action": "deploy"}, policy, identity, runner=lambda *a, **k: calls.append(1))
+    assert second["status"] == "waiting_confirmation"
+    assert second["confirmation_task_id"] != first["confirmation_task_id"]
+    assert calls == []
+
+
+def test_second_writer_is_blocked_until_lease_expires(policy, identity):
+    first = execute_action({"action": "sync"}, policy, identity)
+    lease = policy.state_dir / "write.lease"
+    lease.write_text(json.dumps({"task_id": "other", "expires_at": time.time() + 60}), encoding="utf-8")
+    result = execute_action(
+        {"action": "sync", "confirmation_task_id": first["confirmation_task_id"]},
+        policy, identity,
+    )
+    assert result["status"] == "blocked"
+    assert "维护任务" in result["message_zh"]
+
+
+@pytest.mark.parametrize("returncode", [0, 3])
+def test_terminal_state_releases_matching_lease(policy, identity, returncode):
+    first = execute_action({"action": "sync"}, policy, identity)
+
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, returncode, stdout="done", stderr="")
+
+    result = execute_action(
+        {"action": "sync", "confirmation_task_id": first["confirmation_task_id"]},
+        policy, identity, runner=runner,
+    )
+    assert result["status"] in {"completed", "failed"}
+    assert not (policy.state_dir / "write.lease").exists()

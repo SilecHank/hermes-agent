@@ -49,6 +49,9 @@ class MaintenancePolicy:
     test_timeout_seconds: int = 900
     write_timeout_seconds: int = 900
     lock_lease_seconds: int = 1200
+    confirmation_ttl_seconds: int = 300
+    required_owner: str = "wsl-primary"
+    required_generation: str = "10"
 
 
 @dataclass(frozen=True)
@@ -217,12 +220,159 @@ def _append_audit(
     os.chmod(audit_path, 0o600)
 
 
+def _confirmation_path(policy: MaintenancePolicy, task_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{24}", task_id or ""):
+        raise ValueError("invalid confirmation id")
+    directory = policy.state_dir / "confirmations"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    return directory / f"{task_id}.json"
+
+
+def _write_json_atomic(path: Path, value: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _new_confirmation(
+    policy: MaintenancePolicy,
+    identity: SessionIdentity,
+    action: str,
+    suite: Optional[str],
+    now: float,
+) -> dict[str, str]:
+    chat_hash, user_hash = _audit_hashes(policy, identity)
+    task_id = secrets.token_hex(12)
+    record = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "action": action,
+        "test_suite": suite,
+        "profile": identity.profile,
+        "platform": identity.platform,
+        "chat_hash": chat_hash,
+        "user_hash": user_hash,
+        "owner": policy.required_owner,
+        "generation": policy.required_generation,
+        "created_at": now,
+        "expires_at": now + policy.confirmation_ttl_seconds,
+        "status": "waiting_confirmation",
+    }
+    _write_json_atomic(_confirmation_path(policy, task_id), record)
+    return {
+        "status": "waiting_confirmation",
+        "message_zh": (
+            f"该动作会修改 IVD 运行状态，正在等待你的确认。"
+            f"请确认任务 {task_id} 后再执行。"
+        ),
+        "confirmation_task_id": task_id,
+    }
+
+
+def _load_confirmation(
+    policy: MaintenancePolicy,
+    identity: SessionIdentity,
+    action: str,
+    suite: Optional[str],
+    task_id: str,
+    now: float,
+    preflight: Callable[[], tuple[str, str, bool]],
+) -> tuple[Optional[Path], Optional[dict], Optional[dict[str, str]]]:
+    try:
+        path = _confirmation_path(policy, task_id)
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None, None, {"status": "blocked", "message_zh": "确认任务不存在或已失效。"}
+    if float(record.get("expires_at", 0)) < now:
+        path.unlink(missing_ok=True)
+        return None, None, {"status": "blocked", "message_zh": "确认任务已过期，请重新发起。"}
+    chat_hash, user_hash = _audit_hashes(policy, identity)
+    expected = (
+        identity.profile,
+        identity.platform,
+        chat_hash,
+        user_hash,
+        action,
+        suite,
+        "waiting_confirmation",
+    )
+    actual = (
+        record.get("profile"), record.get("platform"), record.get("chat_hash"),
+        record.get("user_hash"), record.get("action"), record.get("test_suite"),
+        record.get("status"),
+    )
+    if actual != expected:
+        return None, None, {"status": "blocked", "message_zh": "确认信息与原任务不一致，已拒绝执行。"}
+    try:
+        owner, generation, mac_ivd_safe = preflight()
+    except Exception:
+        return None, None, {"status": "blocked", "message_zh": "维护前检查失败，未执行任何修改。"}
+    if (
+        owner != record.get("owner")
+        or str(generation) != str(record.get("generation"))
+        or not mac_ivd_safe
+    ):
+        return None, None, {"status": "blocked", "message_zh": "主机所有权、代次或 Mac 冷备状态已变化，未执行修改。"}
+    record["status"] = "running"
+    record["started_at"] = now
+    _write_json_atomic(path, record)
+    return path, record, None
+
+
+def _acquire_lease(policy: MaintenancePolicy, task_id: str, now: float) -> bool:
+    _ensure_state_dir(policy)
+    path = policy.state_dir / "write.lease"
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if float(current.get("expires_at", 0)) >= now:
+                return False
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        path.unlink(missing_ok=True)
+    value = {
+        "task_id": task_id,
+        "pid": os.getpid(),
+        "created_at": now,
+        "expires_at": now + policy.lock_lease_seconds,
+    }
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, separators=(",", ":"))
+    return True
+
+
+def _release_lease(policy: MaintenancePolicy, task_id: str) -> None:
+    path = policy.state_dir / "write.lease"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+        if current.get("task_id") == task_id:
+            path.unlink(missing_ok=True)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+
+
 def execute_action(
     args: Mapping[str, object],
     policy: MaintenancePolicy,
     identity: SessionIdentity,
     *,
     runner: Callable = subprocess.run,
+    clock: Callable[[], float] = time.time,
+    preflight: Optional[Callable[[], tuple[str, str, bool]]] = None,
 ) -> dict[str, str]:
     try:
         action, suite = _validate_request(args)
@@ -232,7 +382,31 @@ def execute_action(
     if not _authorize(policy, identity):
         return {"status": "blocked", "message_zh": "当前会话无权执行此维护动作。"}
 
-    started = time.time()
+    confirmation_path = None
+    confirmation_task_id = None
+    if action in WRITE_ACTIONS:
+        confirmation_task_id = args.get("confirmation_task_id")
+        if not confirmation_task_id:
+            return _new_confirmation(policy, identity, action, suite, clock())
+        if not isinstance(confirmation_task_id, str):
+            return {"status": "blocked", "message_zh": "确认任务格式无效。"}
+        effective_preflight = preflight or (
+            lambda: (policy.required_owner, policy.required_generation, True)
+        )
+        confirmation_path, _, blocked = _load_confirmation(
+            policy, identity, action, suite, confirmation_task_id, clock(), effective_preflight
+        )
+        if blocked is not None:
+            return blocked
+        if not _acquire_lease(policy, confirmation_task_id, clock()):
+            if confirmation_path is not None:
+                record = json.loads(confirmation_path.read_text(encoding="utf-8"))
+                record["status"] = "waiting_confirmation"
+                record.pop("started_at", None)
+                _write_json_atomic(confirmation_path, record)
+            return {"status": "blocked", "message_zh": "已有维护任务正在执行，请稍后再试。"}
+
+    started = clock()
     try:
         completed = runner(
             list(spec.argv),
@@ -256,6 +430,9 @@ def execute_action(
         _append_audit(policy, identity, action=action, suite=suite, started_at=started,
                       status="failed", exit_code=None, summary=result["message_zh"])
         return result
+    finally:
+        if confirmation_task_id:
+            _release_lease(policy, confirmation_task_id)
 
     output = redact_text(((completed.stdout or "") + "\n" + (completed.stderr or "")).strip())[:8000]
     if completed.returncode == 0:
@@ -274,4 +451,3 @@ def execute_action(
     _append_audit(policy, identity, action=action, suite=suite, started_at=started,
                   status=status, exit_code=completed.returncode, summary=message)
     return {"status": status, "message_zh": message}
-
