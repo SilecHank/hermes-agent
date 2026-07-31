@@ -100,6 +100,12 @@ TOOLSETS = {
         "tools": ["web_search", "web_extract"],
         "includes": []  # No other toolsets included
     },
+
+    "ivd_maintenance": {
+        "description": "Governed IVD WSL maintenance for the local Telegram profile",
+        "tools": ["ivd_wsl_maintenance"],
+        "includes": [],
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",

@@ -365,6 +365,111 @@ def _release_lease(policy: MaintenancePolicy, task_id: str) -> None:
         return
 
 
+_HOST_RE = re.compile(r"\A(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*\Z", re.ASCII)
+
+
+def _safe_client_path(raw: object) -> Path:
+    path = Path(str(raw or "")).expanduser()
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError("unsafe client path")
+    if path.stat().st_mode & 0o022:
+        raise ValueError("writable client path")
+    return path.resolve()
+
+
+def load_policy(config: Optional[Mapping[str, object]] = None) -> MaintenancePolicy:
+    if config is None:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+    raw = config.get("ivd_maintenance") if isinstance(config, Mapping) else None
+    if not isinstance(raw, Mapping):
+        raise ValueError("ivd maintenance is not configured")
+    allowed = {
+        "enabled", "profile", "admin_user_id_file", "windows_ssh_host",
+        "ivd_wsl_path", "ivd_remote_path", "state_dir", "read_timeout_seconds",
+        "test_timeout_seconds", "write_timeout_seconds", "lock_lease_seconds",
+        "confirmation_ttl_seconds", "required_owner", "required_generation",
+    }
+    if set(raw) - allowed:
+        raise ValueError("unknown policy fields")
+    admin_file = Path(str(raw.get("admin_user_id_file") or "")).expanduser()
+    if (
+        not admin_file.is_absolute() or admin_file.is_symlink() or not admin_file.is_file()
+        or admin_file.stat().st_mode & 0o077
+    ):
+        raise ValueError("unsafe admin allowlist")
+    admin_ids = frozenset(
+        line.strip() for line in admin_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    if not admin_ids:
+        raise ValueError("empty admin allowlist")
+    host = str(raw.get("windows_ssh_host") or "")
+    if not _HOST_RE.fullmatch(host):
+        raise ValueError("invalid Windows host")
+    state_dir = Path(str(raw.get("state_dir") or "")).expanduser()
+    if not state_dir.is_absolute() or state_dir.is_symlink():
+        raise ValueError("unsafe state directory")
+
+    def bounded(name: str, default: int, low: int, high: int) -> int:
+        value = int(raw.get(name, default))
+        if not low <= value <= high:
+            raise ValueError(f"invalid {name}")
+        return value
+
+    return MaintenancePolicy(
+        enabled=raw.get("enabled") is True,
+        profile=str(raw.get("profile") or ""),
+        admin_user_ids=admin_ids,
+        windows_ssh_host=host,
+        ivd_wsl_path=_safe_client_path(raw.get("ivd_wsl_path")),
+        ivd_remote_path=_safe_client_path(raw.get("ivd_remote_path")),
+        state_dir=state_dir,
+        read_timeout_seconds=bounded("read_timeout_seconds", 30, 5, 300),
+        test_timeout_seconds=bounded("test_timeout_seconds", 900, 30, 3600),
+        write_timeout_seconds=bounded("write_timeout_seconds", 900, 30, 3600),
+        lock_lease_seconds=bounded("lock_lease_seconds", 1200, 60, 7200),
+        confirmation_ttl_seconds=bounded("confirmation_ttl_seconds", 300, 30, 1800),
+        required_owner=str(raw.get("required_owner") or "wsl-primary"),
+        required_generation=str(raw.get("required_generation") or "10"),
+    )
+
+
+def _production_preflight(policy: MaintenancePolicy) -> tuple[str, str, bool]:
+    env = {
+        "PATH": SAFE_PATH,
+        "HOME": str(Path.home()),
+        "IVD_WINDOWS_SSH_HOST": policy.windows_ssh_host,
+    }
+    status = subprocess.run(
+        [str(policy.ivd_remote_path), "status"], check=False, capture_output=True,
+        text=True, timeout=policy.read_timeout_seconds, env=env,
+    )
+    if status.returncode != 0:
+        raise RuntimeError("production status unavailable")
+    text = status.stdout or ""
+    owner_match = re.search(r'(?:active_host|owner)["\s:=]+([A-Za-z0-9._-]+)', text)
+    generation_match = re.search(r'generation["\s:=]+([0-9]+)', text)
+    if not owner_match or not generation_match:
+        raise RuntimeError("production ownership unavailable")
+    uid = os.getuid()
+    disabled = subprocess.run(
+        ["/bin/launchctl", "print-disabled", f"gui/{uid}"], check=False,
+        capture_output=True, text=True, timeout=10, env={"PATH": SAFE_PATH},
+    )
+    loaded = subprocess.run(
+        ["/bin/launchctl", "print", f"gui/{uid}/ai.hermes.gateway"], check=False,
+        capture_output=True, text=True, timeout=10, env={"PATH": SAFE_PATH},
+    )
+    mac_safe = bool(
+        disabled.returncode == 0
+        and re.search(r'"ai\.hermes\.gateway"\s*=>\s*true', disabled.stdout or "")
+        and loaded.returncode != 0
+    )
+    return owner_match.group(1), generation_match.group(1), mac_safe
+
+
 def execute_action(
     args: Mapping[str, object],
     policy: MaintenancePolicy,
@@ -451,3 +556,49 @@ def execute_action(
     _append_audit(policy, identity, action=action, suite=suite, started_at=started,
                   status=status, exit_code=completed.returncode, summary=message)
     return {"status": status, "message_zh": message}
+
+
+def _handle_ivd_wsl_maintenance(args, **_kwargs) -> str:
+    from gateway.session_context import get_session_env
+
+    identity = SessionIdentity(
+        platform=get_session_env("HERMES_SESSION_PLATFORM"),
+        profile=get_session_env("HERMES_SESSION_PROFILE"),
+        chat_id=get_session_env("HERMES_SESSION_CHAT_ID"),
+        user_id=get_session_env("HERMES_SESSION_USER_ID"),
+        gateway_admin=get_session_env("HERMES_SESSION_IVD_ADMIN") == "1",
+    )
+    try:
+        policy = load_policy()
+    except Exception:
+        return json.dumps(
+            {"status": "blocked", "message_zh": "IVD 维护策略未就绪，未执行任何操作。"},
+            ensure_ascii=False,
+        )
+    result = execute_action(
+        args, policy, identity,
+        preflight=lambda: _production_preflight(policy),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _check_ivd_maintenance_requirements() -> bool:
+    try:
+        policy = load_policy()
+        return bool(policy.enabled and policy.profile == "telegram")
+    except Exception:
+        return False
+
+
+from tools.registry import registry
+
+registry.register(
+    name="ivd_wsl_maintenance",
+    toolset="ivd_maintenance",
+    schema=TOOL_SCHEMA,
+    handler=_handle_ivd_wsl_maintenance,
+    check_fn=_check_ivd_maintenance_requirements,
+    description="执行受治理的 IVD WSL 状态检查或维护动作",
+    emoji="🛠️",
+    max_result_size_chars=12_000,
+)

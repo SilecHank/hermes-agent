@@ -307,6 +307,24 @@ def test_discord_toolsets_do_not_leak_to_other_platforms():
     assert "discord_admin" not in enabled
 
 
+def test_ivd_maintenance_is_explicit_and_telegram_only():
+    telegram = _get_platform_tools(
+        {"platform_toolsets": {"telegram": ["hermes-telegram", "ivd_maintenance"]}},
+        "telegram",
+    )
+    assert "ivd_maintenance" in telegram
+    for platform in ("qqbot", "wecom", "weixin", "cli", "cron"):
+        configured = _get_platform_tools(
+            {"platform_toolsets": {platform: [f"hermes-{platform}", "ivd_maintenance"]}},
+            platform,
+        )
+        assert "ivd_maintenance" not in configured
+
+
+def test_ivd_maintenance_is_default_off_for_telegram():
+    assert "ivd_maintenance" not in _get_platform_tools({}, "telegram")
+
+
 def test_discord_explicit_workaround_still_works():
     """Regression guard: the documented workaround of listing toolsets
     explicitly must keep working after the fix."""
