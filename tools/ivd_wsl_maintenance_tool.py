@@ -464,7 +464,7 @@ def _production_preflight(policy: MaintenancePolicy) -> tuple[str, str, bool]:
     )
     mac_safe = bool(
         disabled.returncode == 0
-        and re.search(r'"ai\.hermes\.gateway"\s*=>\s*true', disabled.stdout or "")
+        and re.search(r'"ai\.hermes\.gateway"\s*=>\s*(?:true|disabled)', disabled.stdout or "")
         and loaded.returncode != 0
     )
     return owner_match.group(1), generation_match.group(1), mac_safe

@@ -12,6 +12,7 @@ from tools.ivd_wsl_maintenance_tool import (
     build_action_spec,
     execute_action,
     redact_text,
+    _production_preflight,
 )
 
 
@@ -151,6 +152,18 @@ def test_user_messages_are_plain_chinese(policy, identity):
     assert "Reply with the number" not in text
     assert "Working — clarify" not in text
     assert "Traceback" not in text
+
+
+def test_production_preflight_accepts_macos_disabled_word(policy, monkeypatch):
+    replies = iter(
+        [
+            subprocess.CompletedProcess([], 0, "active_host: wsl-primary generation: 10", ""),
+            subprocess.CompletedProcess([], 0, '"ai.hermes.gateway" => disabled', ""),
+            subprocess.CompletedProcess([], 113, "", "not found"),
+        ]
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: next(replies))
+    assert _production_preflight(policy) == ("wsl-primary", "10", True)
 
 
 def test_write_action_first_call_returns_waiting_confirmation(policy, identity):
