@@ -22516,7 +22516,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         platform=platform_key,
                         session_key=session_key or session_id or "",
                         product_scope=(
-                            str(_after_sales_turn.facts.get("product") or "")
+                            _after_sales_turn.product_scope
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        product_variant=(
+                            _after_sales_turn.product_variant
                             if _after_sales_turn is not None
                             else ""
                         ),

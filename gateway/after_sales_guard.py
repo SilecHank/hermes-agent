@@ -26,6 +26,8 @@ class AfterSalesTurn:
     facts: dict[str, Any]
     validator: ModuleType | None
     allowed_numeric_claims: tuple[str, ...]
+    product_scope: str = ""
+    product_variant: str = ""
     fast_path: bool = False
     route_id: str = ""
     route_version: str = ""
@@ -242,6 +244,8 @@ def prepare_after_sales_turn(
                 if validator is not None and requires_source_validation
                 else ()
             ),
+            product_scope=str(fast_result.get("product_scope") or ""),
+            product_variant=str(fast_result.get("product_variant") or ""),
             fast_path=True,
             route_id=route_id,
             route_version=str(fast_result.get("route_version") or ""),
@@ -274,6 +278,11 @@ def prepare_after_sales_turn(
         facts=match["facts"],
         validator=validator,
         allowed_numeric_claims=tuple(dict.fromkeys(allowed_numeric_claims)),
+        product_scope=(
+            str(fast_result.get("product_scope") or "")
+            or str(match["facts"].get("product") or "")
+        ),
+        product_variant=str(fast_result.get("product_variant") or ""),
         fast_path=bool(fast_context),
         route_id=str(fast_result.get("route_id") or match["facts"].get("workflow_id") or "facts"),
         route_version=str(fast_result.get("route_version") or ""),
@@ -327,6 +336,11 @@ def _render_fast_response_context(
         f"预算动作：{gate.get('pipeline_action', 'continue_final_answer')}",
         f"首轮文件数：{len(initial_files)}",
     ]
+    product_identity = plan.get("product_identity") or {}
+    if product_identity.get("product_scope_confirmed"):
+        lines.append(f"已识别产品：{product_identity.get('product_scope', '')}")
+        if product_identity.get("product_variant"):
+            lines.append(f"产品变体：{product_identity.get('product_variant')}")
     if initial_files:
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
     lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
@@ -336,6 +350,12 @@ def _render_fast_response_context(
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
         "route_version": runtime_preflight.get("route_version", ""),
         "source_paths": tuple(initial_files),
+        "product_scope": str(product_identity.get("product_scope") or "")
+        if product_identity.get("product_scope_confirmed")
+        else "",
+        "product_variant": str(product_identity.get("product_variant") or "")
+        if product_identity.get("product_scope_confirmed")
+        else "",
     }
 
 

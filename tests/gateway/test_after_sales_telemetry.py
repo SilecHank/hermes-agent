@@ -10,6 +10,7 @@ def test_runtime_event_is_sanitized_and_versioned(tmp_path):
         platform="weixin",
         session_key="weixin:dm:secret-user",
         product_scope="NIFTY",
+        product_variant="全因",
         route_id="static:nifty-parameter",
         route_version="2026-07-29",
         fast_path=True,
@@ -33,6 +34,7 @@ def test_runtime_event_is_sanitized_and_versioned(tmp_path):
     assert event["schema_version"] == 2
     assert event["session_hash"] != "weixin:dm:secret-user"
     assert event["product_scope"] == "NIFTY"
+    assert event["product_variant"] == "全因"
     assert event["fast_path"] is True
     assert event["tool_count"] == 1
     assert event["retrieval_profile"] == "direct"

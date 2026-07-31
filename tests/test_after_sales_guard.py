@@ -79,6 +79,22 @@ def test_prepare_after_sales_turn_uses_fast_preflight_without_fact_card_match():
     assert all(Path(path).is_absolute() for path in turn.source_paths)
 
 
+def test_fast_turn_injects_explicit_product_variant_identity():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="地贫508为什么不能检测三联体？",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.product_scope == "地贫"
+    assert turn.product_variant == "508"
+    assert "已识别产品：地贫" in turn.context
+    assert "产品变体：508" in turn.context
+    assert "thalassemia-508-mutations.md" in turn.context
+
+
 def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_number():
     turn = prepare_after_sales_turn(
         _config_with_fast_response(),
