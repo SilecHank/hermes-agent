@@ -4870,9 +4870,14 @@ class BasePlatformAdapter(ABC):
         # Offloaded: the sync hook must not block the loop.
         await asyncio.to_thread(self._apply_topic_recovery, event)
 
+        from gateway.session import group_sessions_per_user_for_source
+
         session_key = build_session_key(
             event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            group_sessions_per_user=group_sessions_per_user_for_source(
+                event.source,
+                self.config.extra.get("group_sessions_per_user", True),
+            ),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
 

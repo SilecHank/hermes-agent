@@ -1,7 +1,9 @@
+import asyncio
 import importlib
 import sys
 import types
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -106,6 +108,54 @@ async def test_qq_message_dedup_keeps_new_group_messages(monkeypatch):
         ("msg-1", "继续原任务", "member-a"),
         ("msg-2", "继续原任务", "member-b"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_qq_active_group_routes_other_member_reply_to_clarify_not_busy_handler():
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    adapter.config.extra["group_sessions_per_user"] = True
+    adapter._message_handler = AsyncMock(return_value="")
+    adapter._busy_session_handler = AsyncMock(return_value=True)
+    session_key = "agent:main:qqbot:group:group-1"
+    adapter._active_sessions[session_key] = asyncio.Event()
+    entry = clarify_gateway.register(
+        clarify_id="clarify-active-qq-group",
+        session_key=session_key,
+        question="卡在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    clarify_gateway.mark_awaiting_text(entry.clarify_id)
+    event = MessageEvent(
+        text="2",
+        message_type=MessageType.TEXT,
+        source=_qq_group_source("group-1", "member-b"),
+        message_id="msg-clarify-answer",
+    )
+    try:
+        await adapter.handle_message(event)
+    finally:
+        clarify_gateway.clear_session(session_key)
+
+    adapter._message_handler.assert_awaited_once_with(event)
+    adapter._busy_session_handler.assert_not_awaited()
+
+
+def test_qq_busy_ack_does_not_expose_english_internal_template():
+    from gateway.run import _qq_busy_ack_message
+
+    messages = {
+        _qq_busy_ack_message(steer=True, redirect=False, queue=False),
+        _qq_busy_ack_message(steer=False, redirect=True, queue=False),
+        _qq_busy_ack_message(steer=False, redirect=False, queue=True),
+        _qq_busy_ack_message(steer=False, redirect=False, queue=False),
+    }
+    assert len(messages) == 4
+    assert all("Interrupting" not in message for message in messages)
+    assert all("current task" not in message for message in messages)
 
 
 @pytest.mark.asyncio

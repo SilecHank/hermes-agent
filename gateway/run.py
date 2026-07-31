@@ -910,6 +910,17 @@ def _clarify_timeout_for_platform(platform: "Platform", configured: float) -> fl
     return timeout
 
 
+def _qq_busy_ack_message(*, steer: bool, redirect: bool, queue: bool) -> str:
+    """Return a direct Chinese QQ busy-state acknowledgment."""
+    if steer:
+        return "⏩ 已补充到当前任务，下一步会按这条消息继续。"
+    if redirect:
+        return "↪️ 已收到修正，正在调整当前任务。"
+    if queue:
+        return "⏳ 当前任务仍在处理，这条消息已排到下一步。"
+    return "⚡ 已停止当前步骤，马上按这条消息继续。"
+
+
 def _is_fresh_gateway_interruption(
     value: Any,
     *,
@@ -6560,6 +6571,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message = (
                 f"⚡ Interrupting current task{status_detail}. "
                 f"I'll respond to your message shortly."
+            )
+
+        if event.source.platform == Platform.QQBOT:
+            message = _qq_busy_ack_message(
+                steer=is_steer_mode,
+                redirect=is_redirect_mode,
+                queue=is_queue_mode,
             )
 
         # First-touch onboarding: the very first time a user sends a message
