@@ -17429,6 +17429,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapters = getattr(self, "adapters", None) or {}
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+        from gateway.slash_access import policy_for_source
+
+        _profile = getattr(context.source, "profile", "") or ""
+        if not _profile:
+            try:
+                _profile = self._profile_name_for_source(context.source)
+            except Exception:
+                _profile = ""
+        _slash_policy = policy_for_source(getattr(self, "config", None), context.source)
+        _ivd_admin = bool(
+            context.source.platform == Platform.TELEGRAM
+            and _profile == "telegram"
+            and _slash_policy.enabled
+            and _slash_policy.is_admin(context.source.user_id)
+        )
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -17438,8 +17453,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
-            profile=getattr(context.source, "profile", "") or "",
+            profile=_profile,
             async_delivery=_async_delivery,
+            ivd_admin=_ivd_admin,
         )
 
     def _clear_session_env(self, tokens: list) -> None:

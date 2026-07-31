@@ -1,9 +1,10 @@
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
@@ -82,6 +83,50 @@ def test_session_source_uses_contextvars(monkeypatch):
     clear_session_vars(tokens)
 
     assert get_session_env("HERMES_SESSION_SOURCE") == ""
+
+
+def test_ivd_admin_context_is_bound_and_cleared():
+    tokens = set_session_vars(
+        platform="telegram",
+        profile="telegram",
+        user_id="owner",
+        chat_id="owner",
+        ivd_admin=True,
+    )
+    assert get_session_env("HERMES_SESSION_IVD_ADMIN") == "1"
+    clear_session_vars(tokens)
+    assert get_session_env("HERMES_SESSION_IVD_ADMIN") == ""
+
+
+def test_gateway_binds_ivd_admin_only_for_trusted_telegram_profile():
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = SimpleNamespace(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                extra={"allow_admin_from": ["owner"]},
+            )
+        }
+    )
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        profile="telegram",
+        chat_id="owner",
+        chat_type="private",
+        user_id="owner",
+    )
+    context = SessionContext(source=source, connected_platforms=[], home_channels={})
+
+    tokens = runner._set_session_env(context)
+    assert get_session_env("HERMES_SESSION_IVD_ADMIN") == "1"
+    runner._clear_session_env(tokens)
+
+    source.user_id = "guest"
+    tokens = runner._set_session_env(context)
+    assert get_session_env("HERMES_SESSION_IVD_ADMIN") == ""
+    runner._clear_session_env(tokens)
 
 
 def test_clear_session_env_restores_previous_state(monkeypatch):
@@ -393,4 +438,3 @@ async def test_gateway_executor_refuses_resurrection_after_shutdown():
             await runner._run_in_executor_with_context(lambda: "second")
     finally:
         runner._shutdown_executor()
-

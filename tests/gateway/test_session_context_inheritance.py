@@ -178,6 +178,18 @@ def test_reset_session_vars_restores_unset_not_empty():
         assert var.get() is _UNSET, f"{name} is {var.get()!r}, expected _UNSET"
 
 
+def test_ivd_admin_context_is_task_local():
+    async def observe(enabled):
+        set_session_vars(platform="telegram", profile="telegram", ivd_admin=enabled)
+        await asyncio.sleep(0)
+        return sc.get_session_env("HERMES_SESSION_IVD_ADMIN")
+
+    async def run():
+        return await asyncio.gather(observe(True), observe(False))
+
+    assert asyncio.run(run()) == ["1", ""]
+
+
 # ---------------------------------------------------------------------------
 # Async-delivery capability inheritance (the sibling var outside _VAR_MAP)
 # ---------------------------------------------------------------------------
