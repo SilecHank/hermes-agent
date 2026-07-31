@@ -1,0 +1,290 @@
+import importlib
+import sys
+import types
+from types import SimpleNamespace
+
+import pytest
+
+from gateway.config import Platform
+from gateway.config import PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.run import GatewayRunner
+from gateway.session import SessionSource
+from tools import clarify_gateway
+
+
+def _runner(*, group_sessions_per_user: bool = True) -> GatewayRunner:
+    runner = object.__new__(GatewayRunner)
+    runner.session_store = None
+    runner.config = SimpleNamespace(
+        group_sessions_per_user=group_sessions_per_user,
+        thread_sessions_per_user=False,
+        multiplex_profiles=False,
+    )
+    return runner
+
+
+def _qq_group_source(group: str, member: str) -> SessionSource:
+    return SessionSource(
+        platform=Platform.QQBOT,
+        chat_id=group,
+        chat_type="group",
+        user_id=member,
+        user_name=f"member-{member}",
+    )
+
+
+def test_qq_clarify_timeout_is_bounded_without_changing_other_platforms():
+    from gateway.run import _clarify_timeout_for_platform
+
+    assert _clarify_timeout_for_platform(Platform.QQBOT, 600) == 120
+    assert _clarify_timeout_for_platform(Platform.WECOM, 600) == 600
+    assert _clarify_timeout_for_platform(Platform.QQBOT, 30) == 30
+
+
+def test_qq_group_members_share_one_session_without_losing_sender_identity():
+    runner = _runner(group_sessions_per_user=True)
+    member_a = _qq_group_source("group-1", "member-a")
+    member_b = _qq_group_source("group-1", "member-b")
+    other_group = _qq_group_source("group-2", "member-a")
+
+    key_a = runner._session_key_for_source(member_a)
+    key_b = runner._session_key_for_source(member_b)
+
+    assert key_a == "agent:main:qqbot:group:group-1"
+    assert key_b == key_a
+    assert runner._session_key_for_source(other_group) != key_a
+    assert member_a.user_id == "member-a"
+    assert member_b.user_id == "member-b"
+
+
+def test_qq_group_member_can_resolve_clarify_started_by_another_member():
+    runner = _runner(group_sessions_per_user=True)
+    key_a = runner._session_key_for_source(_qq_group_source("group-1", "member-a"))
+    key_b = runner._session_key_for_source(_qq_group_source("group-1", "member-b"))
+    entry = clarify_gateway.register(
+        clarify_id="clarify-qq-group",
+        session_key=key_a,
+        question="请确认故障发生在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    clarify_gateway.mark_awaiting_text(entry.clarify_id)
+    try:
+        assert clarify_gateway.resolve_text_response_for_session(key_b, "2") is True
+        assert entry.response == "数据导入"
+    finally:
+        clarify_gateway.clear_session(key_a)
+
+
+@pytest.mark.asyncio
+async def test_qq_message_dedup_keeps_new_group_messages(monkeypatch):
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    seen = []
+
+    async def capture_group(payload, msg_id, content, author, timestamp):
+        seen.append((msg_id, content, author.get("member_openid")))
+
+    monkeypatch.setattr(adapter, "_handle_group_message", capture_group)
+    base = {
+        "group_openid": "group-1",
+        "content": "继续原任务",
+        "author": {"member_openid": "member-a"},
+        "timestamp": "2026-07-31T11:00:00+08:00",
+    }
+
+    await adapter._on_message("GROUP_AT_MESSAGE_CREATE", {**base, "id": "msg-1"})
+    await adapter._on_message("GROUP_AT_MESSAGE_CREATE", {**base, "id": "msg-1"})
+    await adapter._on_message(
+        "GROUP_AT_MESSAGE_CREATE",
+        {**base, "id": "msg-2", "author": {"member_openid": "member-b"}},
+    )
+
+    assert seen == [
+        ("msg-1", "继续原任务", "member-a"),
+        ("msg-2", "继续原任务", "member-b"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_qq_clarify_numbered_fallback_is_plain_chinese(monkeypatch):
+    from gateway.platforms.base import SendResult
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    sent = []
+
+    async def capture_send(chat_id, content, reply_to=None, metadata=None):
+        sent.append(content)
+        return SendResult(success=True, message_id="clarify-message")
+
+    monkeypatch.setattr(adapter, "send", capture_send)
+    entry = clarify_gateway.register(
+        clarify_id="clarify-chinese",
+        session_key="agent:main:qqbot:group:group-1",
+        question="HALOS 当前卡在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    try:
+        result = await adapter.send_clarify(
+            chat_id="group-1",
+            question=entry.question,
+            choices=entry.choices,
+            clarify_id=entry.clarify_id,
+            session_key=entry.session_key,
+        )
+    finally:
+        clarify_gateway.clear_session(entry.session_key)
+
+    assert result.success is True
+    assert sent == [
+        "❓ HALOS 当前卡在哪一步？\n\n"
+        "1. 建任务\n"
+        "2. 数据导入\n\n"
+        "请回复序号、选项文字，或直接说明实际情况。"
+    ]
+    assert "Reply with" not in sent[0]
+    assert "own answer" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_qq_expired_group_reply_anchor_falls_back_once_without_anchor(monkeypatch):
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    adapter._chat_type_map["group-1"] = "group"
+    attempts = []
+
+    async def send_group(chat_id, content, reply_to=None, keyboard=None):
+        attempts.append(reply_to)
+        if reply_to is not None:
+            raise RuntimeError("QQ Bot API error [400]: 回复消息msg_id已过期")
+        return SendResult(success=True, message_id="fresh-message")
+
+    monkeypatch.setattr(adapter, "_send_group_text", send_group)
+
+    result = await adapter._send_chunk(
+        "group-1",
+        "继续原任务",
+        reply_to="expired-message",
+    )
+
+    assert result.success is True
+    assert result.message_id == "fresh-message"
+    assert attempts == ["expired-message", None]
+
+
+class _ClarifyCaptureAdapter(BasePlatformAdapter):
+    SUPPORTS_MESSAGE_EDITING = False
+
+    def __init__(self):
+        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.QQBOT)
+        self.sent = []
+
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        self.sent.append(content)
+        return SendResult(success=True, message_id=f"m-{len(self.sent)}")
+
+    async def send_clarify(
+        self, chat_id, question, choices, clarify_id, session_key, metadata=None,
+    ) -> SendResult:
+        clarify_gateway.mark_awaiting_text(clarify_id)
+        return await self.send(chat_id, f"❓ {question}\n\n请直接回复。")
+
+    async def send_typing(self, chat_id, metadata=None) -> None:
+        return None
+
+    async def stop_typing(self, chat_id) -> None:
+        return None
+
+    async def get_chat_info(self, chat_id: str):
+        return {"id": chat_id}
+
+
+class _BlockingClarifyAgent:
+    runner = None
+    session_key = ""
+
+    def __init__(self, **kwargs):
+        self.tools = []
+        self.clarify_callback = None
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        if self.runner is not None and self.session_key:
+            self.runner._running_agents[self.session_key] = self
+
+    def get_activity_summary(self):
+        return {
+            "api_call_count": 1,
+            "max_iterations": 10,
+            "current_tool": "clarify",
+            "last_activity_desc": "clarify",
+        }
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        response = self.clarify_callback("请确认当前步骤", ["建任务", "数据导入"])
+        return {"final_response": response, "messages": [], "api_calls": 1}
+
+
+@pytest.mark.asyncio
+async def test_qq_clarify_wait_has_one_chinese_state_and_no_working_heartbeat(
+    monkeypatch, tmp_path,
+):
+    adapter = _ClarifyCaptureAdapter()
+    runner = _runner(group_sessions_per_user=True)
+    runner.adapters = {Platform.QQBOT: adapter}
+    runner._voice_mode = {}
+    runner._prefill_messages = []
+    runner._ephemeral_system_prompt = ""
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._session_db = None
+    runner._running_agents = {}
+    runner._session_run_generation = {}
+    runner.hooks = SimpleNamespace(loaded_hooks=False)
+    runner.config.stt_enabled = False
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _BlockingClarifyAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.03")
+    monkeypatch.setattr(clarify_gateway, "get_clarify_timeout", lambda: 0.12)
+
+    source = _qq_group_source("group-1", "member-a")
+    session_key = runner._session_key_for_source(source)
+    _BlockingClarifyAgent.runner = runner
+    _BlockingClarifyAgent.session_key = session_key
+    result = await runner._run_agent(
+        message="继续刚才的问题",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-qq-clarify",
+        session_key=session_key,
+    )
+    _BlockingClarifyAgent.runner = None
+    _BlockingClarifyAgent.session_key = ""
+
+    assert "user did not respond" in result["final_response"]
+    assert sum("等待回复" in message for message in adapter.sent) == 1, adapter.sent
+    assert all("Working" not in message for message in adapter.sent)
+    assert all("clarify" not in message.lower() for message in adapter.sent)
+    assert clarify_gateway.has_pending(session_key) is False

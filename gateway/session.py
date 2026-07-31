@@ -1083,6 +1083,23 @@ def _session_key_namespace(profile: Optional[str]) -> str:
     return f"agent:{profile}"
 
 
+def group_sessions_per_user_for_source(
+    source: SessionSource,
+    configured: bool,
+) -> bool:
+    """Return the effective participant-isolation policy for ``source``.
+
+    A QQ group is one collaborative conversation. Keeping ``member_openid``
+    in its session key splits adjacent messages and strands a clarify request
+    when another authorized member answers. Use the group OpenID as the QQ
+    conversation boundary while preserving ``source.user_id`` for attribution
+    and authorization. Other platforms retain the configured global policy.
+    """
+    if source.platform == Platform.QQBOT and source.chat_type == "group":
+        return False
+    return bool(configured)
+
+
 def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
@@ -1625,7 +1642,10 @@ class SessionStore:
         """Generate a session key from a source."""
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            group_sessions_per_user=group_sessions_per_user_for_source(
+                source,
+                getattr(self.config, "group_sessions_per_user", True),
+            ),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
             profile=self._resolve_profile_for_key(source),
         )

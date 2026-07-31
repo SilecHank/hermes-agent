@@ -2469,6 +2469,41 @@ class QQAdapter(BasePlatformAdapter):
             reply_to = None
         return last_result
 
+    async def send_clarify(
+            self,
+            chat_id: str,
+            question: str,
+            choices: Optional[list],
+            clarify_id: str,
+            session_key: str,
+            metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a QQ clarify prompt using direct Chinese text.
+
+        QQ group/C2C surfaces do not provide the gateway's generic inline
+        clarify UI, so typed replies are captured against ``clarify_id``.
+        Keep the instruction user-facing and Chinese instead of exposing the
+        base adapter's English implementation template.
+        """
+        del session_key
+        if choices:
+            lines = [f"❓ {question}", ""]
+            lines.extend(
+                f"{index}. {choice}"
+                for index, choice in enumerate(choices, start=1)
+            )
+            lines.extend(["", "请回复序号、选项文字，或直接说明实际情况。"])
+            text = "\n".join(lines)
+            from tools.clarify_gateway import mark_awaiting_text
+            mark_awaiting_text(clarify_id)
+        else:
+            text = f"❓ {question}\n\n请直接回复需要补充的信息。"
+        return await self.send(
+            chat_id=chat_id,
+            content=text,
+            metadata=metadata,
+        )
+
     async def _send_chunk(
             self,
             chat_id: str,
@@ -2478,6 +2513,7 @@ class QQAdapter(BasePlatformAdapter):
         """Send a single chunk with retry + exponential backoff."""
         last_exc: Optional[Exception] = None
         chat_type = self._guess_chat_type(chat_id)
+        expired_anchor_fallback_used = False
 
         for attempt in range(3):
             try:
@@ -2494,6 +2530,24 @@ class QQAdapter(BasePlatformAdapter):
             except Exception as exc:
                 last_exc = exc
                 err = str(exc).lower()
+                if (
+                    reply_to
+                    and not expired_anchor_fallback_used
+                    and (
+                        "msg_id已过期" in err
+                        or "msg_id expired" in err
+                        or "reply message expired" in err
+                    )
+                ):
+                    logger.info(
+                        "[%s] Reply anchor expired for %s; retrying once "
+                        "without msg_id",
+                        self._log_tag,
+                        chat_id,
+                    )
+                    reply_to = None
+                    expired_anchor_fallback_used = True
+                    continue
                 # Permanent errors — don't retry
                 if any(
                         k in err

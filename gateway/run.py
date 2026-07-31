@@ -896,6 +896,20 @@ def _float_env(name: str, default: float) -> float:
         return float(default)
 
 
+def _clarify_timeout_for_platform(platform: "Platform", configured: float) -> float:
+    """Return the effective clarify timeout for a messaging platform.
+
+    QQ reply anchors expire while a long clarify is waiting. Bound QQ waits
+    to two minutes so an abandoned prompt releases the session before the
+    original message becomes unusable. Other surfaces retain their configured
+    timeout, including the existing unlimited (non-positive) behavior.
+    """
+    timeout = float(configured)
+    if platform == Platform.QQBOT:
+        return min(timeout, 120.0) if timeout > 0 else 120.0
+    return timeout
+
+
 def _is_fresh_gateway_interruption(
     value: Any,
     *,
@@ -4228,9 +4242,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _profile = get_active_profile_name() or "default"
                 except Exception:
                     _profile = None
+        from gateway.session import group_sessions_per_user_for_source
+
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
+            group_sessions_per_user=group_sessions_per_user_for_source(
+                source,
+                getattr(config, "group_sessions_per_user", True),
+            ),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
             profile=_profile,
         )
@@ -12464,7 +12483,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _pending_stt_prepared
             else event.text
         ) or ""
-        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
+        from gateway.session import group_sessions_per_user_for_source
+
+        _group_sessions_per_user = group_sessions_per_user_for_source(
+            source,
+            getattr(self.config, "group_sessions_per_user", True),
+        )
         _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
         # Prefer the already resolved session key from the caller so this write
         # key matches the consume key at the run_conversation site. Fall back
@@ -21931,7 +21955,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _clarify_mod.clear_session(session_key or "")
                     return "[clarify prompt could not be delivered]"
 
-                timeout = _clarify_mod.get_clarify_timeout()
+                timeout = _clarify_timeout_for_platform(
+                    source.platform,
+                    _clarify_mod.get_clarify_timeout(),
+                )
                 response = _clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
                 if response is None or response == "":
                     # Timeout or session-boundary cancellation
@@ -22863,8 +22890,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if _long_running_mode == "off":
             _NOTIFY_INTERVAL = None
         _notify_start = time.time()
+        _clarify_wait_notice_sent = False
 
         async def _notify_long_running():
+            nonlocal _clarify_wait_notice_sent
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
             _notify_adapter = self._adapter_for_source(source)
@@ -22892,6 +22921,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_key, agent_holder[0], _exec_ref
                 ):
                     break
+                try:
+                    from tools.clarify_gateway import has_pending as _has_pending_clarify
+
+                    _waiting_for_clarify = bool(
+                        session_key and _has_pending_clarify(session_key)
+                    )
+                except Exception:
+                    _waiting_for_clarify = False
+                if _waiting_for_clarify:
+                    if not _clarify_wait_notice_sent:
+                        _clarify_wait_notice_sent = True
+                        try:
+                            await _notify_adapter.send(
+                                source.chat_id,
+                                "⏸️ 等待回复 — 请直接回答上方问题；收到后会继续原任务。",
+                                metadata=_non_conversational_metadata(
+                                    _status_thread_metadata,
+                                    platform=source.platform,
+                                ),
+                            )
+                        except Exception as _clarify_notice_exc:
+                            logger.debug(
+                                "Clarify waiting-state notification error: %s",
+                                _clarify_notice_exc,
+                            )
+                    continue
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available. Default
                 # heartbeat is terse: elapsed + current tool. Verbose
