@@ -17,7 +17,7 @@ KB = _knowledgehub_root()
 
 def test_knowledgehub_root_honors_cross_platform_override():
     with patch.dict("os.environ", {"IVD_KB_ROOT": "/tmp/ivd-kb"}):
-        assert _knowledgehub_root() == Path("/tmp/ivd-kb")
+        assert _knowledgehub_root() == Path("/tmp/ivd-kb").resolve()
 
 
 def _config(enabled=True):
