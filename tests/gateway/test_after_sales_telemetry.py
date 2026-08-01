@@ -70,6 +70,31 @@ def test_runtime_event_never_infers_missing_product_scope():
     assert event["product_scope"] == ""
 
 
+def test_runtime_event_records_sanitized_preflight_gate_decision():
+    event = build_runtime_event(
+        platform="qqbot",
+        session_key="session",
+        product_scope="",
+        route_id="blocked-test",
+        route_version="test-v1",
+        fast_path=True,
+        elapsed_seconds=0,
+        api_calls=0,
+        tool_names=[],
+        source_paths=[],
+        validation_status="preflight_blocked",
+        preflight_decision="block",
+        preflight_action="stop_before_answer_generation",
+        preflight_issues=["pending_candidate_source_used"],
+    )
+
+    assert event["pre_answer_budget_gate"] == {
+        "decision": "block",
+        "pipeline_action": "stop_before_answer_generation",
+        "issues": ["pending_candidate_source_used"],
+    }
+
+
 def test_runtime_event_records_sanitized_retrieval_miss_preview():
     event = build_runtime_event(
         platform="weixin",

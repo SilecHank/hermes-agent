@@ -21342,6 +21342,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _after_sales_turn.facts.get("workflow_id", ""),
                         _after_sales_turn.facts.get("current_stage", ""),
                     )
+                    if _after_sales_turn.blocks_answer_generation:
+                        from gateway.after_sales_guard import build_preflight_block_result
+                        from gateway.after_sales_telemetry import (
+                            append_runtime_event,
+                            build_runtime_event,
+                        )
+                        from hermes_constants import get_hermes_home
+
+                        _blocked_result = build_preflight_block_result(
+                            _after_sales_turn, message
+                        )
+                        try:
+                            _blocked_event = build_runtime_event(
+                                platform=platform_key,
+                                session_key=session_key or session_id or "",
+                                product_scope=_after_sales_turn.product_scope,
+                                product_variant=_after_sales_turn.product_variant,
+                                route_id=_after_sales_turn.route_id,
+                                route_version=_after_sales_turn.route_version,
+                                fast_path=_after_sales_turn.fast_path,
+                                elapsed_seconds=0,
+                                api_calls=0,
+                                tool_names=(),
+                                source_paths=_after_sales_turn.source_paths,
+                                validation_status="preflight_blocked",
+                                question_text=_ivd_question_text,
+                                preflight_decision=_after_sales_turn.preflight_decision,
+                                preflight_action=_after_sales_turn.preflight_action,
+                                preflight_issues=_after_sales_turn.preflight_issues,
+                            )
+                            _guard_config = user_config.get("after_sales_guard") or {}
+                            _telemetry_path = _guard_config.get("runtime_events_path") or (
+                                get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"
+                            )
+                            append_runtime_event(_telemetry_path, _blocked_event)
+                        except Exception as _blocked_telemetry_exc:
+                            logger.warning(
+                                "IVD blocked-preflight telemetry skipped: %s",
+                                _blocked_telemetry_exc,
+                            )
+                        return _blocked_result
             except Exception as _guard_exc:
                 logger.warning(
                     "After-sales workflow fact injection skipped: %s", _guard_exc
@@ -22573,6 +22614,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         validation_status=_validation_status,
                         question_text=_ivd_question_text,
                         retrieval_snapshot=_ivd_retrieval_snapshot,
+                        preflight_decision=(
+                            _after_sales_turn.preflight_decision
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        preflight_action=(
+                            _after_sales_turn.preflight_action
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        preflight_issues=(
+                            _after_sales_turn.preflight_issues
+                            if _after_sales_turn is not None
+                            else ()
+                        ),
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (
                         get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"

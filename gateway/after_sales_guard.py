@@ -33,6 +33,16 @@ class AfterSalesTurn:
     route_version: str = ""
     source_paths: tuple[str, ...] = ()
     requires_source_validation: bool = False
+    preflight_decision: str = ""
+    preflight_action: str = ""
+    preflight_issues: tuple[str, ...] = ()
+
+    @property
+    def blocks_answer_generation(self) -> bool:
+        return self.preflight_decision == "block" or self.preflight_action in {
+            "stop_before_answer_generation",
+            "stop_before_final_answer",
+        }
 
     @property
     def has_validator(self) -> bool:
@@ -108,6 +118,33 @@ class AfterSalesTurn:
         }
 
 
+def build_preflight_block_result(
+    turn: AfterSalesTurn,
+    message: str,
+) -> dict[str, Any]:
+    """Build a direct Chinese response without invoking the model."""
+    fallback = (
+        "当前检索计划包含待验证或非正式来源，暂不能据此给出结论。"
+        "请补充产品名称、版本或SOP编号，我会改用正式来源继续核实。"
+    )
+    return {
+        "final_response": fallback,
+        "messages": [
+            {"role": "user", "content": str(message or "")},
+            {"role": "assistant", "content": fallback},
+        ],
+        "api_calls": 0,
+        "completed": True,
+        "partial": False,
+        "interrupted": False,
+        "error": None,
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "agent_persisted": False,
+        "preflight_blocked": True,
+    }
+
+
 @dataclass(frozen=True)
 class CriticalAfterSalesValidator:
     """Callable policy that prevents unvalidated formal answers from escaping."""
@@ -132,6 +169,17 @@ def _normalize_numeric_claim(value: str) -> str:
         .replace("<=", "≤")
         .lower()
     )
+
+
+def _canonical_preflight_action(gate: dict[str, Any]) -> str:
+    decision = str(gate.get("decision") or "")
+    if decision == "block":
+        return "stop_before_answer_generation"
+    if decision in {"trim", "trim_context"}:
+        return "trim_context_before_answer_generation"
+    if decision == "allow":
+        return "continue_answer_generation"
+    return str(gate.get("pipeline_action") or "")
 
 
 def _trusted_tool_numeric_evidence(
@@ -251,6 +299,9 @@ def prepare_after_sales_turn(
             route_version=str(fast_result.get("route_version") or ""),
             source_paths=source_paths,
             requires_source_validation=requires_source_validation,
+            preflight_decision=str(fast_result.get("preflight_decision") or ""),
+            preflight_action=str(fast_result.get("preflight_action") or ""),
+            preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
         )
 
     context = module.render_fact_context(match)
@@ -294,6 +345,9 @@ def prepare_after_sales_turn(
                 if source.get("resolved_path")
             )
         ),
+        preflight_decision=str(fast_result.get("preflight_decision") or ""),
+        preflight_action=str(fast_result.get("preflight_action") or ""),
+        preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
     )
 
 
@@ -356,6 +410,9 @@ def _render_fast_response_context(
         "product_variant": str(product_identity.get("product_variant") or "")
         if product_identity.get("product_scope_confirmed")
         else "",
+        "preflight_decision": str(gate.get("decision") or ""),
+        "preflight_action": _canonical_preflight_action(gate),
+        "preflight_issues": tuple(str(item) for item in (gate.get("issues") or ())),
     }
 
 

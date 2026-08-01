@@ -83,6 +83,9 @@ def build_runtime_event(
     answer_text: str = "",
     question_text: str = "",
     retrieval_snapshot: dict[str, object] | None = None,
+    preflight_decision: str = "",
+    preflight_action: str = "",
+    preflight_issues: Iterable[str] = (),
 ) -> dict[str, object]:
     del answer_text
     tools = [str(name) for name in tool_names if str(name)]
@@ -93,8 +96,9 @@ def build_runtime_event(
         for stage in (retrieval.get("stages") or [])
         if str(stage)
     ][:4]
+    gate_issues = [str(item)[:64] for item in preflight_issues if str(item)][:8]
     preview = sanitize_question_preview(question_text)
-    return {
+    event = {
         "schema_version": 2,
         "event_type": "ivd_answer_turn",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -128,6 +132,13 @@ def build_runtime_event(
         ),
         "retrieval_stop_reason": str(retrieval.get("stop_reason") or "")[:64],
     }
+    if preflight_decision or preflight_action or gate_issues:
+        event["pre_answer_budget_gate"] = {
+            "decision": str(preflight_decision or "unknown")[:32],
+            "pipeline_action": str(preflight_action or "unknown")[:64],
+            "issues": gate_issues,
+        }
+    return event
 
 
 def append_runtime_event(path: str | Path, event: dict[str, object]) -> None:

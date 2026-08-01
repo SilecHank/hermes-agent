@@ -2,7 +2,11 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from gateway.after_sales_guard import CriticalAfterSalesValidator, prepare_after_sales_turn
+from gateway.after_sales_guard import (
+    CriticalAfterSalesValidator,
+    build_preflight_block_result,
+    prepare_after_sales_turn,
+)
 
 
 def _knowledgehub_root():
@@ -36,6 +40,48 @@ def _config_with_fast_response(enabled=True):
     config = _config(enabled=enabled)
     config["after_sales_guard"]["fast_response_module"] = str(KB / "scripts/hermes_fast_response_pipeline.py")
     return config
+
+
+def test_blocked_preflight_is_structured_and_stops_before_model(tmp_path):
+    module = tmp_path / "scripts" / "fake_fast_pipeline.py"
+    module.parent.mkdir()
+    module.write_text(
+        "def build_fast_response_plan(message, question_type='general'):\n"
+        "    return {\n"
+        "      'runtime_preflight': {'eligible': True, 'route_version': 'test-v1'},\n"
+        "      'answer_template': {'style': 'short_first'},\n"
+        "      'preflight_gate': {\n"
+        "        'decision': 'block',\n"
+        "        'pipeline_action': 'stop_before_final_answer',\n"
+        "        'issues': ['pending_candidate_source_used'],\n"
+        "      },\n"
+        "      'fast_path': {'route_id': 'blocked-test'},\n"
+        "      'initial_files': ['knowledge-base/candidates/pending.md'],\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(module)
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="qqbot",
+        message="这个候选结论可以直接回复吗？",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.preflight_decision == "block"
+    assert turn.preflight_action == "stop_before_answer_generation"
+    assert turn.blocks_answer_generation is True
+    assert turn.preflight_issues == ("pending_candidate_source_used",)
+
+    result = build_preflight_block_result(turn, "这个候选结论可以直接回复吗？")
+    assert result["api_calls"] == 0
+    assert result["agent_persisted"] is False
+    assert result["preflight_blocked"] is True
+    assert "待验证或非正式来源" in result["final_response"]
+    assert "pipeline" not in result["final_response"].casefold()
 
 
 def test_prepare_after_sales_turn_injects_verified_context():
