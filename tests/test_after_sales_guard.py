@@ -266,7 +266,7 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
     assert "与已核实的正式来源不一致" in unsupported["fallback"]
 
 
-def test_prepare_after_sales_turn_does_not_inject_unsafe_context_route():
+def test_unsafe_fast_route_injects_only_shared_answer_experience():
     turn = prepare_after_sales_turn(
         _config_with_fast_response(),
         platform="weixin",
@@ -274,7 +274,12 @@ def test_prepare_after_sales_turn_does_not_inject_unsafe_context_route():
         history=[],
     )
 
-    assert turn is None
+    assert turn is not None
+    assert "IVD售后统一回答规范" in turn.context
+    assert "快速回答管线" not in turn.context
+    assert "已识别产品" not in turn.context
+    assert turn.facts == {}
+    assert turn.has_validator is False
 
 
 def test_prepare_after_sales_turn_uses_recent_user_context():
