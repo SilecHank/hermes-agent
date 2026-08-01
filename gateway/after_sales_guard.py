@@ -182,6 +182,26 @@ def _canonical_preflight_action(gate: dict[str, Any]) -> str:
     return str(gate.get("pipeline_action") or "")
 
 
+def _render_answer_experience_context(
+    guard: dict[str, Any],
+    *,
+    platform: str,
+) -> str:
+    """Load the shared IVD answer policy beside the configured KB pipeline."""
+    fast_response_path = Path(str(guard.get("fast_response_module") or ""))
+    if not fast_response_path.is_file():
+        return ""
+    policy_path = fast_response_path.with_name("after_sales_platform_policy.py")
+    if not policy_path.is_file():
+        return ""
+    try:
+        module = _load_module(str(policy_path), policy_path.stat().st_mtime_ns)
+        render = getattr(module, "render_answer_experience_context")
+        return str(render(platform=platform) or "").strip()
+    except Exception:
+        return ""
+
+
 def _trusted_tool_numeric_evidence(
     messages: list[dict[str, Any]],
     source_paths: Any,
@@ -270,10 +290,17 @@ def prepare_after_sales_turn(
         validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
         match = module.match_case_facts(cards_dir, message=message, history=history)
 
+    experience_context = _render_answer_experience_context(
+        guard,
+        platform=platform,
+    )
     fast_result = _render_fast_response_context(guard, message=message, match=match)
     fast_context = str(fast_result.get("context") or "")
     if match is None:
-        if not fast_context:
+        combined_context = "\n\n".join(
+            item for item in (experience_context, fast_context) if item
+        )
+        if not combined_context:
             return None
         route_id = str(fast_result.get("route_id") or "fast_preflight")
         source_paths = tuple(fast_result.get("source_paths") or ())
@@ -284,7 +311,7 @@ def prepare_after_sales_turn(
             if item.get("role") == "user"
         ) + f" {message}"
         return AfterSalesTurn(
-            context=fast_context,
+            context=combined_context,
             facts={},
             validator=validator if requires_source_validation else None,
             allowed_numeric_claims=(
@@ -305,6 +332,8 @@ def prepare_after_sales_turn(
         )
 
     context = module.render_fact_context(match)
+    if experience_context:
+        context = f"{experience_context}\n\n{context}"
     if fast_context:
         context = f"{context}\n\n{fast_context}"
     recent_user_text = " ".join(

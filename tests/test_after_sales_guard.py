@@ -42,6 +42,87 @@ def _config_with_fast_response(enabled=True):
     return config
 
 
+def _write_experience_modules(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    fast = scripts / "hermes_fast_response_pipeline.py"
+    fast.write_text(
+        "def build_fast_response_plan(message, question_type='general'):\n"
+        "    return {'runtime_preflight': {'eligible': False}}\n",
+        encoding="utf-8",
+    )
+    (scripts / "after_sales_platform_policy.py").write_text(
+        "def render_answer_experience_context(*, platform):\n"
+        "    return '[统一体验]\\n先直接回答结论。\\n按顺序给出下一步动作。'\n",
+        encoding="utf-8",
+    )
+    return fast
+
+
+def test_unmatched_turn_still_receives_shared_answer_experience(tmp_path):
+    fast = _write_experience_modules(tmp_path)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+    config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
+    config["after_sales_guard"]["validator_module"] = str(tmp_path / "missing-validator.py")
+    config["after_sales_guard"]["cards_dir"] = str(tmp_path / "missing-cards")
+
+    contexts = {}
+    for platform in ("weixin", "wecom", "qqbot"):
+        turn = prepare_after_sales_turn(
+            config,
+            platform=platform,
+            message="这个异常应该先查什么？",
+            history=[],
+        )
+        assert turn is not None
+        contexts[platform] = turn.context
+        assert turn.facts == {}
+        assert turn.has_validator is False
+
+    assert len(set(contexts.values())) == 1
+    assert "先直接回答结论" in contexts["qqbot"]
+
+
+def test_matched_turn_composes_experience_with_facts_and_validator(tmp_path):
+    fast = _write_experience_modules(tmp_path)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="qqbot",
+        message="NIFTY手工实验文库浓度低怎么排查？",
+        history=[],
+    )
+
+    assert turn is not None
+    assert "[统一体验]" in turn.context
+    assert "当前测量节点：文库浓度质控" in turn.context
+    assert turn.has_validator is True
+
+
+def test_missing_experience_module_keeps_existing_fail_open_behavior(tmp_path):
+    fast = tmp_path / "hermes_fast_response_pipeline.py"
+    fast.write_text(
+        "def build_fast_response_plan(message, question_type='general'):\n"
+        "    return {'runtime_preflight': {'eligible': False}}\n",
+        encoding="utf-8",
+    )
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+    config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="qqbot",
+        message="这个异常应该先查什么？",
+        history=[],
+    )
+
+    assert turn is None
+
+
 def test_blocked_preflight_is_structured_and_stops_before_model(tmp_path):
     module = tmp_path / "scripts" / "fake_fast_pipeline.py"
     module.parent.mkdir()
