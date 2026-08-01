@@ -3267,6 +3267,7 @@ class SlackAdapter(BasePlatformAdapter):
                 async with create_ssrf_safe_async_client(
                     timeout=30.0,
                     follow_redirects=True,
+                    trust_env=False,
                     event_hooks={"response": [_ssrf_redirect_guard]},
                 ) as http_client:
                     for image_url, alt_text in chunk:
@@ -4062,6 +4063,7 @@ class SlackAdapter(BasePlatformAdapter):
             async with create_ssrf_safe_async_client(
                 timeout=30.0,
                 follow_redirects=True,
+                trust_env=False,
                 event_hooks={"response": [_ssrf_redirect_guard]},
             ) as client:
                 response = await client.get(image_url)
@@ -8109,6 +8111,7 @@ class SlackAdapter(BasePlatformAdapter):
         async with create_ssrf_safe_async_client(
             timeout=30.0,
             follow_redirects=True,
+            trust_env=False,
             event_hooks={"response": [_ssrf_redirect_guard]},
         ) as client:
             for attempt in range(3):
@@ -8185,6 +8188,7 @@ class SlackAdapter(BasePlatformAdapter):
         async with create_ssrf_safe_async_client(
             timeout=30.0,
             follow_redirects=True,
+            trust_env=False,
             event_hooks={"response": [_ssrf_redirect_guard]},
         ) as client:
             for attempt in range(3):

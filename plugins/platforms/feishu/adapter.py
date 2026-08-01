@@ -3455,6 +3455,7 @@ class FeishuAdapter(BasePlatformAdapter):
         async with create_ssrf_safe_async_client(
             timeout=30.0,
             follow_redirects=True,
+            trust_env=False,
             event_hooks={"response": [_ssrf_redirect_guard]},
         ) as client:
             response = await client.get(

@@ -370,6 +370,7 @@ def resolve_proxy_url(
     platform_env_var: str | None = None,
     *,
     target_hosts: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    include_macos_system_proxy: bool = True,
 ) -> str | None:
     """Return a proxy URL from env vars, or macOS system proxy.
 
@@ -394,6 +395,8 @@ def resolve_proxy_url(
             if should_bypass_proxy(target_hosts):
                 return None
             return normalize_proxy_url(value)
+    if not include_macos_system_proxy:
+        return None
     detected = normalize_proxy_url(_detect_macos_system_proxy())
     if detected and should_bypass_proxy(target_hosts):
         return None
@@ -771,6 +774,7 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
     async with create_ssrf_safe_async_client(
         timeout=30.0,
         follow_redirects=True,
+        trust_env=False,
         event_hooks={"response": [_ssrf_redirect_guard]},
     ) as client:
         for attempt in range(retries + 1):
@@ -891,6 +895,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
     async with create_ssrf_safe_async_client(
         timeout=30.0,
         follow_redirects=True,
+        trust_env=False,
         event_hooks={"response": [_ssrf_redirect_guard]},
     ) as client:
         for attempt in range(retries + 1):

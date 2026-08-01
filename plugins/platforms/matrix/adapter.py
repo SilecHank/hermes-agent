@@ -974,7 +974,10 @@ class MatrixAdapter(BasePlatformAdapter):
         self._reaction_redaction_tasks: Set[asyncio.Task] = set()
 
         # Proxy support — resolve once at init, reuse for all HTTP traffic.
-        self._proxy_url: str | None = resolve_proxy_url(platform_env_var="MATRIX_PROXY")
+        self._proxy_url: str | None = resolve_proxy_url(
+            platform_env_var="MATRIX_PROXY",
+            include_macos_system_proxy=False,
+        )
         if self._proxy_url:
             logger.info("Matrix: proxy configured — %s", self._proxy_url)
         try:
@@ -1939,7 +1942,7 @@ class MatrixAdapter(BasePlatformAdapter):
         except ImportError:
             from tools.url_safety import create_ssrf_safe_async_client
 
-            _httpx_kw: dict = {}
+            _httpx_kw: dict = {"trust_env": False}
             if self._proxy_url:
                 _httpx_kw["proxy"] = self._proxy_url
             _httpx_kw["event_hooks"] = {"response": [_ssrf_redirect_guard]}

@@ -7140,6 +7140,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 async with create_ssrf_safe_async_client(
                     timeout=30.0,
+                    trust_env=False,
                     event_hooks={"response": [_ssrf_redirect_guard]},
                 ) as client:
                     resp = await client.get(image_url)
