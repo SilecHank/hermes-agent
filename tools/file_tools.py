@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import posixpath
 import sys
 import threading
@@ -600,12 +601,23 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(_expand_tilde(filepath))
+    # macOS resolves its per-user temporary directory below /private/var.
+    # That directory is user-owned scratch space, not a system configuration
+    # target, so permit it before applying the broad /private/var guard.
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        Path(resolved).resolve(strict=False).relative_to(temp_root)
+        in_user_temp = True
+    except (OSError, ValueError):
+        in_user_temp = False
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
     for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+        if not in_user_temp and (
+            resolved.startswith(prefix) or normalized.startswith(prefix)
+        ):
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err

@@ -485,6 +485,7 @@ class TestMediaUpload:
     @pytest.mark.asyncio
     async def test_download_remote_bytes_blocks_connect_time_rebind(self, monkeypatch):
         import httpcore
+        import httpx._client
         from httpcore._backends.auto import AutoBackend
         from plugins.platforms.wecom.adapter import WeComAdapter
         from tools.url_safety import SSRFConnectionBlocked
@@ -498,6 +499,10 @@ class TestMediaUpload:
             "all_proxy",
         ):
             monkeypatch.delenv(proxy_var, raising=False)
+        # urllib.getproxies() also reads macOS System Configuration even after
+        # env vars are removed. Force this direct-connect security test to be
+        # platform-independent.
+        monkeypatch.setattr(httpx._client, "get_environment_proxies", lambda: {})
 
         answers = iter(("93.184.216.34", "169.254.169.254"))
 
