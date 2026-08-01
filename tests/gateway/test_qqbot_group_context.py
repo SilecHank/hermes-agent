@@ -11,7 +11,11 @@ from gateway.config import Platform
 from gateway.config import PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from gateway.session import (
+    SessionSource,
+    build_session_key,
+    is_shared_multi_user_session,
+)
 from tools import clarify_gateway
 
 
@@ -34,6 +38,56 @@ def _qq_group_source(group: str, member: str) -> SessionSource:
         user_id=member,
         user_name=f"member-{member}",
     )
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [Platform.QQBOT, Platform.WECOM, Platform.WEIXIN],
+)
+def test_ivd_groups_share_context_while_private_chats_stay_isolated(platform):
+    first_group_member = SessionSource(
+        platform=platform,
+        chat_id="group-1",
+        chat_type="group",
+        user_id="member-a",
+    )
+    second_group_member = SessionSource(
+        platform=platform,
+        chat_id="group-1",
+        chat_type="group",
+        user_id="member-b",
+    )
+    first_private_chat = SessionSource(
+        platform=platform,
+        chat_id="private-member-a",
+        chat_type="dm",
+        user_id="member-a",
+    )
+    second_private_chat = SessionSource(
+        platform=platform,
+        chat_id="private-member-b",
+        chat_type="dm",
+        user_id="member-b",
+    )
+
+    first_group_key = build_session_key(
+        first_group_member,
+        group_sessions_per_user=True,
+    )
+    second_group_key = build_session_key(
+        second_group_member,
+        group_sessions_per_user=True,
+    )
+
+    assert first_group_key == second_group_key
+    assert is_shared_multi_user_session(
+        first_group_member,
+        group_sessions_per_user=True,
+    ) is True
+    assert build_session_key(first_private_chat) != build_session_key(
+        second_private_chat
+    )
+    assert is_shared_multi_user_session(first_private_chat) is False
 
 
 def test_qq_clarify_timeout_is_bounded_without_changing_other_platforms():
@@ -60,10 +114,26 @@ def test_qq_group_members_share_one_session_without_losing_sender_identity():
     assert member_b.user_id == "member-b"
 
 
-def test_qq_group_member_can_resolve_clarify_started_by_another_member():
+@pytest.mark.parametrize(
+    "platform",
+    [Platform.QQBOT, Platform.WECOM, Platform.WEIXIN],
+)
+def test_ivd_group_member_can_resolve_clarify_started_by_another_member(platform):
     runner = _runner(group_sessions_per_user=True)
-    key_a = runner._session_key_for_source(_qq_group_source("group-1", "member-a"))
-    key_b = runner._session_key_for_source(_qq_group_source("group-1", "member-b"))
+    first_member = SessionSource(
+        platform=platform,
+        chat_id="group-1",
+        chat_type="group",
+        user_id="member-a",
+    )
+    second_member = SessionSource(
+        platform=platform,
+        chat_id="group-1",
+        chat_type="group",
+        user_id="member-b",
+    )
+    key_a = runner._session_key_for_source(first_member)
+    key_b = runner._session_key_for_source(second_member)
     entry = clarify_gateway.register(
         clarify_id="clarify-qq-group",
         session_key=key_a,

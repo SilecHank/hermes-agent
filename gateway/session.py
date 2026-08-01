@@ -1056,6 +1056,10 @@ def is_shared_multi_user_session(
       - Non-thread group/channel sessions are shared unless
         ``group_sessions_per_user`` is True (default: True = isolated).
     """
+    group_sessions_per_user = group_sessions_per_user_for_source(
+        source,
+        group_sessions_per_user,
+    )
     if source.chat_type == "dm":
         return False
     if source.thread_id:
@@ -1089,13 +1093,17 @@ def group_sessions_per_user_for_source(
 ) -> bool:
     """Return the effective participant-isolation policy for ``source``.
 
-    A QQ group is one collaborative conversation. Keeping ``member_openid``
-    in its session key splits adjacent messages and strands a clarify request
-    when another authorized member answers. Use the group OpenID as the QQ
-    conversation boundary while preserving ``source.user_id`` for attribution
-    and authorization. Other platforms retain the configured global policy.
+    IVD support groups on QQBot, WeCom, and Weixin are collaborative
+    conversations. Keeping the sender ID in a group session key splits
+    adjacent messages and strands a clarify request when another authorized
+    member answers. Use the platform group ID as the conversation boundary
+    while preserving ``source.user_id`` for attribution, authorization, and
+    deduplication. Private chats remain isolated by :func:`build_session_key`.
     """
-    if source.platform == Platform.QQBOT and source.chat_type == "group":
+    if (
+        source.platform in {Platform.QQBOT, Platform.WECOM, Platform.WEIXIN}
+        and source.chat_type == "group"
+    ):
         return False
     return bool(configured)
 
@@ -1138,6 +1146,10 @@ def build_session_key(
         shared session per chat.
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
+    group_sessions_per_user = group_sessions_per_user_for_source(
+        source,
+        group_sessions_per_user,
+    )
     ns = _session_key_namespace(profile)
     platform = source.platform.value
     slack_scope_id = (
