@@ -491,18 +491,27 @@ class LSPClient:
         if proc is None:
             return
         if proc.returncode is None:
+            # We already sent the protocol-level ``exit`` notification. Give
+            # the child watcher one short turn to observe a clean exit before
+            # escalating to SIGTERM. On macOS an already-exiting child can be
+            # reaped between the returncode check and terminate(), which also
+            # creates an avoidable PID-reuse signalling window.
             try:
-                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=0.1)
+                return
+            except asyncio.TimeoutError:
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=SHUTDOWN_GRACE)
-                except asyncio.TimeoutError:
+                    proc.terminate()
                     try:
-                        proc.kill()
-                        await proc.wait()
-                    except ProcessLookupError:
-                        pass
-            except ProcessLookupError:
-                pass
+                        await asyncio.wait_for(proc.wait(), timeout=SHUTDOWN_GRACE)
+                    except asyncio.TimeoutError:
+                        try:
+                            proc.kill()
+                            await proc.wait()
+                        except ProcessLookupError:
+                            pass
+                except ProcessLookupError:
+                    pass
 
     # ------------------------------------------------------------------
     # request / notification plumbing
