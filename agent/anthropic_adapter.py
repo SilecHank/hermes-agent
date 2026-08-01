@@ -926,16 +926,22 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
         logger.debug("Keychain: no entry found for 'Claude Code-credentials'")
         return None
 
-    raw = result.stdout.strip()
+    raw_output = result.stdout
+    if not isinstance(raw_output, (str, bytes, bytearray)):
+        logger.debug("Keychain: credentials command returned a non-text payload")
+        return None
+    raw = raw_output.strip()
     if not raw:
         return None
 
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         logger.debug("Keychain: credentials payload is not valid JSON")
         return None
 
+    if not isinstance(data, dict):
+        return None
     oauth_data = data.get("claudeAiOauth")
     if oauth_data and isinstance(oauth_data, dict):
         access_token = oauth_data.get("accessToken", "")

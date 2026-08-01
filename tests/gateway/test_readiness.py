@@ -18,6 +18,9 @@ def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monke
     with sqlite3.connect(home / "state.db") as conn:
         conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(
+        "gateway.readiness._probe_disk", lambda _home: {"status": "ok"}
+    )
 
     result = collect_runtime_readiness(
         configured_model="test/model",

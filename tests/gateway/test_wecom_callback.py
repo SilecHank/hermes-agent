@@ -10,6 +10,12 @@ from plugins.platforms.wecom.callback_adapter import WecomCallbackAdapter
 from plugins.platforms.wecom.wecom_crypto import WXBizMsgCrypt
 
 
+@pytest.fixture(autouse=True)
+def _stdlib_xml_parser_for_unit_tests(monkeypatch):
+    """Exercise callback routing even when the optional defusedxml extra is absent."""
+    monkeypatch.setattr("plugins.platforms.wecom.callback_adapter.ET", ET)
+
+
 def _app(name="test-app", corp_id="ww1234567890", agent_id="1000002"):
     return {
         "name": name,
@@ -345,5 +351,4 @@ class TestWecomCallbackBodySizeLimit:
         small = b"<xml><Encrypt>not-real</Encrypt></xml>"
         response = await adapter._handle_callback(self._request(small))
         assert response.status != 413
-
 
