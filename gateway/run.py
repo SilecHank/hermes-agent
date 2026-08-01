@@ -13261,12 +13261,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # only while the gateway process stays alive; the transcript marker is
         # the restart-safe authority. Run this after final session resolution
         # and turn-lease acquisition so aliases cannot race the lookup/write.
-        if (
-            event.message_id
-            and await self.async_session_store.has_platform_message_id(
-                session_entry.session_id, str(event.message_id)
-            )
-        ):
+        _durable_duplicate = False
+        if event.message_id:
+            _durable_duplicate = (
+                await self.async_session_store.has_platform_message_id(
+                    session_entry.session_id, str(event.message_id)
+                )
+            ) is True
+        if _durable_duplicate:
             logger.info(
                 "Skipping already-persisted inbound platform message "
                 "(message_id=%s) in session %s",
@@ -14440,12 +14442,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Dedupe: skip if this platform message_id is already in the
                 # transcript (prevents duplicate user turns on Telegram retries
                 # after transient failures). #47237
-                _skip_persist = (
-                    event.message_id
-                    and await self.async_session_store.has_platform_message_id(
-                        session_entry.session_id, str(event.message_id)
-                    )
-                )
+                _skip_persist = False
+                if event.message_id:
+                    _skip_persist = (
+                        await self.async_session_store.has_platform_message_id(
+                            session_entry.session_id, str(event.message_id)
+                        )
+                    ) is True
                 if _skip_persist:
                     logger.info(
                         "Skipping duplicate user turn "
