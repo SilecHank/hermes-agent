@@ -8417,6 +8417,46 @@ class SessionDB:
             )
             return cursor.fetchone() is not None
 
+    def attach_platform_message_id_to_latest_user(
+        self, session_id: str, platform_message_id: str
+    ) -> bool:
+        """Attach an inbound platform ID to the user row just flushed by Agent.
+
+        Gateway turns are serialized per session. The agent is the canonical
+        transcript writer, so the gateway must annotate that existing row
+        instead of inserting a duplicate user message. Repeating the same ID
+        is idempotent; a different ID never overwrites an already-labelled
+        turn.
+        """
+        if not session_id or not platform_message_id:
+            return False
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT 1 FROM messages "
+                "WHERE session_id = ? AND platform_message_id = ? LIMIT 1",
+                (session_id, platform_message_id),
+            ).fetchone()
+            if existing is not None:
+                return True
+
+            row = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                "AND active = 1 ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+
+            cursor = conn.execute(
+                "UPDATE messages SET platform_message_id = ? "
+                "WHERE id = ? AND platform_message_id IS NULL",
+                (platform_message_id, row[0]),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
     # =========================================================================
     # Export and cleanup
     # =========================================================================

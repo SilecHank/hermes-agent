@@ -123,6 +123,23 @@ def _assert_user_call_has_skip_db(calls, expected_skip_db: bool):
         )
 
 
+@pytest.mark.asyncio
+async def test_persisted_platform_message_id_skips_duplicate_before_agent_run(
+    monkeypatch, tmp_path
+):
+    """A platform retry after gateway restart must not run the model again."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner.session_store.has_platform_message_id.return_value = True
+    runner._run_agent = AsyncMock()
+
+    await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
+    )
+
+    runner._run_agent.assert_not_awaited()
+    runner.session_store.append_to_transcript.assert_not_called()
+
+
 # ── Test 1: agent_failed_early path uses skip_db=True ─────────────────
 
 
@@ -150,6 +167,9 @@ async def test_agent_failed_early_skip_db_when_agent_has_session_db(
 
     _assert_user_call_has_skip_db(
         runner.session_store.append_to_transcript.call_args_list, True
+    )
+    runner.session_store.attach_platform_message_id_to_latest_user.assert_called_once_with(
+        "sess-dedup", "msg-42"
     )
 
 
@@ -181,6 +201,7 @@ async def test_agent_failed_early_no_skip_db_when_no_session_db(
     _assert_user_call_has_skip_db(
         runner.session_store.append_to_transcript.call_args_list, False
     )
+    runner.session_store.attach_platform_message_id_to_latest_user.assert_not_called()
 
 
 # ── Test 3: not-new-messages path uses skip_db=True ───────────────────
@@ -209,6 +230,9 @@ async def test_not_new_messages_skip_db_when_agent_has_session_db(
 
     _assert_user_call_has_skip_db(
         runner.session_store.append_to_transcript.call_args_list, True
+    )
+    runner.session_store.attach_platform_message_id_to_latest_user.assert_called_once_with(
+        "sess-dedup", "msg-42"
     )
 
 

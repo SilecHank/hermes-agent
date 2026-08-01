@@ -3266,6 +3266,24 @@ class SessionStore:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
 
+    def attach_platform_message_id_to_latest_user(
+        self, session_id: str, platform_message_id: str
+    ) -> bool:
+        """Annotate the latest Agent-persisted user row without duplicating it."""
+        if not self._db:
+            return False
+        try:
+            return self._db.attach_platform_message_id_to_latest_user(
+                session_id, platform_message_id
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist inbound platform message ID for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> bool:
         """Replace the entire transcript for a session with new messages.
 

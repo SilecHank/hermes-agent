@@ -13257,6 +13257,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self._turn_lease_tokens = {}
                 self._turn_lease_tokens[(_quick_key, run_generation)] = _lease_token
 
+        # Durable platform retry guard. Adapter-local caches prevent duplicates
+        # only while the gateway process stays alive; the transcript marker is
+        # the restart-safe authority. Run this after final session resolution
+        # and turn-lease acquisition so aliases cannot race the lookup/write.
+        if (
+            event.message_id
+            and await self.async_session_store.has_platform_message_id(
+                session_entry.session_id, str(event.message_id)
+            )
+        ):
+            logger.info(
+                "Skipping already-persisted inbound platform message "
+                "(message_id=%s) in session %s",
+                event.message_id,
+                session_entry.session_id,
+            )
+            return
+
         # Load conversation history from transcript
         history = await self.async_session_store.load_transcript(session_entry.session_id)
         
@@ -14379,6 +14397,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # persistence contract explicit and lets any future non-persisting
             # runtime opt into a gateway-side write by returning False.
             agent_persisted = agent_result.get("agent_persisted", self._session_db is not None)
+
+            # The Agent owns normal transcript inserts, but it does not know
+            # the messaging platform's inbound message ID. Annotate the row it
+            # just flushed instead of re-inserting the user turn. This makes
+            # dedupe durable across gateway restarts for QQBot/WeCom/Weixin
+            # while preserving the single-writer contract (#860/#42039).
+            if agent_persisted and event.message_id:
+                await self.async_session_store.attach_platform_message_id_to_latest_user(
+                    session_entry.session_id, str(event.message_id)
+                )
 
             # Find only the NEW messages from this turn (skip history we loaded).
             # Use the filtered history length (history_offset) that was actually

@@ -61,6 +61,38 @@ class TestHasPlatformMessageId:
         assert store.has_platform_message_id("s1", "msg-456")
         assert not store.has_platform_message_id("s1", "msg-000")
 
+    def test_attach_id_to_latest_agent_persisted_user_turn(self, tmp_path):
+        """Gateway can annotate the user row already flushed by the agent."""
+        db = self._make_db(tmp_path)
+        db.append_message(session_id="s1", role="user", content="first")
+        db.append_message(session_id="s1", role="assistant", content="answer")
+        db.append_message(session_id="s1", role="user", content="second")
+
+        assert db.attach_platform_message_id_to_latest_user("s1", "msg-002")
+        assert db.has_platform_message_id("s1", "msg-002")
+
+        rows = db.get_messages_as_conversation("s1")
+        user_rows = [row for row in rows if row["role"] == "user"]
+        assert user_rows[0].get("message_id") is None
+        assert user_rows[1]["message_id"] == "msg-002"
+
+    def test_attach_is_idempotent_and_does_not_relabel_older_turn(self, tmp_path):
+        db = self._make_db(tmp_path)
+        db.append_message(session_id="s1", role="user", content="first")
+
+        assert db.attach_platform_message_id_to_latest_user("s1", "msg-001")
+        assert db.attach_platform_message_id_to_latest_user("s1", "msg-001")
+        assert not db.attach_platform_message_id_to_latest_user("s1", "msg-002")
+        assert db.has_platform_message_id("s1", "msg-001")
+        assert not db.has_platform_message_id("s1", "msg-002")
+
+    def test_session_store_attach_wrapper_fails_closed_without_db(self):
+        store = SessionStore.__new__(SessionStore)
+        store._db = None
+        assert not store.attach_platform_message_id_to_latest_user(
+            "s1", "msg-001"
+        )
+
 
 class TestDedupeOnTransientFailure:
     """The gateway's transient-failure path must not persist duplicates."""
