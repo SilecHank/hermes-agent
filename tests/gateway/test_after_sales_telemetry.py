@@ -2,7 +2,19 @@ import json
 
 import pytest
 
-from gateway.after_sales_telemetry import append_runtime_event, build_runtime_event
+from gateway.after_sales_telemetry import (
+    append_runtime_event,
+    build_runtime_event,
+    default_runtime_event_path,
+)
+
+
+def test_default_runtime_event_path_uses_ivd_live_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+    assert default_runtime_event_path() == (
+        tmp_path / "hermes/ivd-live-data/telemetry/runtime-events.jsonl"
+    )
 
 
 def test_runtime_event_is_sanitized_and_versioned(tmp_path):

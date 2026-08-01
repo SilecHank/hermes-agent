@@ -21350,8 +21350,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         from gateway.after_sales_telemetry import (
                             append_runtime_event,
                             build_runtime_event,
+                            default_runtime_event_path,
                         )
-                        from hermes_constants import get_hermes_home
 
                         _blocked_result = build_preflight_block_result(
                             _after_sales_turn, message
@@ -21377,7 +21377,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                             _guard_config = user_config.get("after_sales_guard") or {}
                             _telemetry_path = _guard_config.get("runtime_events_path") or (
-                                get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"
+                                default_runtime_event_path()
                             )
                             append_runtime_event(_telemetry_path, _blocked_event)
                         except Exception as _blocked_telemetry_exc:
@@ -22560,8 +22560,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and platform_key in _after_sales_platforms
             ):
                 try:
-                    from gateway.after_sales_telemetry import append_runtime_event, build_runtime_event
-                    from hermes_constants import get_hermes_home
+                    from gateway.after_sales_telemetry import (
+                        append_runtime_event,
+                        build_runtime_event,
+                        default_runtime_event_path,
+                    )
 
                     _turn_messages = result.get("messages") or []
                     _recent_turn_messages = []
@@ -22634,7 +22637,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         ),
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (
-                        get_hermes_home() / "runtime" / "ivd-answer-events.jsonl"
+                        default_runtime_event_path()
                     )
                     append_runtime_event(_telemetry_path, _event)
                 except Exception as _telemetry_exc:

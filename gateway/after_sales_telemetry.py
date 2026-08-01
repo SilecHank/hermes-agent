@@ -25,6 +25,13 @@ _MISS_STOP_REASONS = {"no_gain", "profile_limit", "hard_limit"}
 _PARTIAL_STOP_REASONS = {"duplicate", "duplicate_intent", "no_gain", "profile_limit", "hard_limit"}
 
 
+def default_runtime_event_path() -> Path:
+    """Return the profile-aware mutable telemetry path outside every Release."""
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "ivd-live-data/telemetry/runtime-events.jsonl"
+
+
 def sanitize_question_preview(question_text: str, *, limit: int = 120) -> str:
     """Return a bounded local replay preview or a fail-closed marker."""
     if not str(question_text or "").strip():
@@ -143,10 +150,12 @@ def build_runtime_event(
 
 def append_runtime_event(path: str | Path, event: dict[str, object]) -> None:
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target.parent.chmod(0o700)
     payload = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         os.write(fd, payload)
     finally:
         os.close(fd)
