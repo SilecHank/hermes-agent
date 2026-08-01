@@ -161,11 +161,11 @@ class TestApprovalTextFallbackContract:
             "rm -rf /", "dangerous deletion", "/",
             allow_permanent=False, smart_denied=True,
         )
-        assert "owner override" in text.lower()
-        assert "one operation" in text.lower()
+        assert "手动确认本次执行" in text
+        assert "执行这一次" in text
         assert "`/approve`" in text
-        assert "approve session" not in text
-        assert "approve always" not in text
+        assert "本次会话" not in text
+        assert "以后都" not in text
 
     def test_non_smart_restriction_preserves_session_choice(self):
         from gateway.run import _format_exec_approval_fallback

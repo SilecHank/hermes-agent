@@ -7,6 +7,8 @@ implementation in this same file once that phase ships.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from hermes_cli.service_manager import (
@@ -436,6 +438,7 @@ def test_s6_manager_kind_and_supports_registration() -> None:
 # tests/docker/test_s6_profile_gateway_integration.py.
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="s6 supervise layout is Linux-only")
 def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
     """Verifies the dirs + FIFO + modes the helper lays down."""
     import stat
@@ -473,6 +476,7 @@ def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
     assert stat.S_IMODE(control.stat().st_mode) == 0o660
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="s6 supervise layout is Linux-only")
 def test_seed_supervise_skeleton_handles_log_subservice(tmp_path) -> None:
     """When a log/ subdir exists, its supervise tree also gets seeded.
 

@@ -26,8 +26,8 @@ def test_cli_claim_active_session_respects_global_limit(tmp_path, monkeypatch):
     try:
         assert cli._claim_active_session("cli") is False
         assert printed == [
-            "[bold red]Hermes is at the active session limit (1/1). "
-            "Try again when another session finishes.[/]"
+            "[bold red]当前任务较多（1/1），这条消息暂未开始处理。"
+            "请稍后重发，已有任务完成后即可继续。[/]"
         ]
 
         held.release()
