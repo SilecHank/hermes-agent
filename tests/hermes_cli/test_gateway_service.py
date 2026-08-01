@@ -2614,6 +2614,9 @@ class TestProfileArg:
         plist = gateway_cli.generate_launchd_plist()
         assert "<string>--profile</string>" in plist
         assert "<string>mybot</string>" in plist
+        assert "<string>-B</string>" in plist
+        assert "<key>PYTHONDONTWRITEBYTECODE</key>" in plist
+        assert "<string>1</string>" in plist
 
     def test_launchd_plist_supports_aqua_and_background_sessions(self):
         # macOS 26+ only loads the agent in non-Aqua sessions when the plist
