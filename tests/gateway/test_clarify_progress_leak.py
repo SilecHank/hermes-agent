@@ -76,6 +76,20 @@ class ClarifyThenToolAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+@pytest.mark.asyncio
+async def test_default_clarify_fallback_uses_plain_chinese() -> None:
+    adapter = ProgressCaptureAdapter()
+
+    await adapter.send_clarify(
+        "chat-1", "请选择故障阶段", ["建任务", "数据导入"],
+        "clarify-cn-1", "slack:chat-1",
+    )
+
+    content = adapter.sent[-1]["content"]
+    assert "请回复序号、选项文字，或直接说明实际情况。" in content
+    assert "Reply with the number" not in content
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner

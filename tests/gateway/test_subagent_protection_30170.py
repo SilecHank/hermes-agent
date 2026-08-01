@@ -248,10 +248,10 @@ class TestBusyHandlerDemotesInterruptForSubagents:
 
         adapter._send_with_retry.assert_called_once()
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Subagent working" in content
-        assert "queued" in content.lower()
+        assert "子任务正在执行" in content
+        assert "已排队" in content
         assert "/stop" in content
-        assert "Interrupting" not in content
+        assert "正在中断当前任务" not in content
 
     @pytest.mark.asyncio
     async def test_interrupt_still_fires_when_no_subagents(self) -> None:
@@ -272,8 +272,8 @@ class TestBusyHandlerDemotesInterruptForSubagents:
 
         parent.interrupt.assert_called_once_with("please stop")
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Interrupting" in content
-        assert "Subagent" not in content
+        assert "正在中断当前任务" in content
+        assert "子任务正在执行" not in content
 
     @pytest.mark.asyncio
     async def test_queue_mode_unchanged_with_subagents(self) -> None:
@@ -295,9 +295,9 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
         # The vanilla queue copy — NOT the #30170 "Subagent working" copy,
         # because the user explicitly asked for queue mode.
-        assert "Queued for the next turn" in content
-        assert "respond once the current task finishes" in content
-        assert "Subagent working" not in content
+        assert "已排到下一轮" in content
+        assert "当前任务结束后处理" in content
+        assert "子任务正在执行" not in content
 
     @pytest.mark.asyncio
     async def test_steer_mode_still_routes_through_running_agent_steer(
@@ -345,4 +345,4 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         # demotion did NOT fire (and the sentinel branch in the real
         # handler just skips the interrupt call silently).
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Subagent working" not in content
+        assert "子任务正在执行" not in content

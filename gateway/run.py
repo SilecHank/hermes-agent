@@ -6530,47 +6530,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if start_ts:
                     elapsed_min = int((now - start_ts) / 60)
                     if elapsed_min > 0:
-                        status_parts.append(f"{elapsed_min} min elapsed")
+                        status_parts.append(f"已运行 {elapsed_min} 分钟")
                 if max_iter:
-                    status_parts.append(f"iteration {iteration}/{max_iter}")
+                    status_parts.append(f"第 {iteration}/{max_iter} 轮")
                 if current_tool:
-                    status_parts.append(f"running: {current_tool}")
+                    status_parts.append(f"正在执行：{current_tool}")
             except Exception:
                 pass
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
         if is_steer_mode:
             message = (
-                f"⏩ Steered into current run{status_detail}. "
-                f"Your message arrives after the next tool call."
+                f"⏩ 已将你的消息转入当前任务{status_detail}。"
+                f"将在下一次工具调用后处理。"
             )
         elif is_redirect_mode:
             message = (
-                f"↪ Redirected current run{status_detail}. "
-                f"I'll adjust using your correction."
+                f"↪ 已按你的补充调整当前任务{status_detail}。"
             )
         elif is_queue_mode and demoted_for_subagents:
             # #30170 — explain the demotion so the user knows their
             # follow-up didn't accidentally kill the subagent and
             # discovers `/stop` as the explicit escape hatch.
             message = (
-                f"⏳ Subagent working{status_detail} — your message is queued for "
-                f"when it finishes (use /stop to cancel everything)."
+                f"⏳ 子任务正在执行{status_detail}，你的消息已排队，"
+                f"完成后处理（发送 /stop 可取消全部任务）。"
             )
         elif is_queue_mode and demoted_for_compression:
             message = (
-                f"⏳ Compressing context{status_detail} — your message is queued for "
-                f"when it finishes (use /stop to cancel everything)."
+                f"⏳ 正在压缩上下文{status_detail}，你的消息已排队，"
+                f"完成后处理（发送 /stop 可取消全部任务）。"
             )
         elif is_queue_mode:
             message = (
-                f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
+                f"⏳ 你的消息已排到下一轮{status_detail}，"
+                f"当前任务结束后处理。"
             )
         else:
             message = (
-                f"⚡ Interrupting current task{status_detail}. "
-                f"I'll respond to your message shortly."
+                f"⚡ 正在中断当前任务{status_detail}，随后处理你的消息。"
             )
 
         if event.source.platform == Platform.QQBOT:

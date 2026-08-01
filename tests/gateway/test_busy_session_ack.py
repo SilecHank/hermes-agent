@@ -205,7 +205,7 @@ class TestBusySessionAck:
         if not content and call_kwargs.args:
             # positional args
             content = str(call_kwargs)
-        assert "Interrupting" in content or "respond" in content
+        assert "正在中断当前任务" in content
         assert "/stop" not in content  # no need — we ARE interrupting
 
         # Verify agent interrupt was called
@@ -233,7 +233,7 @@ class TestBusySessionAck:
         agent.interrupt.assert_not_called()
         assert sk not in adapter._pending_messages
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Redirected current run" in content
+        assert "已按你的补充调整当前任务" in content
 
     @pytest.mark.asyncio
     async def test_text_event_with_attachment_is_queued_not_redirected(self):
@@ -283,9 +283,9 @@ class TestBusySessionAck:
         adapter._send_with_retry.assert_called_once()
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
-        assert "Queued for the next turn" in content
-        assert "respond once the current task finishes" in content
-        assert "Interrupting" not in content
+        assert "已排到下一轮" in content
+        assert "当前任务结束后处理" in content
+        assert "正在中断当前任务" not in content
 
     @pytest.mark.asyncio
     async def test_busy_text_mode_queue_delegates_to_adapter_handle_message(self):
@@ -346,8 +346,8 @@ class TestBusySessionAck:
         adapter._send_with_retry.assert_called_once()
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
-        assert "Steered" in content or "steer" in content.lower()
-        assert "Interrupting" not in content
+        assert "已将你的消息转入当前任务" in content
+        assert "正在中断当前任务" not in content
 
     @pytest.mark.asyncio
     async def test_steer_mode_can_suppress_visible_ack_without_disabling_steer(self, monkeypatch):
@@ -467,8 +467,8 @@ class TestBusySessionAck:
         # Ack uses queue-mode wording (not steer, not interrupt)
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
-        assert "Queued for the next turn" in content
-        assert "Steered" not in content
+        assert "已排到下一轮" in content
+        assert "已将你的消息转入当前任务" not in content
 
     @pytest.mark.asyncio
     async def test_steer_mode_falls_back_to_queue_when_agent_pending(self):
@@ -491,7 +491,7 @@ class TestBusySessionAck:
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
-        assert "Queued for the next turn" in content
+        assert "已排到下一轮" in content
 
     @pytest.mark.asyncio
     async def test_interrupt_mode_text_followups_fifo_not_merged(self):
@@ -652,11 +652,14 @@ class TestBusySessionAck:
         content = call_kwargs.kwargs.get("content", "")
         assert "21/60" in content  # iteration
         assert "terminal" in content  # current tool
-        assert "10 min" in content  # elapsed
+        assert "已运行 10 分钟" in content  # elapsed
 
     @pytest.mark.asyncio
-    async def test_telegram_omits_status_detail_by_default(self):
+    async def test_telegram_omits_status_detail_by_default(self, monkeypatch):
         """Telegram busy acks stay concise unless busy_ack_detail is enabled."""
+        import gateway.run as _gr
+
+        monkeypatch.setattr(_gr, "_load_gateway_config", lambda: {})
         runner, sentinel = _make_runner()
         runner._busy_input_mode = "interrupt"
         adapter = _make_adapter()
@@ -680,7 +683,8 @@ class TestBusySessionAck:
         await runner._handle_active_session_busy_message(event, sk)
 
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Interrupting current task" in content
+        assert "正在中断当前任务" in content
+        assert "Interrupting current task" not in content
         assert "21/60" not in content
         assert "terminal" not in content
         assert "10 min" not in content
@@ -778,9 +782,9 @@ class TestBusySessionOnboardingHint:
         content = call_kwargs.kwargs.get("content", "")
 
         # Normal ack body
-        assert "Interrupting" in content
+        assert "正在中断当前任务" in content
         # First-touch hint appended
-        assert "First-time tip" in content
+        assert "首次提示" in content
         assert "/busy queue" in content
 
         # The flag is now persisted to tmp_path/config.yaml
@@ -826,8 +830,8 @@ class TestBusySessionOnboardingHint:
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content", "")
 
-        assert "Interrupting" in content
-        assert "First-time tip" not in content
+        assert "正在中断当前任务" in content
+        assert "首次提示" not in content
         assert "/busy queue" not in content
 
     @pytest.mark.asyncio
@@ -853,8 +857,8 @@ class TestBusySessionOnboardingHint:
             await runner._handle_active_session_busy_message(event, sk)
 
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Queued for the next turn" in content
-        assert "First-time tip" in content
+        assert "已排到下一轮" in content
+        assert "首次提示" in content
         assert "/busy interrupt" in content
         # Must NOT tell the user to /busy queue when they're already on queue.
         assert "/busy queue" not in content

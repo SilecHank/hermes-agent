@@ -41,29 +41,27 @@ def busy_input_hint_gateway(mode: str) -> str:
     """
     if mode == "queue":
         return (
-            "💡 First-time tip — I queued your message instead of interrupting. "
-            "Send `/busy interrupt` to make new messages stop the current task "
-            "immediately, or `/busy status` to check. This notice won't appear again."
+            "💡 首次提示：你的消息已排到下一轮，不会中断当前任务。"
+            "如需立即停止，请发送 `/stop`；也可用 `/busy interrupt` 切换为立即中断，"
+            "或用 `/busy status` 查看状态。本提示只显示一次。"
         )
     if mode == "steer":
         return (
-            "💡 First-time tip — I steered your message into the current run; "
-            "it will arrive after the next tool call instead of interrupting. "
-            "Send `/busy interrupt` or `/busy queue` to change this, or "
-            "`/busy status` to check. This notice won't appear again."
+            "💡 首次提示：你的消息已转入当前任务，将在下一次工具调用后处理。"
+            "如需另开下一轮，请发送 `/busy queue`；如需立即中断，请发送 `/busy interrupt`；"
+            "如需停止全部任务，请发送 `/stop`；"
+            "也可用 `/busy status` 查看状态。本提示只显示一次。"
         )
     if mode == "redirect":
         return (
-            "💡 First-time tip — I redirected the current run using your message. "
-            "Completed work stays in context, and `/stop` still cancels the task. "
-            "Send `/busy queue` to wait for a separate turn, or `/busy status` "
-            "to check. This notice won't appear again."
+            "💡 首次提示：已按你的消息调整当前任务。"
+            "如需等待当前任务结束后另开一轮，请发送 `/busy queue`；"
+            "也可用 `/busy status` 查看状态。本提示只显示一次。"
         )
     return (
-        "💡 First-time tip — I just interrupted my current task to answer you. "
-        "Send `/busy queue` to queue follow-ups for after the current task instead, "
-        "`/busy steer` to inject them mid-run without interrupting, or "
-        "`/busy status` to check. This notice won't appear again."
+        "💡 首次提示：我正在中断当前任务并处理你的新消息。"
+        "如需让后续消息排队，请发送 `/busy queue`；如需不中断地补充当前任务，"
+        "请发送 `/busy steer`；也可用 `/busy status` 查看状态。本提示只显示一次。"
     )
 
 
@@ -96,9 +94,9 @@ def busy_input_hint_cli(mode: str) -> str:
 
 def tool_progress_hint_gateway() -> str:
     return (
-        "💡 First-time tip — that tool took a while and I'm streaming every step. "
-        "If the progress messages feel noisy, send `/verbose` to cycle modes "
-        "(all → new → off). This notice won't appear again."
+        "💡 首次提示：这一步执行时间较长，我会持续发送进度。"
+        "如果进度消息过多，请发送 `/verbose` 切换显示模式"
+        "（全部 → 仅新增 → 关闭）。本提示只显示一次。"
     )
 
 

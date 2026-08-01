@@ -112,18 +112,21 @@ class TestHintMessages:
     def test_busy_input_hint_gateway_interrupt(self):
         msg = busy_input_hint_gateway("interrupt")
         assert "/busy queue" in msg
-        assert "interrupted" in msg.lower()
+        assert "正在中断当前任务" in msg
+        assert "First-time tip" not in msg
 
     def test_busy_input_hint_gateway_queue(self):
         msg = busy_input_hint_gateway("queue")
         assert "/busy interrupt" in msg
-        assert "queued" in msg.lower()
+        assert "已排到下一轮" in msg
+        assert "First-time tip" not in msg
 
     def test_busy_input_hint_gateway_steer(self):
         msg = busy_input_hint_gateway("steer")
         assert "/busy interrupt" in msg
         assert "/busy queue" in msg
-        assert "steer" in msg.lower()
+        assert "已转入当前任务" in msg
+        assert "First-time tip" not in msg
 
     def test_busy_input_hint_cli_interrupt(self):
         msg = busy_input_hint_cli("interrupt")

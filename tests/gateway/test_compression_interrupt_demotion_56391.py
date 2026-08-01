@@ -161,10 +161,10 @@ class TestBusyHandlerDemotesInterruptForCompression:
 
         adapter._send_with_retry.assert_called_once()
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
-        assert "Compressing context" in content
-        assert "queued" in content.lower()
+        assert "正在压缩上下文" in content
+        assert "已排队" in content
         assert "/stop" in content
-        assert "Interrupting" not in content
+        assert "正在中断当前任务" not in content
 
     @pytest.mark.asyncio
     async def test_interrupt_still_fires_without_compression_lock(self) -> None:
