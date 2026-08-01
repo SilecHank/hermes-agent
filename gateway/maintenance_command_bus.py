@@ -50,6 +50,8 @@ def classify_maintenance_command(text: str) -> str | None:
         return "ivd_maintenance_status"
     if normalized.startswith(("ivd status ", "maintenance status ")):
         return "ivd_maintenance_status"
+    if normalized in {"ivd repair", "ivd repair confirm", "maintenance repair", "maintenance repair confirm"}:
+        return "ivd_maintenance_repair"
     if any(phrase in raw for phrase in _SYNC_PHRASES):
         return "ivd_maintenance_sync"
     if any(phrase in raw for phrase in _STATUS_PHRASES):

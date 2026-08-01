@@ -26,7 +26,13 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 
 def resolve_ivd_kb_root() -> Path:
-    return Path(os.environ.get("HERMES_IVD_KB_ROOT") or "/home/slim/IVD-KnowledgeHub")
+    configured = os.environ.get("HERMES_IVD_RUNTIME_KB_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    pinned_sibling = Path(__file__).resolve().parents[1].parent / "knowledgehub"
+    if (pinned_sibling / "scripts/hermes-self-maintenance.py").is_file():
+        return pinned_sibling
+    return Path(os.environ.get("HERMES_IVD_KB_ROOT") or Path.home() / "IVD-KnowledgeHub").expanduser()
 
 
 def build_default_ivd_maintenance_steps(
@@ -34,46 +40,23 @@ def build_default_ivd_maintenance_steps(
     *,
     python_executable: str | None = None,
     run_date: str | None = None,
+    scope: str = "default",
 ) -> tuple[WorkerStep, ...]:
     py = python_executable or sys.executable
     maintenance_date = run_date or time.strftime("%Y-%m-%d", time.localtime())
-    out_dir = kb_root / "knowledge-base" / "_extracted" / "hermes-review-inbox"
     return (
         WorkerStep(
-            "candidate_promotion_queue",
+            "isolated_self_maintenance",
             (
                 py,
-                "scripts/hermes_candidate_promotion_queue.py",
-                "--out-dir",
-                str(out_dir),
-                "--limit",
-                "300",
-                "--json",
-            ),
-        ),
-        WorkerStep(
-            "kb_conflict_detection",
-            (py, "scripts/hermes_incremental_conflict_scan.py", "--repo-root", "."),
-            allow_failure=True,
-        ),
-        WorkerStep(
-            "review_inbox_archive_plan",
-            (py, "scripts/review-inbox-maintenance.py", "--out-dir", str(out_dir)),
-        ),
-        WorkerStep(
-            "runtime_config_validation",
-            (py, "scripts/hermes_runtime_config.py", "knowledge-base/config/hermes-runtime-concurrency.json"),
-        ),
-        WorkerStep(
-            "daily_maintenance_runner",
-            (
-                py,
-                "scripts/hermes_daily_maintenance_runner.py",
+                "-B",
+                "scripts/hermes-self-maintenance.py",
+                "run",
+                "--scope",
+                scope,
                 "--date",
                 maintenance_date,
-                "--repo-root",
-                ".",
-                "--execute",
+                "--json",
             ),
         ),
     )
@@ -111,7 +94,7 @@ def run_ivd_maintenance_worker(
     try:
         with _worker_locked(lock_path, timeout_seconds=worker_lock_timeout_seconds):
             ledger.mark_running(command_id)
-            for step in steps or build_default_ivd_maintenance_steps(root):
+            for step in steps or build_default_ivd_maintenance_steps(root, scope=scope):
                 started = time.monotonic()
                 try:
                     result = runner(

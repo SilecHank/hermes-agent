@@ -90,13 +90,25 @@ async def test_ivd_sync_sends_short_notice_to_configured_peer_home_channel(tmp_p
 async def test_ivd_status_without_id_lists_recent_commands(tmp_path):
     runner = _make_runner()
 
+    status = {
+        "status": "ready",
+        "active_host": "wsl-primary",
+        "active_generation": 10,
+        "current_release": "a" * 64,
+        "platform_health": {"status": "healthy", "platforms": {"weixin": "connected", "wecom": "connected", "qqbot": "connected"}},
+        "cron": {"status": "healthy", "jobs": 4},
+        "knowledge_release_digest": "b" * 64,
+    }
     with patch("gateway.run._hermes_home", tmp_path), \
+         patch("gateway.ivd_operator_control.read_ivd_operator_status", return_value=status), \
          patch.object(runner, "_schedule_ivd_maintenance_worker"):
         await runner._handle_ivd_command(_make_event("/ivd sync --scope kb-update-20260725"))
         result = await runner._handle_ivd_command(_make_event("/ivd status"))
 
-    assert "最近维护命令" in result
-    assert "kb-update-20260725" in result
+    assert "生产主机：wsl-primary（generation 10）" in result
+    assert "三平台：正常" in result
+    assert "Cron：正常（4 项）" in result
+    assert "无需操作" in result
 
 
 @pytest.mark.asyncio
@@ -119,14 +131,72 @@ async def test_ivd_status_remains_readable_for_non_admin(tmp_path):
     runner = _make_runner(admin_user_id="admin")
     runner.config.platforms[Platform.WEIXIN].extra["user_allowed_commands"] = []
 
+    status = {
+        "status": "ready", "active_host": "wsl-primary", "active_generation": 10,
+        "current_release": "a" * 64,
+        "platform_health": {"status": "healthy", "platforms": {"weixin": "connected", "wecom": "connected", "qqbot": "connected"}},
+        "cron": {"status": "healthy", "jobs": 1},
+    }
     with patch("gateway.run._hermes_home", tmp_path), \
+         patch("gateway.ivd_operator_control.read_ivd_operator_status", return_value=status), \
          patch.object(runner, "_schedule_ivd_maintenance_worker"):
         assert "只有管理员" in await runner._handle_ivd_command(
             _make_event("/ivd sync --scope kb-update-20260725", user_id="guest")
         )
         result = await runner._handle_ivd_command(_make_event("/ivd status", user_id="guest"))
 
-    assert "最近维护命令" in result
+    assert "生产主机：wsl-primary" in result
+
+
+@pytest.mark.asyncio
+async def test_ivd_repair_requires_one_chinese_confirmation_before_write(tmp_path):
+    runner = _make_runner()
+    status = {
+        "status": "ready", "active_host": "wsl-primary", "active_generation": 10,
+        "current_release": "a" * 64,
+        "platform_health": {"status": "degraded", "platforms": {"weixin": "connected", "wecom": "disconnected", "qqbot": "connected"}},
+        "cron": {"status": "healthy", "jobs": 1},
+    }
+    repaired = {"status": "ready", "reason": "restart_gateway", "operator_message": "已执行一次网关重启。"}
+    with patch("gateway.run._hermes_home", tmp_path), \
+         patch("gateway.ivd_operator_control.read_ivd_operator_status", return_value=status), \
+         patch("gateway.ivd_operator_control.run_ivd_safe_repair", return_value=repaired) as repair:
+        prompt = await runner._handle_ivd_command(_make_event("/ivd repair"))
+        result = await runner._handle_ivd_command(_make_event("/ivd repair confirm"))
+
+    assert "等待确认" in prompt
+    assert "请回复 `/ivd repair confirm`" in prompt
+    assert "已执行一次网关重启" in result
+    repair.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ivd_repair_confirmation_is_scoped_to_member_and_generation(tmp_path):
+    runner = _make_runner(admin_user_id="admin")
+    status10 = {
+        "status": "ready", "active_host": "wsl-primary", "active_generation": 10,
+        "current_release": "a" * 64,
+        "platform_health": {"status": "degraded", "platforms": {}}, "cron": {"status": "healthy", "jobs": 1},
+    }
+    status11 = {**status10, "active_generation": 11}
+    with patch("gateway.run._hermes_home", tmp_path), \
+         patch("gateway.ivd_operator_control.read_ivd_operator_status", side_effect=[status10, status11]), \
+         patch("gateway.ivd_operator_control.run_ivd_safe_repair") as repair:
+        await runner._handle_ivd_command(_make_event("/ivd repair", user_id="admin"))
+        wrong_member = await runner._handle_ivd_command(_make_event("/ivd repair confirm", user_id="guest"))
+        stale = await runner._handle_ivd_command(_make_event("/ivd repair confirm", user_id="admin"))
+
+    assert "只有管理员" in wrong_member
+    assert "系统版本已变化" in stale
+    repair.assert_not_called()
+
+
+def test_ivd_repair_is_classified_without_matching_arbitrary_text():
+    from gateway.maintenance_command_bus import classify_maintenance_command
+
+    assert classify_maintenance_command("/ivd repair") == "ivd_maintenance_repair"
+    assert classify_maintenance_command("/ivd repair confirm") == "ivd_maintenance_repair"
+    assert classify_maintenance_command("帮我执行 rm -rf") is None
 
 
 @pytest.mark.asyncio

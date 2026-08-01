@@ -4757,18 +4757,30 @@ class GatewaySlashCommandsMixin:
             return (
                 "IVD 维护命令用法：\n"
                 "- `/ivd sync --scope <名称>`：登记一次三平台统一维护任务\n"
-                "- `/ivd status <command_id>`：查看维护任务状态"
+                "- `/ivd status`：查看生产主机、三平台、Release 和 Cron\n"
+                "- `/ivd status <command_id>`：查看指定维护任务\n"
+                "- `/ivd repair`：检查并准备一次安全修复"
             )
 
-        ledger = MaintenanceCommandLedger(_hermes_home / "maintenance-command-ledger.json")
+        ledger = MaintenanceCommandLedger(
+            _hermes_home / "ivd-live-data/maintenance/receipts/maintenance-command-ledger.json"
+        )
         ledger.recover_stale_running()
         ledger.prune()
         if normalized == "ivd_maintenance_status":
             parts = raw_args.split()
             command_id = parts[1] if len(parts) > 1 and parts[0].casefold() == "status" else ""
             if not command_id:
-                return ledger.format_recent_summary()
+                from gateway.ivd_operator_control import format_ivd_operator_status, read_ivd_operator_status
+
+                return format_ivd_operator_status(await asyncio.to_thread(read_ivd_operator_status))
             return ledger.format_status_summary(command_id)
+
+        if normalized == "ivd_maintenance_repair":
+            denied = self._ivd_sync_admin_denial(event.source)
+            if denied:
+                return denied.replace("维护同步", "安全修复")
+            return await self._handle_ivd_repair(event, raw_args)
 
         scope = self._ivd_maintenance_scope(raw_args)
         source = event.source
@@ -4807,6 +4819,41 @@ class GatewaySlashCommandsMixin:
             f"维护命令 `{claim.command_id}` 已有执行记录，不会重复执行。\n"
             f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
         )
+
+    async def _handle_ivd_repair(self, event: MessageEvent, raw_args: str) -> str:
+        """Require one member-scoped confirmation before the fixed repair entrypoint."""
+        from gateway.ivd_operator_control import read_ivd_operator_status, run_ivd_safe_repair
+
+        source = event.source
+        platform = getattr(source.platform, "value", source.platform) or ""
+        key = (str(platform), str(source.chat_id), str(source.user_id or ""))
+        confirmations = getattr(self, "_ivd_repair_confirmations", None)
+        if not isinstance(confirmations, dict):
+            confirmations = {}
+            self._ivd_repair_confirmations = confirmations
+        confirmed = raw_args.casefold().split() == ["repair", "confirm"]
+        status = await asyncio.to_thread(read_ivd_operator_status)
+        generation = status.get("active_generation")
+        now = time.monotonic()
+        if not confirmed:
+            if status.get("status") != "ready" or status.get("active_host") != "wsl-primary":
+                return "当前无法确认 WSL 生产状态，未准备修复。请先使用 `/ivd status`，若仍异常请交由 Codex 排查。"
+            confirmations[key] = {"generation": generation, "expires_at": now + 600}
+            return (
+                "安全修复等待确认。它只会调用允许列表中的诊断、服务重载或单次网关重启；"
+                "不会切换主备、不会启动 Mac IVD 网关，也不会修改正式知识。\n"
+                "请回复 `/ivd repair confirm`（10 分钟内有效）。"
+            )
+        pending = confirmations.pop(key, None)
+        if not isinstance(pending, dict) or float(pending.get("expires_at") or 0) < now:
+            return "没有有效的修复确认请求。请先发送 `/ivd repair`。"
+        if pending.get("generation") != generation:
+            return "系统版本已变化，原确认已失效。未执行修复，请重新发送 `/ivd repair`。"
+        result = await asyncio.to_thread(run_ivd_safe_repair)
+        message = str(result.get("operator_message") or "安全修复已完成。")
+        if result.get("status") != "ready":
+            return f"安全修复未完成：{message}"
+        return message
 
     def _ivd_sync_admin_denial(self, source: SessionSource) -> str | None:
         from gateway.slash_access import policy_for_source
