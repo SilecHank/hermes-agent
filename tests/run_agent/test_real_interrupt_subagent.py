@@ -62,7 +62,7 @@ class TestRealSubagentInterrupt(unittest.TestCase):
         parent.provider = "test"
         parent.api_mode = "chat_completions"
         parent.platform = "cli"
-        parent.enabled_toolsets = ["terminal", "file"]
+        parent.enabled_toolsets = []
         parent.providers_allowed = None
         parent.providers_ignored = None
         parent.providers_order = None
@@ -95,7 +95,14 @@ class TestRealSubagentInterrupt(unittest.TestCase):
                     MockOpenAI.return_value = mock_client
 
                     # Patch the instance method so it skips prompt assembly
-                    with patch.object(AIAgent, '_build_system_prompt', return_value="You are a test agent"):
+                    with patch.object(
+                        AIAgent,
+                        '_build_system_prompt',
+                        return_value="You are a test agent",
+                    ), patch(
+                        'agent.context_compressor.get_model_context_length',
+                        return_value=100_000,
+                    ):
                         # Signal when child starts
                         original_run = AIAgent.run_conversation
 
@@ -113,7 +120,7 @@ class TestRealSubagentInterrupt(unittest.TestCase):
                                 provider="test",
                                 api_mode="chat_completions",
                                 max_iterations=5,
-                                enabled_toolsets=["terminal"],
+                                enabled_toolsets=[],
                                 quiet_mode=True,
                                 skip_context_files=True,
                                 skip_memory=True,

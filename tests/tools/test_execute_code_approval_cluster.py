@@ -116,6 +116,9 @@ def gw_session(monkeypatch):
     # yolo inherited from the developer's live environment.
     monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
+    monkeypatch.setattr(A, "_permanent_approved", set())
+    monkeypatch.setattr(A, "_session_approved", {})
+    monkeypatch.setattr(A, "_session_yolo", set())
 
     session_key = "cluster-test-session"
     token = A.set_current_session_key(session_key)
