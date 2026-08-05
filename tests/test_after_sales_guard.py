@@ -66,7 +66,6 @@ def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
     fast = _write_experience_modules(tmp_path)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
-    config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
     config["after_sales_guard"]["validator_module"] = str(tmp_path / "missing-validator.py")
     config["after_sales_guard"]["cards_dir"] = str(tmp_path / "missing-cards")
 
@@ -85,6 +84,84 @@ def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
 
     assert len(set(contexts.values())) == 1
     assert "先直接回答结论" in contexts["qqbot"]
+
+
+def _write_boundary_fast_module(tmp_path, source_path, *, source_status="source_candidates_found"):
+    scripts = tmp_path / "scripts-boundary"
+    scripts.mkdir()
+    fast = scripts / "hermes_fast_response_pipeline.py"
+    fast.write_text(
+        "def build_fast_response_plan(message, question_type='general'):\n"
+        "    return {\n"
+        "      'runtime_preflight': {'eligible': True, 'route_version': 'boundary-v1'},\n"
+        "      'answer_template': {'style': 'short_first'},\n"
+        "      'preflight_gate': {'decision': 'allow', 'pipeline_action': 'continue_final_answer', 'issues': []},\n"
+        "      'fast_path': {'route_id': 'sop_parameter_short_answer'},\n"
+        "      'initial_files': [],\n"
+        "      'answer_contract': {\n"
+        "        'deliverable': 'difference_list', 'comparison_dimensions': ['process'],\n"
+        "        'excluded_topics': ['reaction_conditions', 'performance_claims'],\n"
+        "        'must_preserve': ['version_scope', 'source_conflict', 'uncertainty'],\n"
+        "        'detail_level': 'brief'},\n"
+        f"      'source_location': {{'status': {source_status!r}, 'input_sufficient': True,\n"
+        f"        'candidates': [{{'resolved_path': {str(source_path)!r}, 'authority': 'locator_only'}}]}}\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    (scripts / "after_sales_platform_policy.py").write_text(
+        "def render_answer_experience_context(*, platform):\n"
+        "    return '[统一体验]\\n按当前任务边界直接回答。'\n",
+        encoding="utf-8",
+    )
+    return fast
+
+
+def test_four_platforms_receive_same_boundary_and_material_location(tmp_path):
+    source = tmp_path / "PMseq RNA V5 SOP.pdf"
+    source.write_text("fixture", encoding="utf-8")
+    fast = _write_boundary_fast_module(tmp_path, source)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+
+    contexts = []
+    for platform in ("weixin", "wecom", "qqbot", "telegram"):
+        turn = prepare_after_sales_turn(
+            config,
+            platform=platform,
+            message="PMseq RNA V5跟V4有什么不同，只列流程差异",
+            history=[],
+        )
+        assert turn is not None
+        assert turn.answer_contract["deliverable"] == "difference_list"
+        assert turn.source_location["status"] == "source_candidates_found"
+        assert str(source.resolve()) in turn.source_paths
+        assert "只输出差异清单" in turn.context
+        assert "反应条件" in turn.context
+        contexts.append(turn.context)
+
+    assert len(set(contexts)) == 1
+
+
+def test_sufficient_identity_lookup_failure_does_not_repeat_known_fields(tmp_path):
+    source = tmp_path / "PMseq RNA V5 SOP.pdf"
+    source.write_text("fixture", encoding="utf-8")
+    fast = _write_boundary_fast_module(tmp_path, source)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="PMseq RNA V5 建库投入量是多少",
+        history=[],
+    )
+    assert turn is not None
+    fallback = turn.validate("建库投入量为100ng。", messages=[])["fallback"]
+
+    assert "请补充产品版本" not in fallback
+    assert "请补充SOP编号" not in fallback
+    assert "材料库没有" not in fallback
+    assert "未完成已定位正式资料的读取" in fallback
 
 
 def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path):
@@ -280,7 +357,9 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
     assert missing_source["ok"] is False
     assert "formal_source_not_read" in missing_source["reasons"]
     assert "请先读取" not in missing_source["fallback"]
-    assert "未能从当前产品的正式来源核实该参数" in missing_source["fallback"]
+    assert "未能完成正式来源核实" in missing_source["fallback"]
+    assert "请补充产品版本" not in missing_source["fallback"]
+    assert "SOP编号" not in missing_source["fallback"]
     assert supported["ok"] is True
     assert unsupported["ok"] is False
     assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
@@ -297,7 +376,7 @@ def test_unsafe_fast_route_injects_only_shared_answer_experience():
     )
 
     assert turn is not None
-    assert "IVD售后自然回答约定" in turn.context
+    assert "IVD售后统一回答规范" in turn.context
     assert "快速回答管线" not in turn.context
     assert "已识别产品" not in turn.context
     assert turn.facts == {}

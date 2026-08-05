@@ -6,7 +6,7 @@ import importlib.util
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
@@ -36,6 +36,8 @@ class AfterSalesTurn:
     preflight_decision: str = ""
     preflight_action: str = ""
     preflight_issues: tuple[str, ...] = ()
+    answer_contract: dict[str, Any] = field(default_factory=dict)
+    source_location: dict[str, Any] = field(default_factory=dict)
 
     @property
     def blocks_answer_generation(self) -> bool:
@@ -69,9 +71,8 @@ class AfterSalesTurn:
                 return {
                     "ok": False,
                     "reasons": ["formal_source_not_read"],
-                    "fallback": (
-                        "当前未能从当前产品的正式来源核实该参数，暂不提供数值结论。"
-                        "请补充产品版本或SOP编号，以便继续核实。"
+                    "fallback": build_source_validation_fallback(
+                        self, "formal_source_not_read"
                     ),
                 }
             allowed = tuple(self.allowed_numeric_claims) + trusted_claims
@@ -87,9 +88,8 @@ class AfterSalesTurn:
                     "reasons": [
                         f"unsupported_numeric_claim:{claim}" for claim in unsupported
                     ],
-                    "fallback": (
-                        "当前回答中的参数与已核实的正式来源不一致，已停止发送该数值结论。"
-                        "请补充产品版本或SOP编号，以便继续核实。"
+                    "fallback": build_source_validation_fallback(
+                        self, "unsupported_numeric_claim"
                     ),
                 }
             return {"ok": True, "reasons": [], "fallback": ""}
@@ -116,6 +116,27 @@ class AfterSalesTurn:
             if result.ok
             else self.validator.build_safe_clarification(result, self.facts),
         }
+
+
+def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
+    """Explain a source-validation stop without inventing a missing library file."""
+    state = str(turn.source_location.get("status") or "")
+    if state == "multiple_formal_candidates":
+        discriminator = str(turn.source_location.get("missing_discriminator") or "版本")
+        return f"已定位到多个正式资料候选，需要先确认{discriminator}后才能继续核实。"
+    if state == "internal_lookup_blocked":
+        return (
+            "这次正式资料定位未完成，暂不输出未经核实的结论。"
+            "你已经提供的信息会保留，无需重复说明产品和版本。"
+        )
+    if turn.source_location.get("input_sufficient"):
+        return (
+            "这次未完成已定位正式资料的读取，暂不输出未经核实的结论。"
+            "无需重复提供产品、版本或SOP编号。"
+        )
+    if reason == "unsupported_numeric_claim":
+        return "当前数值与已核实的正式来源不一致，已停止发送该数值结论。"
+    return "当前未能完成正式来源核实，暂不提供未经核实的数值结论。"
 
 
 def build_preflight_block_result(
@@ -335,6 +356,8 @@ def prepare_after_sales_turn(
             preflight_decision=str(fast_result.get("preflight_decision") or ""),
             preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+            answer_contract=dict(fast_result.get("answer_contract") or {}),
+            source_location=dict(fast_result.get("source_location") or {}),
         )
 
     context = module.render_fact_context(match)
@@ -383,6 +406,8 @@ def prepare_after_sales_turn(
         preflight_decision=str(fast_result.get("preflight_decision") or ""),
         preflight_action=str(fast_result.get("preflight_action") or ""),
         preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+        answer_contract=dict(fast_result.get("answer_contract") or {}),
+        source_location=dict(fast_result.get("source_location") or {}),
     )
 
 
@@ -418,6 +443,18 @@ def _render_fast_response_context(
         if not path.is_absolute():
             path = kb_root / path
         initial_files.append(str(path.resolve()))
+    source_location = dict(plan.get("source_location") or {})
+    for candidate in source_location.get("candidates") or ():
+        if not isinstance(candidate, dict):
+            continue
+        raw_path = str(candidate.get("resolved_path") or "")
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        if path.is_file() and str(path.resolve()) not in initial_files:
+            initial_files.append(str(path.resolve()))
+        if len(initial_files) >= 5:
+            break
     lines = [
         "[快速回答管线]",
         f"路由版本：{runtime_preflight.get('route_version', '')}",
@@ -432,7 +469,10 @@ def _render_fast_response_context(
             lines.append(f"产品变体：{product_identity.get('product_variant')}")
     if initial_files:
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
-    lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
+    answer_contract = dict(plan.get("answer_contract") or {})
+    lines.extend(_render_answer_contract_lines(answer_contract))
+    if not answer_contract:
+        lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
     fast_path = plan.get("fast_path") or {}
     return {
         "context": "\n".join(lines),
@@ -448,7 +488,58 @@ def _render_fast_response_context(
         "preflight_decision": str(gate.get("decision") or ""),
         "preflight_action": _canonical_preflight_action(gate),
         "preflight_issues": tuple(str(item) for item in (gate.get("issues") or ())),
+        "answer_contract": answer_contract,
+        "source_location": source_location,
     }
+
+
+def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
+    if not contract:
+        return []
+    deliverable = {
+        "difference_list": "只输出差异清单",
+        "diagnostic_branches": "输出有区分度的排查分支",
+        "direct_answer": "直接回答当前问题",
+    }.get(str(contract.get("deliverable") or ""), "完成当前问题要求")
+    dimensions = {
+        "process": "实验流程",
+    }
+    excluded = {
+        "reaction_conditions": "反应条件",
+        "packaging": "包装规格",
+        "switch_history": "切换历史",
+        "performance_claims": "未经正式来源支持的性能提升",
+    }
+    preserved = {
+        "version_scope": "版本适用范围",
+        "safety_risk": "安全风险",
+        "material_exception": "关键例外",
+        "source_conflict": "来源冲突",
+        "uncertainty": "会改变结论的不确定性",
+    }
+    lines = [f"当前交付物：{deliverable}。"]
+    selected_dimensions = [
+        dimensions[item]
+        for item in contract.get("comparison_dimensions") or ()
+        if item in dimensions
+    ]
+    if selected_dimensions:
+        lines.append("允许比较维度：" + "、".join(selected_dimensions) + "。")
+    selected_excluded = [
+        excluded[item]
+        for item in contract.get("excluded_topics") or ()
+        if item in excluded
+    ]
+    if selected_excluded:
+        lines.append("不要展开：" + "、".join(selected_excluded) + "。")
+    selected_preserved = [
+        preserved[item]
+        for item in contract.get("must_preserve") or ()
+        if item in preserved
+    ]
+    if selected_preserved:
+        lines.append("不得省略：" + "、".join(selected_preserved) + "。")
+    return lines
 
 
 def _question_type_from_match(match: dict[str, Any] | None) -> str:
