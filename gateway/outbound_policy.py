@@ -12,6 +12,8 @@ RAW_TEXT_PLATFORMS = frozenset(
     {"local", "api_server", "webhook", "msgraph_webhook"}
 )
 
+IVD_PLAIN_TEXT_PLATFORMS = frozenset({"weixin", "wecom", "qqbot", "telegram"})
+
 EVIDENCE_BOUNDARY_REPLY = "现有证据不足，需要进一步检索确认。"
 
 _SECRET_FALLBACK_PATTERNS = (
@@ -94,6 +96,92 @@ def _strip_internal_scaffolding(text: str) -> tuple[str, bool]:
     return cleaned, removed
 
 
+def _plain_text_table(lines: list[str], start: int) -> tuple[list[str], int] | None:
+    """Convert one Markdown table to compact Chinese plain-text rows."""
+
+    if start + 2 >= len(lines):
+        return None
+
+    def cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    header = cells(lines[start])
+    separator = cells(lines[start + 1])
+    if len(header) < 2 or len(separator) != len(header):
+        return None
+    if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+        return None
+
+    converted: list[str] = []
+    cursor = start + 2
+    while cursor < len(lines) and "|" in lines[cursor]:
+        row = cells(lines[cursor])
+        if len(row) != len(header):
+            break
+        converted.append(
+            "；".join(
+                f"{name}：{value}"
+                for name, value in zip(header, row)
+                if name and value
+            )
+        )
+        cursor += 1
+    if not converted:
+        return None
+    return converted, cursor
+
+
+def _ivd_copy_friendly_plain_text(text: str) -> str:
+    """Remove presentation Markdown without changing technical content."""
+
+    protected: list[str] = []
+
+    def protect(value: str) -> str:
+        token = f"\ue000{len(protected)}\ue001"
+        protected.append(value)
+        return token
+
+    def protect_fence(match: re.Match[str]) -> str:
+        body = match.group(1).strip("\n")
+        return protect(body)
+
+    plain = re.sub(r"```[^\n]*\n(.*?)```", protect_fence, text, flags=re.DOTALL)
+    plain = re.sub(r"`([^`\n]+)`", lambda match: protect(match.group(1)), plain)
+
+    lines = plain.splitlines()
+    converted_lines: list[str] = []
+    cursor = 0
+    while cursor < len(lines):
+        table = _plain_text_table(lines, cursor)
+        if table is not None:
+            table_lines, cursor = table
+            converted_lines.extend(table_lines)
+            continue
+        converted_lines.append(lines[cursor])
+        cursor += 1
+    plain = "\n".join(converted_lines)
+
+    plain = re.sub(
+        r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
+        lambda match: f"{match.group(1)}：{match.group(2)}",
+        plain,
+    )
+    plain = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", plain)
+    plain = re.sub(r"(?m)^\s*>\s?", "", plain)
+    plain = re.sub(r"(?m)^\s*[-*+]\s+", "• ", plain)
+    plain = re.sub(r"(?m)^```[^\n]*\n?", "", plain)
+    plain = plain.replace("`", "")
+    plain = plain.replace("**", "").replace("~~", "")
+    plain = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", plain)
+    plain = re.sub(r"(?<![\w/])_([^_\n]+)_(?!\w)", r"\1", plain)
+
+    for index, value in enumerate(protected):
+        plain = plain.replace(f"\ue000{index}\ue001", value)
+    plain = re.sub(r"[ \t]+\n", "\n", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return plain.strip()
+
+
 def sanitize_human_outbound(
     platform: Any,
     text: str,
@@ -114,6 +202,8 @@ def sanitize_human_outbound(
 
     redacted = _redact_secrets(str(text))
     cleaned, removed_internal = _strip_internal_scaffolding(redacted)
+    if cleaned and platform_value(platform) in IVD_PLAIN_TEXT_PLATFORMS:
+        cleaned = _ivd_copy_friendly_plain_text(cleaned)
     if cleaned:
         return cleaned
     if kind == "final" and removed_internal:
