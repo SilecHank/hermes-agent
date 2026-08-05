@@ -28,7 +28,7 @@ def _config(enabled=True):
     return {
         "after_sales_guard": {
             "enabled": enabled,
-            "platforms": ["weixin", "wecom", "qqbot"],
+            "platforms": ["weixin", "wecom", "qqbot", "telegram"],
             "workflow_module": str(KB / "scripts/after_sales_workflow_gate.py"),
             "validator_module": str(KB / "scripts/after_sales_answer_validator.py"),
             "cards_dir": str(KB / "knowledge-base/workflows/facts"),
@@ -53,13 +53,16 @@ def _write_experience_modules(tmp_path):
     )
     (scripts / "after_sales_platform_policy.py").write_text(
         "def render_answer_experience_context(*, platform):\n"
+        "    platform = platform.strip().lower()\n"
+        "    if platform not in ('weixin', 'wecom', 'qqbot', 'telegram'):\n"
+        "        raise ValueError(platform)\n"
         "    return '[统一体验]\\n先直接回答结论。\\n按顺序给出下一步动作。'\n",
         encoding="utf-8",
     )
     return fast
 
 
-def test_unmatched_turn_still_receives_shared_answer_experience(tmp_path):
+def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
     fast = _write_experience_modules(tmp_path)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
@@ -68,7 +71,7 @@ def test_unmatched_turn_still_receives_shared_answer_experience(tmp_path):
     config["after_sales_guard"]["cards_dir"] = str(tmp_path / "missing-cards")
 
     contexts = {}
-    for platform in ("weixin", "wecom", "qqbot"):
+    for platform in ("weixin", "wecom", "qqbot", "telegram"):
         turn = prepare_after_sales_turn(
             config,
             platform=platform,
@@ -82,6 +85,25 @@ def test_unmatched_turn_still_receives_shared_answer_experience(tmp_path):
 
     assert len(set(contexts.values())) == 1
     assert "先直接回答结论" in contexts["qqbot"]
+
+
+def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path):
+    fast = _write_experience_modules(tmp_path)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+    config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
+    config["after_sales_guard"]["validator_module"] = str(tmp_path / "missing-validator.py")
+    config["after_sales_guard"]["cards_dir"] = str(tmp_path / "missing-cards")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform=" Telegram ",
+        message="报告出不来",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.context.startswith("[统一体验]")
 
 
 def test_matched_turn_composes_experience_with_facts_and_validator(tmp_path):

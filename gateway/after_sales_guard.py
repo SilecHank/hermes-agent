@@ -274,10 +274,16 @@ def prepare_after_sales_turn(
     guard = config.get("after_sales_guard") or {}
     if not isinstance(guard, dict) or not guard.get("enabled", False):
         return None
+    normalized_platform = str(platform or "").strip().lower()
     platforms = guard.get("platforms") or []
     if isinstance(platforms, str):
         platforms = [item.strip() for item in platforms.split(",") if item.strip()]
-    if platform not in platforms:
+    enabled_platforms = {
+        str(item or "").strip().lower()
+        for item in platforms
+        if str(item or "").strip()
+    }
+    if normalized_platform not in enabled_platforms:
         return None
 
     module_path = Path(str(guard.get("workflow_module") or ""))
@@ -292,7 +298,7 @@ def prepare_after_sales_turn(
 
     experience_context = _render_answer_experience_context(
         guard,
-        platform=platform,
+        platform=normalized_platform,
     )
     fast_result = _render_fast_response_context(guard, message=message, match=match)
     fast_context = str(fast_result.get("context") or "")
