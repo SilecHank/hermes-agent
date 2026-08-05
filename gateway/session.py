@@ -96,6 +96,34 @@ from .whatsapp_identity import (
 )
 from utils import atomic_replace
 from agent.turn_context import extract_api_content_sidecar
+from .ivd_case_handoff import (
+    CaseHandoffResult,
+    parse_case_handoff,
+    resolve_case_handoff,
+)
+
+
+def resolve_explicit_case_handoff(
+    message: str,
+    *,
+    actor: str,
+    authorize: Any,
+    load_summary: Any,
+) -> CaseHandoffResult | None:
+    """Resolve handoff context only for an explicit case command.
+
+    Ordinary messages return immediately and therefore retain their existing
+    platform/session routing without consulting authorization or case data.
+    """
+    request = parse_case_handoff(message)
+    if request is None:
+        return None
+    return resolve_case_handoff(
+        request,
+        actor=actor,
+        authorize=authorize,
+        load_summary=load_summary,
+    )
 
 # Session keys/ids flow into filesystem paths downstream (e.g.
 # ``sessions_dir / f"{session_id}.json"`` in hermes_state, request-dump
