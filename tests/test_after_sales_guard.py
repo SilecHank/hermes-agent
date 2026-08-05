@@ -297,7 +297,7 @@ def test_unsafe_fast_route_injects_only_shared_answer_experience():
     )
 
     assert turn is not None
-    assert "IVD售后统一回答规范" in turn.context
+    assert "IVD售后自然回答约定" in turn.context
     assert "快速回答管线" not in turn.context
     assert "已识别产品" not in turn.context
     assert turn.facts == {}
