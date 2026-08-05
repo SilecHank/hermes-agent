@@ -5,9 +5,43 @@ from pathlib import Path
 from gateway.ivd_maintenance_worker import (
     build_default_ivd_maintenance_steps,
     prune_ivd_worker_artifacts,
+    read_live_or_last_known,
+    run_live_management_write,
     run_ivd_maintenance_worker,
 )
 from gateway.maintenance_command_bus import MaintenanceCommandLedger
+
+
+def test_offline_status_is_marked_last_known():
+    cached = {
+        "status": "ready",
+        "active_host": "wsl-primary",
+        "active_generation": 10,
+        "observed_at": "2026-08-05T09:00:00Z",
+    }
+
+    result = read_live_or_last_known(
+        lambda: {"status": "blocked", "reason": "status_probe_failed"},
+        last_known_status=cached,
+    )
+
+    assert result.reason == "last_known_status"
+    assert result.report == cached
+    assert "只能显示最近一次状态" in result.message
+
+
+def test_offline_write_is_rejected_not_queued():
+    calls = []
+
+    result = run_live_management_write(
+        lambda: {"status": "blocked", "reason": "status_probe_failed"},
+        lambda: calls.append("write"),
+    )
+
+    assert result.reason == "live_preflight_unavailable"
+    assert result.executed is False
+    assert result.queued is False
+    assert calls == []
 
 
 def test_default_worker_steps_are_deterministic_and_pending_safe():

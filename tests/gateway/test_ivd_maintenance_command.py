@@ -199,6 +199,66 @@ def test_ivd_repair_is_classified_without_matching_arbitrary_text():
     assert classify_maintenance_command("帮我执行 rm -rf") is None
 
 
+def test_management_session_never_reuses_after_sales_case_key():
+    from gateway.maintenance_command_bus import management_session_key
+
+    key = management_session_key("telegram", "group-1", "admin-1")
+
+    assert key == "ivd-admin:telegram:group-1:admin-1"
+    assert key != "telegram:group-1"
+    assert key != "case-20260805-003"
+
+
+def test_confirmation_requires_same_admin_chat_and_unexpired_nonce():
+    from gateway.maintenance_command_bus import (
+        consume_management_confirmation,
+        issue_management_confirmation,
+    )
+
+    pending = {}
+    nonce = issue_management_confirmation(
+        pending,
+        platform="telegram",
+        chat_id="group-1",
+        user_id="admin-1",
+        generation=10,
+        now=100.0,
+        ttl_seconds=60.0,
+    )
+
+    wrong_chat = consume_management_confirmation(
+        pending,
+        platform="telegram",
+        chat_id="group-2",
+        user_id="admin-1",
+        generation=10,
+        nonce=nonce,
+        now=101.0,
+    )
+    accepted = consume_management_confirmation(
+        pending,
+        platform="telegram",
+        chat_id="group-1",
+        user_id="admin-1",
+        generation=10,
+        nonce=nonce,
+        now=102.0,
+    )
+    replayed = consume_management_confirmation(
+        pending,
+        platform="telegram",
+        chat_id="group-1",
+        user_id="admin-1",
+        generation=10,
+        nonce=nonce,
+        now=103.0,
+    )
+
+    assert wrong_chat == "confirmation_scope_mismatch"
+    assert accepted == "ready"
+    assert replayed == "confirmation_scope_mismatch"
+
+
 @pytest.mark.asyncio
 async def test_ivd_worker_completion_notice_is_sent_to_origin_and_peers():
     runner = _make_runner()
