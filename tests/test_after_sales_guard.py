@@ -137,6 +137,9 @@ def test_four_platforms_receive_same_boundary_and_material_location(tmp_path):
         assert str(source.resolve()) in turn.source_paths
         assert "只输出差异清单" in turn.context
         assert "反应条件" in turn.context
+        assert "正文第一行直接进入第1项差异" in turn.context
+        assert "禁止前置“结论”“主要差异”“来源”" in turn.context
+        assert "不得输出材料库文件名、路径或内部 reference 标识" in turn.context
         contexts.append(turn.context)
 
     assert len(set(contexts)) == 1

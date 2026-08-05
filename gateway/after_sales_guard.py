@@ -518,6 +518,14 @@ def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
         "uncertainty": "会改变结论的不确定性",
     }
     lines = [f"当前交付物：{deliverable}。"]
+    if contract.get("deliverable") == "difference_list":
+        lines.extend(
+            (
+                "正文第一行直接进入第1项差异；禁止前置“结论”“主要差异”“来源”等摘要段。",
+                "每项只写一个比较维度及对应版本差异，不重复汇总已列出的内容。",
+                "必要依据只在正文末尾用一行正式SOP编号或标题说明；不得输出材料库文件名、路径或内部 reference 标识。",
+            )
+        )
     selected_dimensions = [
         dimensions[item]
         for item in contract.get("comparison_dimensions") or ()
