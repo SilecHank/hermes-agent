@@ -47,6 +47,23 @@ def test_missing_routed_source_does_not_use_direct_profile():
     assert policy.profile == "index_fallback"
 
 
+def test_comparison_with_generic_routed_source_keeps_one_search_available(tmp_path):
+    source = tmp_path / "IVD-KnowledgeHub" / "knowledge-base" / "reference" / "reagent-consumable.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("formal", encoding="utf-8")
+    turn = SimpleNamespace(
+        fast_path=True,
+        source_paths=(str(source),),
+        route_id="reagent_short_answer",
+        answer_contract={"task_kind": "compare", "deliverable": "difference_list"},
+    )
+
+    policy = resolve_ivd_retrieval_policy("PMseq RNA V5试剂盒实验流程跟V4有什么差异", turn)
+
+    assert policy.profile == "index_fallback"
+    assert policy.max_searches == 1
+
+
 def test_cross_product_conflict_overrides_direct_route():
     turn = SimpleNamespace(
         fast_path=True,

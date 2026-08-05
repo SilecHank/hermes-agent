@@ -66,7 +66,14 @@ def resolve_ivd_retrieval_policy(
         if _is_formal_result_path(str(path)) and Path(str(path)).is_file()
     )
     fast_path = bool(getattr(turn, "fast_path", False))
-    if fast_path and source_paths and not _EVIDENCE_EXPANSION_RE.search(text):
+    answer_contract = getattr(turn, "answer_contract", {}) or {}
+    comparison_needs_search = answer_contract.get("task_kind") == "compare"
+    if (
+        fast_path
+        and source_paths
+        and not comparison_needs_search
+        and not _EVIDENCE_EXPANSION_RE.search(text)
+    ):
         return DIRECT_POLICY
 
     if _EVIDENCE_INTENT_RE.search(text):
