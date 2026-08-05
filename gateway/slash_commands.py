@@ -4756,8 +4756,8 @@ class GatewaySlashCommandsMixin:
         if normalized is None:
             return (
                 "IVD 维护命令用法：\n"
-                "- `/ivd sync --scope <名称>`：登记一次三平台统一维护任务\n"
-                "- `/ivd status`：查看生产主机、三平台、Release 和 Cron\n"
+                "- `/ivd sync --scope <名称>`：登记一次四平台统一维护任务\n"
+                "- `/ivd status`：查看生产主机、WSL 三平台、Release 和 Cron\n"
                 "- `/ivd status <command_id>`：查看指定维护任务\n"
                 "- `/ivd repair`：检查并准备一次安全修复"
             )

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-REQUIRED_IVD_PLATFORMS = {"weixin", "wecom", "qqbot"}
+REQUIRED_IVD_PLATFORMS = {"weixin", "wecom", "qqbot", "telegram"}
 
 _SYNC_PHRASES = (
     "识别调用这次的全部更新",
