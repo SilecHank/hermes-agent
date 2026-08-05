@@ -4772,21 +4772,42 @@ class GatewaySlashCommandsMixin:
             command_id = parts[1] if len(parts) > 1 and parts[0].casefold() == "status" else ""
             if not command_id:
                 from gateway.ivd_operator_control import format_ivd_operator_status, read_ivd_operator_status
+                from gateway.ivd_maintenance_worker import read_live_or_last_known
 
-                return format_ivd_operator_status(await asyncio.to_thread(read_ivd_operator_status))
+                live = await asyncio.to_thread(read_ivd_operator_status)
+                if live.get("status") == "ready" and live.get("active_host") == "wsl-primary":
+                    ledger.record_last_known_status(live)
+                decision = read_live_or_last_known(
+                    lambda: live,
+                    last_known_status=ledger.read_last_known_status(),
+                )
+                if decision.reason == "last_known_status":
+                    detail = format_ivd_operator_status(decision.report) if decision.report else "最近没有可用状态。"
+                    return f"{decision.message}\n{detail}"
+                return format_ivd_operator_status(decision.report)
             return ledger.format_status_summary(command_id)
 
         if normalized == "ivd_maintenance_repair":
             denied = self._ivd_sync_admin_denial(event.source)
             if denied:
                 return denied.replace("维护同步", "安全修复")
-            return await self._handle_ivd_repair(event, raw_args)
+            return await self._handle_ivd_repair(event, raw_args, ledger)
 
         scope = self._ivd_maintenance_scope(raw_args)
         source = event.source
         denied = self._ivd_sync_admin_denial(source)
         if denied:
             return denied
+        platform_name = getattr(source.platform, "value", source.platform) or ""
+        if platform_name == "telegram":
+            from gateway.ivd_maintenance_worker import run_live_management_write
+            from gateway.ivd_operator_control import read_ivd_operator_status
+
+            live = await asyncio.to_thread(read_ivd_operator_status)
+            preflight = run_live_management_write(lambda: live, lambda: None)
+            if preflight.reason == "live_preflight_unavailable":
+                return preflight.message
+            ledger.record_last_known_status(live)
         claim = ledger.claim(
             command_text,
             origin_platform=source.platform.value if source.platform else "",
@@ -4820,35 +4841,57 @@ class GatewaySlashCommandsMixin:
             f"当前状态：{claim.status}。可用 `/ivd status {claim.command_id}` 查看。"
         )
 
-    async def _handle_ivd_repair(self, event: MessageEvent, raw_args: str) -> str:
+    async def _handle_ivd_repair(
+        self,
+        event: MessageEvent,
+        raw_args: str,
+        ledger: MaintenanceCommandLedger,
+    ) -> str:
         """Require one member-scoped confirmation before the fixed repair entrypoint."""
         from gateway.ivd_operator_control import read_ivd_operator_status, run_ivd_safe_repair
 
         source = event.source
         platform = getattr(source.platform, "value", source.platform) or ""
-        key = (str(platform), str(source.chat_id), str(source.user_id or ""))
-        confirmations = getattr(self, "_ivd_repair_confirmations", None)
-        if not isinstance(confirmations, dict):
-            confirmations = {}
-            self._ivd_repair_confirmations = confirmations
         confirmed = raw_args.casefold().split() == ["repair", "confirm"]
         status = await asyncio.to_thread(read_ivd_operator_status)
         generation = status.get("active_generation")
-        now = time.monotonic()
+        now = time.time()
         if not confirmed:
             if status.get("status") != "ready" or status.get("active_host") != "wsl-primary":
                 return "当前无法确认 WSL 生产状态，未准备修复。请先使用 `/ivd status`，若仍异常请交由 Codex 排查。"
-            confirmations[key] = {"generation": generation, "expires_at": now + 600}
+            ledger.issue_confirmation(
+                platform=str(platform),
+                chat_id=str(source.chat_id),
+                user_id=str(source.user_id or ""),
+                generation=generation,
+                ttl_seconds=600,
+            )
             return (
                 "安全修复等待确认。它只会调用允许列表中的诊断、服务重载或单次网关重启；"
                 "不会切换主备、不会启动 Mac IVD 网关，也不会修改正式知识。\n"
                 "请回复 `/ivd repair confirm`（10 分钟内有效）。"
             )
-        pending = confirmations.pop(key, None)
+        pending = ledger.read_confirmation(
+            platform=str(platform),
+            chat_id=str(source.chat_id),
+            user_id=str(source.user_id or ""),
+        )
         if not isinstance(pending, dict) or float(pending.get("expires_at") or 0) < now:
             return "没有有效的修复确认请求。请先发送 `/ivd repair`。"
         if pending.get("generation") != generation:
+            ledger.consume_confirmation(
+                platform=str(platform), chat_id=str(source.chat_id),
+                user_id=str(source.user_id or ""), generation=generation,
+                nonce=str(pending.get("nonce") or ""),
+            )
             return "系统版本已变化，原确认已失效。未执行修复，请重新发送 `/ivd repair`。"
+        confirmation = ledger.consume_confirmation(
+            platform=str(platform), chat_id=str(source.chat_id),
+            user_id=str(source.user_id or ""), generation=generation,
+            nonce=str(pending.get("nonce") or ""),
+        )
+        if confirmation != "ready":
+            return "没有有效的修复确认请求。请先发送 `/ivd repair`。"
         result = await asyncio.to_thread(run_ivd_safe_repair)
         message = str(result.get("operator_message") or "安全修复已完成。")
         if result.get("status") != "ready":

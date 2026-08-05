@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -62,6 +63,53 @@ def classify_maintenance_command(text: str) -> str | None:
 def _command_id_for(fingerprint: str) -> str:
     digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12]
     return f"ivd-{digest}"
+
+
+def management_session_key(platform: str, chat_id: str, user_id: str) -> str:
+    return f"ivd-admin:{platform}:{chat_id}:{user_id}"
+
+
+def issue_management_confirmation(
+    pending: dict[str, dict[str, Any]],
+    *,
+    platform: str,
+    chat_id: str,
+    user_id: str,
+    generation: int,
+    now: float | None = None,
+    ttl_seconds: float = 600.0,
+) -> str:
+    nonce = secrets.token_urlsafe(18)
+    key = management_session_key(platform, chat_id, user_id)
+    pending[key] = {
+        "nonce": nonce,
+        "generation": generation,
+        "expires_at": (time.monotonic() if now is None else now) + ttl_seconds,
+    }
+    return nonce
+
+
+def consume_management_confirmation(
+    pending: dict[str, dict[str, Any]],
+    *,
+    platform: str,
+    chat_id: str,
+    user_id: str,
+    generation: int,
+    nonce: str,
+    now: float | None = None,
+) -> str:
+    key = management_session_key(platform, chat_id, user_id)
+    record = pending.pop(key, None)
+    current = time.monotonic() if now is None else now
+    if (
+        not isinstance(record, dict)
+        or not secrets.compare_digest(str(record.get("nonce") or ""), str(nonce or ""))
+        or record.get("generation") != generation
+        or float(record.get("expires_at") or 0) < current
+    ):
+        return "confirmation_scope_mismatch"
+    return "ready"
 
 
 class MaintenanceCommandLedger:
@@ -128,6 +176,78 @@ class MaintenanceCommandLedger:
             status="queued",
             notify_platforms=notify_platforms,
         )
+
+    def record_last_known_status(self, report: dict[str, Any]) -> None:
+        with self._locked():
+            state = self._read_state()
+            state["last_known_status"] = {
+                **report,
+                "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            self._write_state(state)
+
+    def read_last_known_status(self) -> dict[str, Any] | None:
+        value = self._read_state().get("last_known_status")
+        return dict(value) if isinstance(value, dict) else None
+
+    def issue_confirmation(
+        self,
+        *,
+        platform: str,
+        chat_id: str,
+        user_id: str,
+        generation: int,
+        ttl_seconds: float = 600.0,
+    ) -> str:
+        with self._locked():
+            state = self._read_state()
+            pending = state.setdefault("management_confirmations", {})
+            nonce = issue_management_confirmation(
+                pending,
+                platform=platform,
+                chat_id=chat_id,
+                user_id=user_id,
+                generation=generation,
+                now=time.time(),
+                ttl_seconds=ttl_seconds,
+            )
+            self._write_state(state)
+            return nonce
+
+    def consume_confirmation(
+        self,
+        *,
+        platform: str,
+        chat_id: str,
+        user_id: str,
+        generation: int,
+        nonce: str,
+    ) -> str:
+        with self._locked():
+            state = self._read_state()
+            pending = state.setdefault("management_confirmations", {})
+            reason = consume_management_confirmation(
+                pending,
+                platform=platform,
+                chat_id=chat_id,
+                user_id=user_id,
+                generation=generation,
+                nonce=nonce,
+                now=time.time(),
+            )
+            self._write_state(state)
+            return reason
+
+    def read_confirmation(
+        self,
+        *,
+        platform: str,
+        chat_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        key = management_session_key(platform, chat_id, user_id)
+        value = self._read_state().get("management_confirmations", {}).get(key)
+        return dict(value) if isinstance(value, dict) else None
 
     def mark_running(self, command_id: str) -> None:
         self._set_status(command_id, "running")

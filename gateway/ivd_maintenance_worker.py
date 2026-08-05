@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from gateway.maintenance_command_bus import MaintenanceCommandLedger
 
@@ -23,6 +23,51 @@ class WorkerStep:
 
 
 Runner = Callable[..., subprocess.CompletedProcess]
+
+
+@dataclass(frozen=True)
+class LiveManagementResult:
+    status: str
+    reason: str
+    report: dict[str, Any]
+    message: str
+    executed: bool = False
+    queued: bool = False
+
+
+def read_live_or_last_known(
+    status_reader: Callable[[], dict[str, Any]],
+    *,
+    last_known_status: dict[str, Any] | None = None,
+) -> LiveManagementResult:
+    report = status_reader()
+    if report.get("status") == "ready" and report.get("active_host") == "wsl-primary":
+        return LiveManagementResult("ready", "live_status", report, "已读取 WSL 实时状态。")
+    cached = dict(last_known_status or {})
+    return LiveManagementResult(
+        "degraded",
+        "last_known_status",
+        cached,
+        "当前无法连接 WSL，只能显示最近一次状态；未执行也未排队任何修改。",
+    )
+
+
+def run_live_management_write(
+    status_reader: Callable[[], dict[str, Any]],
+    action: Callable[[], Any],
+) -> LiveManagementResult:
+    report = status_reader()
+    if report.get("status") != "ready" or report.get("active_host") != "wsl-primary":
+        return LiveManagementResult(
+            "blocked",
+            "live_preflight_unavailable",
+            report,
+            "当前无法连接 WSL，未执行也未排队任何修改。",
+        )
+    action()
+    return LiveManagementResult(
+        "ready", "write_executed", report, "维护操作已执行。", executed=True,
+    )
 
 
 def resolve_ivd_kb_root() -> Path:
