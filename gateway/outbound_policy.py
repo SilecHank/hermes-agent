@@ -114,17 +114,20 @@ def _plain_text_table(lines: list[str], start: int) -> tuple[list[str], int] | N
 
     converted: list[str] = []
     cursor = start + 2
+    row_number = 0
     while cursor < len(lines) and "|" in lines[cursor]:
         row = cells(lines[cursor])
         if len(row) != len(header):
             break
-        converted.append(
-            "；".join(
-                f"{name}：{value}"
-                for name, value in zip(header, row)
-                if name and value
-            )
+        row_number += 1
+        title = row[0] or f"第{row_number}项"
+        converted.append(f"{row_number}. {title}")
+        converted.extend(
+            f"{name}：{value}"
+            for name, value in zip(header[1:], row[1:])
+            if name and value
         )
+        converted.append("")
         cursor += 1
     if not converted:
         return None
@@ -165,6 +168,12 @@ def _ivd_copy_friendly_plain_text(text: str) -> str:
         r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
         lambda match: f"{match.group(1)}：{match.group(2)}",
         plain,
+    )
+    plain = re.sub(
+        r"\s*[（(]\s*已审核\s+reference\s*:\s*[A-Za-z0-9._/-]+\s*[）)]",
+        "",
+        plain,
+        flags=re.IGNORECASE,
     )
     plain = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", plain)
     plain = re.sub(r"(?m)^\s*>\s?", "", plain)

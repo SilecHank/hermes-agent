@@ -79,8 +79,41 @@ def test_ivd_markdown_table_becomes_readable_plain_lines():
 
     sanitized = sanitize_human_outbound("wecom", answer, kind="final")
 
-    assert sanitized == "版本：V4；关键差异：旧流程\n版本：V5；关键差异：新流程"
+    assert sanitized == (
+        "1. V4\n"
+        "关键差异：旧流程\n\n"
+        "2. V5\n"
+        "关键差异：新流程"
+    )
     assert "|" not in sanitized
+
+
+def test_ivd_comparison_table_becomes_scannable_numbered_blocks():
+    answer = (
+        "## 实验流程对比\n\n"
+        "| 环节 | V4（SOP-JL-410） | V5（SOP-JL-501） |\n"
+        "| --- | --- | --- |\n"
+        "| 流程主线 | 逆转录 → 二链合成 | 逆转录 → 二链合成 → 片段化、末端修复和加A |\n"
+        "| 内标 | R10，仅20×稀释 | R3，20×/50×两档 |"
+    )
+
+    assert sanitize_human_outbound("weixin", answer, kind="final") == (
+        "实验流程对比\n\n"
+        "1. 流程主线\n"
+        "V4（SOP-JL-410）：逆转录 → 二链合成\n"
+        "V5（SOP-JL-501）：逆转录 → 二链合成 → 片段化、末端修复和加A\n\n"
+        "2. 内标\n"
+        "V4（SOP-JL-410）：R10，仅20×稀释\n"
+        "V5（SOP-JL-501）：R3，20×/50×两档"
+    )
+
+
+def test_ivd_answer_hides_internal_review_reference_slug():
+    answer = "V5 新增片段化步骤（已审核 reference: pmseq-v4-v5-sop-distinction）。"
+
+    assert sanitize_human_outbound("telegram", answer, kind="final") == (
+        "V5 新增片段化步骤。"
+    )
 
 
 @pytest.mark.parametrize("kind", ["final", "status", "interim", "operational"])
