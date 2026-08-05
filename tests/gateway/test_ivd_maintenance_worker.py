@@ -50,6 +50,10 @@ def test_default_worker_steps_are_deterministic_and_pending_safe():
 
     assert "hermes-self-maintenance.py run" in joined
     assert "--scope default" in joined
+    portable = [step for step in steps if step.name == "portable_state_sync"]
+    assert len(portable) == 1
+    assert portable[0].allow_failure
+    assert portable[0].argv == ("bash", "scripts/hermes-portable-state-sync.sh")
     assert "git commit" not in joined
     assert "git push" not in joined
 
@@ -103,6 +107,34 @@ def test_worker_marks_completed_and_writes_artifact(tmp_path):
     assert payload["steps"][0]["name"] == "isolated_self_maintenance"
     assert calls
     assert "已完成" in ledger.format_status_summary(claim.command_id)
+
+
+def test_optional_portable_sync_failure_is_recorded_without_failing_maintenance(tmp_path):
+    kb_root = tmp_path / "kb"
+    kb_root.mkdir()
+    ledger = MaintenanceCommandLedger(tmp_path / "ledger.json")
+    claim = ledger.claim("执行知识库维护", origin_platform="weixin", origin_chat_id="c1", scope="s1")
+
+    def fake_runner(argv, **kwargs):
+        del kwargs
+        return type("Result", (), {
+            "returncode": 2 if any(
+                str(part).endswith("hermes-portable-state-sync.sh") for part in argv
+            ) else 0,
+            "stdout": "",
+            "stderr": "portable state unavailable",
+        })()
+
+    assert claim is not None
+    artifact = run_ivd_maintenance_worker(
+        ledger, claim.command_id, kb_root=kb_root, scope="s1", runner=fake_runner,
+    )
+
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    portable = next(step for step in payload["steps"] if step["name"] == "portable_state_sync")
+    assert payload["status"] == "completed"
+    assert portable["returncode"] == 2
+    assert portable["allow_failure"] is True
 
 
 def test_worker_marks_failed_when_any_step_fails(tmp_path):

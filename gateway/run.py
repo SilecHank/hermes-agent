@@ -24161,6 +24161,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     from gateway.code_skew import record_boot_fingerprint
     record_boot_fingerprint()
 
+    # The optional IVD ownership fence must run before PID/runtime locks,
+    # adapters, or the embedded cron scheduler can acquire local authority.
+    from gateway.active_host_fence import assert_active_host_or_raise
+    assert_active_host_or_raise()
+
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
     # The PID file is scoped to HERMES_HOME, so future multi-profile
