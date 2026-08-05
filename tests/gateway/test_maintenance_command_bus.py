@@ -6,6 +6,7 @@ from gateway.maintenance_command_bus import (
 
 
 def test_classifies_chinese_ivd_maintenance_sync_command():
+    assert REQUIRED_IVD_PLATFORMS == {"weixin", "wecom", "qqbot", "telegram"}
     assert classify_maintenance_command("请识别调用这次的全部更新") == "ivd_maintenance_sync"
     assert classify_maintenance_command("/ivd sync") == "ivd_maintenance_sync"
 
