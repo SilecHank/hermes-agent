@@ -149,8 +149,54 @@ def _launchd_payload(name: str, text: str | bytes) -> dict[object, object]:
     return payload
 
 
+def _is_governed_telegram_release_follower(payload: Mapping[object, object]) -> bool:
+    """Recognize the isolated Telegram profile's read-only release follower."""
+    if payload.get("Label") != "ai.hermes.telegram-release-sync":
+        return False
+    arguments = payload.get("ProgramArguments")
+    environment = payload.get("EnvironmentVariables")
+    if (
+        not isinstance(arguments, list)
+        or len(arguments) != 9
+        or not all(isinstance(item, str) and item for item in arguments)
+        or not isinstance(environment, dict)
+    ):
+        return False
+    hermes_home = environment.get("HERMES_HOME")
+    if not isinstance(hermes_home, str) or not hermes_home:
+        return False
+    profile_home = Path(hermes_home)
+    runtime_root = profile_home / "telegram-runtime"
+    expected_script = (
+        runtime_root
+        / "current"
+        / "knowledgehub"
+        / "scripts"
+        / "hermes-telegram-release-sync"
+    )
+    return (
+        profile_home.name == "telegram"
+        and profile_home.parent.name == "profiles"
+        and Path(arguments[0]).name.startswith("python")
+        and arguments[1] == "-B"
+        and Path(arguments[2]) == expected_script
+        and arguments[3:] == [
+            "--runtime-root",
+            os.fspath(runtime_root),
+            "--ivd-remote",
+            arguments[6],
+            "--ivd-wsl",
+            arguments[8],
+        ]
+        and Path(arguments[6]).name == "ivd-remote"
+        and Path(arguments[8]).name == "ivd-wsl"
+    )
+
+
 def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) -> bool:
     payload = _launchd_payload(name, text)
+    if _is_governed_telegram_release_follower(payload):
+        return False
     label = payload.get("Label") if isinstance(payload.get("Label"), str) else ""
     arguments = payload.get("ProgramArguments")
     if not isinstance(arguments, list) or not all(isinstance(item, str) for item in arguments):

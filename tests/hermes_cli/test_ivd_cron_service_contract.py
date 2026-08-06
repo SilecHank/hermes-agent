@@ -224,6 +224,56 @@ def test_installers_allow_embedded_gateway_and_unrelated_system_cron(monkeypatch
     assert launchd_target.read_text(encoding="utf-8") == SAFE_LAUNCHD
 
 
+def test_launchd_install_allows_governed_telegram_release_follower(monkeypatch, tmp_path):
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    telegram_home = "/Users/test/.hermes/profiles/telegram"
+    telegram_runtime = f"{telegram_home}/telegram-runtime"
+    follower = {
+        "Label": "ai.hermes.telegram-release-sync",
+        "ProgramArguments": [
+            "/Users/test/.hermes/hermes-agent-ivd/venv/bin/python",
+            "-B",
+            f"{telegram_runtime}/current/knowledgehub/scripts/hermes-telegram-release-sync",
+            "--runtime-root",
+            telegram_runtime,
+            "--ivd-remote",
+            "/Users/test/.local/bin/ivd-remote",
+            "--ivd-wsl",
+            "/Users/test/.local/bin/ivd-wsl",
+        ],
+        "EnvironmentVariables": {"HERMES_HOME": telegram_home},
+        "StartInterval": 900,
+    }
+    (target.parent / "ai.hermes.telegram-release-sync.plist").write_bytes(
+        plistlib.dumps(follower)
+    )
+    _launchd_mocks(monkeypatch, target)
+
+    gateway_cli.launchd_install(force=True)
+
+    assert target.read_text(encoding="utf-8") == SAFE_LAUNCHD
+
+
+def test_launchd_install_blocks_spoofed_telegram_release_follower(monkeypatch, tmp_path):
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
+
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    spoofed = _plist(
+        "ai.hermes.telegram-release-sync",
+        ["/usr/bin/python3", "/opt/ivd/scripts/hermes_daily_maintenance_runner.py"],
+        StartInterval=900,
+    )
+    (target.parent / "ai.hermes.telegram-release-sync.plist").write_text(
+        spoofed, encoding="utf-8"
+    )
+    _launchd_mocks(monkeypatch, target)
+
+    with pytest.raises(IndependentIvdCronServiceError, match="independent_ivd_cron_forbidden"):
+        gateway_cli.launchd_install(force=True)
+
+
 def test_manual_ivd_services_without_periodic_configuration_are_allowed(tmp_path):
     from hermes_cli.ivd_cron_service_contract import assert_embedded_ivd_cron_service_contract
 
