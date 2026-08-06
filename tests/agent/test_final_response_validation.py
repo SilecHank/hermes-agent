@@ -49,6 +49,23 @@ def test_missing_formal_source_retry_requires_direct_routed_read():
     assert "Do not ask the user to perform this internal step" in decision.retry_prompt
 
 
+def test_artifact_refusal_retry_requires_a_real_attempt_and_stage_specific_errors():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("artifact_capability_refusal_without_attempt:xlsx",),
+            "fallback": "这次未能完成文件交付。",
+        },
+        "当前环境缺失，无法生成 Excel 文件。",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "actually call an available generation tool" in decision.retry_prompt
+    assert "generation failure" in decision.retry_prompt
+    assert "delivery failure" in decision.retry_prompt
+
+
 def test_numeric_failure_retry_removes_only_the_unsupported_value():
     decision = evaluate_final_response(
         lambda _text: {

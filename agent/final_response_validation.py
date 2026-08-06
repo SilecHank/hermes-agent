@@ -82,6 +82,14 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "IVD context before drafting the answer. Do not use search or an alternate "
                 "path. Do not ask the user to perform this internal step."
             )
+        elif reason.startswith("artifact_capability_refusal_without_attempt:"):
+            instruction = (
+                "Do not infer that the environment is missing; actually call an available "
+                "generation tool for the requested artifact. If it fails, report the "
+                "concrete generation failure; if generation succeeds but upload fails, "
+                "report the delivery failure separately. Deliver a successful artifact "
+                "with MEDIA:/absolute/path/to/file."
+            )
         else:
             instruction = (
                 "Repair only the cited workflow-boundary violation using the verified facts."

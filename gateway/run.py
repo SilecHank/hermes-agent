@@ -22104,17 +22104,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Clear the callback on unrelated cached-agent turns. When a
             # workflow card matched, validation runs inside conversation_loop
             # before the assistant message is persisted.
+            _response_validators = []
             if _after_sales_turn is not None and _after_sales_turn.has_validator:
                 from gateway.after_sales_guard import CriticalAfterSalesValidator
 
-                agent._final_response_validator = CriticalAfterSalesValidator(
-                    turn=_after_sales_turn,
+                _response_validators.append(
+                    CriticalAfterSalesValidator(
+                        turn=_after_sales_turn,
+                        messages_provider=lambda _agent=agent: getattr(
+                            _agent, "_session_messages", []
+                        ),
+                    )
+                )
+            from gateway.artifact_delivery_guard import (
+                ArtifactDeliveryValidator,
+                CompositeFinalResponseValidator,
+                available_tool_names,
+            )
+
+            _response_validators.append(
+                ArtifactDeliveryValidator(
+                    user_message=message,
+                    platform=platform_key,
                     messages_provider=lambda _agent=agent: getattr(
                         _agent, "_session_messages", []
                     ),
+                    available_tool_names=available_tool_names(
+                        getattr(agent, "tools", None)
+                    ),
                 )
-            else:
-                agent._final_response_validator = None
+            )
+            agent._final_response_validator = CompositeFinalResponseValidator(
+                _response_validators
+            )
             # Store agent reference for interrupt support
             agent_holder[0] = agent
             # Capture the full tool definitions for transcript logging
