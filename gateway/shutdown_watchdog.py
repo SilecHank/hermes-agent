@@ -64,19 +64,7 @@ _PLATFORM_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 _PLATFORM_STATES = frozenset(
     {"connected", "connecting", "disconnected", "disabled", "fatal", "paused", "retrying"}
 )
-_SENSITIVE_KEY_PARTS = (
-    "api_key",
-    "channel",
-    "chat",
-    "credential",
-    "error_message",
-    "message",
-    "password",
-    "secret",
-    "token",
-    "user",
-)
-_HEARTBEAT_PROTECTED_FIELDS = frozenset(
+_HEARTBEAT_SCHEMA_FIELDS = frozenset(
     {
         "pid",
         "process_start_time",
@@ -528,45 +516,10 @@ def _platform_observation(
     }
 
 
-def _contains_sensitive_key(value: Any, *, depth: int = 0) -> bool:
-    if depth > 8:
-        return True
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            lowered = str(key).lower()
-            if any(part in lowered for part in _SENSITIVE_KEY_PARTS):
-                return True
-            if _contains_sensitive_key(nested, depth=depth + 1):
-                return True
-    elif isinstance(value, (list, tuple)):
-        return any(_contains_sensitive_key(item, depth=depth + 1) for item in value)
-    return False
-
-
-def _safe_extra_fields(extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(extra, dict):
-        return {}
-    safe: Dict[str, Any] = {}
-    for key, value in extra.items():
-        if (
-            not isinstance(key, str)
-            or key in _HEARTBEAT_PROTECTED_FIELDS
-            or any(part in key.lower() for part in _SENSITIVE_KEY_PARTS)
-            or _contains_sensitive_key(value)
-        ):
-            continue
-        try:
-            json.dumps(value, ensure_ascii=True, allow_nan=False)
-        except (TypeError, ValueError, RecursionError):
-            continue
-        safe[key] = value
-    return safe
-
-
-def _encode_heartbeat_payload(
-    payload: Dict[str, Any], extra_keys: set[str]
-) -> bytes:
+def _encode_heartbeat_payload(payload: Dict[str, Any]) -> bytes:
     def encode() -> bytes:
+        if not set(payload).issubset(_HEARTBEAT_SCHEMA_FIELDS):
+            raise ValueError("heartbeat payload contains non-schema fields")
         return json.dumps(
             payload,
             ensure_ascii=True,
@@ -574,17 +527,6 @@ def _encode_heartbeat_payload(
             separators=(",", ":"),
         ).encode("utf-8")
 
-    try:
-        encoded = encode()
-    except (TypeError, ValueError, RecursionError):
-        for key in extra_keys:
-            payload.pop(key, None)
-        encoded = encode()
-    if len(encoded) < _MAX_HEARTBEAT_BYTES:
-        return encoded
-
-    for key in extra_keys:
-        payload.pop(key, None)
     encoded = encode()
     if len(encoded) < _MAX_HEARTBEAT_BYTES:
         return encoded
@@ -750,8 +692,10 @@ def write_loop_heartbeat(
     boot_id = _read_linux_boot_id()
     if boot_id is not None:
         payload["boot_id"] = boot_id
-    extra_fields = _safe_extra_fields(extra)
-    payload.update(extra_fields)
+    # ``extra`` remains in the public signature for call compatibility, but
+    # heartbeat state is a closed control-plane contract: no caller-provided
+    # field or free text is persisted.
+    _ = extra
     payload.update(
         _platform_observation(
             pid=resolved_pid,
@@ -761,7 +705,7 @@ def write_loop_heartbeat(
         )
     )
     try:
-        encoded = _encode_heartbeat_payload(payload, set(extra_fields))
+        encoded = _encode_heartbeat_payload(payload)
         _write_heartbeat_secure(path, encoded)
     except Exception:
         logger.debug("Failed to write gateway loop heartbeat", exc_info=True)

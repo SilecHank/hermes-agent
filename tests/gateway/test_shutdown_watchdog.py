@@ -73,6 +73,77 @@ def test_write_loop_heartbeat_atomic_json(tmp_path, monkeypatch):
     assert get_loop_heartbeat_path(tmp_path) == path
 
 
+def test_heartbeat_payload_uses_exact_closed_schema(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "get_process_start_time", lambda pid: 321)
+    monkeypatch.setattr(watchdog, "_read_linux_boot_id", lambda: "boot-123")
+    _write_runtime_status(
+        tmp_path,
+        {
+            "pid": os.getpid(),
+            "start_time": 321,
+            "platforms": {"qqbot": {"state": "connected"}},
+        },
+    )
+
+    path = write_loop_heartbeat(start_time=100.5, home=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected_fields = frozenset(
+        {
+            "pid",
+            "updated_at",
+            "monotonic",
+            "process_start_time",
+            "boot_id",
+            "app_start_time",
+            "start_time",
+            "platforms",
+            "platforms_observed_at",
+            "platforms_observation_valid",
+            "platforms_observation_reason",
+        }
+    )
+
+    assert watchdog._HEARTBEAT_SCHEMA_FIELDS == expected_fields
+    assert set(payload) == expected_fields - {"platforms_observation_reason"}
+
+
+def test_heartbeat_extra_signature_never_writes_free_fields_or_text(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(watchdog, "get_process_start_time", lambda pid: 321)
+    _write_runtime_status(
+        tmp_path,
+        {"pid": os.getpid(), "start_time": 321, "platforms": {}},
+    )
+
+    path = write_loop_heartbeat(
+        home=tmp_path,
+        extra={
+            "Authorization": "Bearer top-secret-token",
+            "diagnostic": "customer incident details",
+            "attempt": 7,
+            "enabled": True,
+            "nested": {"note": "arbitrary text"},
+        },
+    )
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+
+    assert set(payload) <= watchdog._HEARTBEAT_SCHEMA_FIELDS
+    for forbidden in (
+        "Authorization",
+        "Bearer",
+        "top-secret-token",
+        "diagnostic",
+        "customer incident details",
+        "attempt",
+        "enabled",
+        "nested",
+        "arbitrary text",
+    ):
+        assert forbidden not in raw
+
+
 @pytest.mark.parametrize("secure_dir_fd", [True, False])
 def test_heartbeat_replaces_final_symlink_without_touching_target(
     tmp_path, monkeypatch, secure_dir_fd
