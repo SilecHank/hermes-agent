@@ -28,14 +28,17 @@ import faulthandler
 import json
 import logging
 import os
+import stat
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from gateway.status import get_process_start_time
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
 
@@ -51,6 +54,26 @@ DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
+_RUNTIME_STATUS_FILENAME = "gateway_state.json"
+_MAX_RUNTIME_STATUS_BYTES = 1024 * 1024
+_PLATFORM_STATES = frozenset(
+    {"connected", "connecting", "disconnected", "disabled", "fatal", "paused", "retrying"}
+)
+_HEARTBEAT_PROTECTED_FIELDS = frozenset(
+    {
+        "pid",
+        "process_start_time",
+        "app_start_time",
+        "start_time",
+        "boot_id",
+        "updated_at",
+        "monotonic",
+        "platforms",
+        "platforms_observed_at",
+        "platforms_observation_valid",
+        "platforms_observation_reason",
+    }
+)
 
 
 class _LoopFloorTimerHandle:
@@ -221,6 +244,141 @@ def get_shutdown_watchdog_dump_path(home: Optional[Path] = None) -> Path:
     return base.joinpath(*_WATCHDOG_DUMP_RELATIVE)
 
 
+def _read_linux_boot_id(
+    path: str = "/proc/sys/kernel/random/boot_id",
+) -> Optional[str]:
+    """Read the Linux boot identifier without following a substituted link."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, 129)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        value = raw.decode("ascii").strip()
+        parsed = uuid.UUID(value)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return str(parsed) if value.lower() == str(parsed) else None
+
+
+def _runtime_status_path(home: Optional[Path]) -> Path:
+    base = home if home is not None else _process_hermes_home()
+    return base / _RUNTIME_STATUS_FILENAME
+
+
+def _read_runtime_status_for_heartbeat(
+    home: Optional[Path],
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Read one bounded regular runtime snapshot without following symlinks."""
+    path = _runtime_status_path(home)
+    try:
+        before = path.lstat()
+        if stat.S_ISLNK(before.st_mode):
+            return None, "runtime_status_symlink"
+    except FileNotFoundError:
+        return None, "runtime_status_missing"
+    except OSError:
+        return None, "runtime_status_invalid"
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None, "runtime_status_missing"
+    except OSError:
+        try:
+            if path.is_symlink():
+                return None, "runtime_status_symlink"
+        except OSError:
+            pass
+        return None, "runtime_status_invalid"
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            return None, "runtime_status_invalid"
+        raw = os.read(fd, _MAX_RUNTIME_STATUS_BYTES + 1)
+    except OSError:
+        return None, "runtime_status_invalid"
+    finally:
+        os.close(fd)
+    if len(raw) > _MAX_RUNTIME_STATUS_BYTES:
+        return None, "runtime_status_invalid"
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, "runtime_status_invalid"
+    if not isinstance(payload, dict):
+        return None, "runtime_status_invalid"
+    return payload, "runtime_status_ready"
+
+
+def _platform_observation(
+    *,
+    pid: int,
+    process_start_time: Optional[int],
+    home: Optional[Path],
+    observed_at: str,
+) -> Dict[str, Any]:
+    runtime, reason = _read_runtime_status_for_heartbeat(home)
+    if runtime is None:
+        return {
+            "platforms_observation_valid": False,
+            "platforms_observation_reason": reason,
+        }
+
+    runtime_pid = runtime.get("pid")
+    runtime_start = runtime.get("start_time")
+    if (
+        type(runtime_pid) is not int
+        or runtime_pid != pid
+        or isinstance(runtime_start, bool)
+        or runtime_start != process_start_time
+    ):
+        return {
+            "platforms_observation_valid": False,
+            "platforms_observation_reason": "runtime_process_mismatch",
+        }
+
+    runtime_platforms = runtime.get("platforms")
+    if not isinstance(runtime_platforms, dict):
+        return {
+            "platforms_observation_valid": False,
+            "platforms_observation_reason": "runtime_platforms_invalid",
+        }
+
+    platforms: Dict[str, Dict[str, str]] = {}
+    for name, details in runtime_platforms.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(details, dict)
+            or not isinstance(details.get("state"), str)
+            or details["state"] not in _PLATFORM_STATES
+        ):
+            return {
+                "platforms_observation_valid": False,
+                "platforms_observation_reason": "runtime_platforms_invalid",
+            }
+        platforms[name] = {"state": details["state"]}
+
+    return {
+        "platforms_observation_valid": True,
+        "platforms_observed_at": observed_at,
+        "platforms": platforms,
+    }
+
+
 def write_loop_heartbeat(
     *,
     pid: Optional[int] = None,
@@ -230,19 +388,43 @@ def write_loop_heartbeat(
 ) -> Path:
     """Atomically rewrite the loop-liveness heartbeat file.
 
-    ``start_time`` is the gateway process start (``time.time()`` epoch seconds)
-    so supervisors can detect PID reuse. Best-effort — never raises.
+    ``start_time`` remains the application-start epoch accepted by existing
+    callers and is persisted as ``app_start_time`` plus the deprecated
+    ``start_time`` compatibility alias. ``process_start_time`` is independently
+    sampled from the kernel for PID-reuse protection.
+
+    Platform health is copied from the runtime status only when that file
+    identifies the same live process. Best-effort — never raises.
     """
     path = get_loop_heartbeat_path(home)
+    resolved_pid = int(pid if pid is not None else os.getpid())
+    process_start_time = get_process_start_time(resolved_pid)
+    observed_at = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, Any] = {
-        "pid": int(pid if pid is not None else os.getpid()),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "pid": resolved_pid,
+        "process_start_time": process_start_time,
+        "updated_at": observed_at,
         "monotonic": time.monotonic(),
     }
     if start_time is not None:
-        payload["start_time"] = float(start_time)
+        app_start_time = float(start_time)
+        payload["app_start_time"] = app_start_time
+        payload["start_time"] = app_start_time
+    boot_id = _read_linux_boot_id()
+    if boot_id is not None:
+        payload["boot_id"] = boot_id
     if extra:
-        payload.update(extra)
+        payload.update(
+            {key: value for key, value in extra.items() if key not in _HEARTBEAT_PROTECTED_FIELDS}
+        )
+    payload.update(
+        _platform_observation(
+            pid=resolved_pid,
+            process_start_time=process_start_time,
+            home=home,
+            observed_at=observed_at,
+        )
+    )
     try:
         atomic_json_write(path, payload, indent=None)
     except Exception:

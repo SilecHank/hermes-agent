@@ -986,8 +986,14 @@ def write_runtime_status(
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
-    payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
+    payload = _read_json_file(path)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("pid") != current_record["pid"]
+        or payload.get("start_time") != current_record["start_time"]
+    ):
+        payload = _build_runtime_status_record()
     payload.setdefault("platforms", {})
     payload["kind"] = current_record["kind"]
     payload["pid"] = current_record["pid"]
