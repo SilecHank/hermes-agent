@@ -65,15 +65,6 @@ else
 fi
 
 
-# ── Live-gateway plugin (computed before we drop env) ───────────────────────
-EXTRA_PYTHONPATH=""
-EXTRA_PYTEST_PLUGINS=""
-if [ -f "$HOME/.hermes/pytest_live_guard.py" ]; then
-  EXTRA_PYTHONPATH="$HOME/.hermes"
-  EXTRA_PYTEST_PLUGINS="pytest_live_guard"
-fi
-
-
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
 # No credential var can leak — you'd have to explicitly add it here.
@@ -90,15 +81,32 @@ cd "$REPO_ROOT"
 echo "▶ pre-compiling bytecode cache"
 "$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
+TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/hermes-agent-tests.XXXXXX")"
+TEST_HOME_TOKEN="$(
+  "$PYTHON" "$SCRIPT_DIR/test_environment_safety.py" initialize --root "$TEST_HOME"
+)"
+mkdir -p "$TEST_HOME/tmp"
+# Deliberately leave recursive cleanup to the operating system's temporary
+# directory lifecycle. The test runner must never issue a recursive delete.
+
 echo "▶ launching test runner"
-exec env -i \
+set +e
+env -i \
   PATH="$PATH" \
-  HOME="$HOME" \
+  HOME="$TEST_HOME" \
+  USERPROFILE="$TEST_HOME" \
+  HERMES_HOME="$TEST_HOME/.hermes" \
+  HERMES_TEST_SANDBOX="$TEST_HOME" \
+  HERMES_TEST_SANDBOX_TOKEN="$TEST_HOME_TOKEN" \
+  TMPDIR="$TEST_HOME/tmp" \
+  TMP="$TEST_HOME/tmp" \
+  TEMP="$TEST_HOME/tmp" \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
   PYTHONHASHSEED=0 \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
-  ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
-  ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
   "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+test_status=$?
+set -e
+exit "$test_status"
