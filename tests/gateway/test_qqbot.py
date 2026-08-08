@@ -7,7 +7,7 @@ from unittest import mock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import Platform, PlatformConfig, load_gateway_config
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,23 @@ class TestQQAdapterInit:
     def test_name_property(self):
         adapter = self._make(app_id="a", client_secret="b")
         assert adapter.name == "QQBot"
+
+
+def test_gateway_config_maps_qq_access_policy_env(monkeypatch, tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("QQ_APP_ID", "app")
+    monkeypatch.setenv("QQ_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("QQ_DM_POLICY", "open")
+    monkeypatch.setenv("QQ_GROUP_POLICY", "open")
+
+    config = load_gateway_config()
+
+    qq = config.platforms[Platform.QQBOT]
+    assert qq.extra["dm_policy"] == "open"
+    assert qq.extra["group_policy"] == "open"
 
 
 # ---------------------------------------------------------------------------

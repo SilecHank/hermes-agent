@@ -2425,6 +2425,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             extra["app_id"] = qq_app_id
         if qq_client_secret:
             extra["client_secret"] = qq_client_secret
+        qq_dm_policy = getenv("QQ_DM_POLICY", "").strip().lower()
+        if qq_dm_policy:
+            extra["dm_policy"] = qq_dm_policy
+        qq_group_policy = getenv("QQ_GROUP_POLICY", "").strip().lower()
+        if qq_group_policy:
+            extra["group_policy"] = qq_group_policy
         qq_allowed_users = getenv("QQ_ALLOWED_USERS", "").strip()
         if qq_allowed_users:
             extra["allow_from"] = qq_allowed_users
