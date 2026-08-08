@@ -33,6 +33,8 @@ Usage:
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_TEST_PASS_FDS Preserve comma-separated POSIX file descriptors
+                         for release-gate pytest children
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -53,6 +55,24 @@ from typing import Dict, List, Tuple
 
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
+
+
+def _test_pass_fds() -> tuple[int, ...]:
+    if sys.platform == "win32":
+        return ()
+    raw = os.environ.get("HERMES_TEST_PASS_FDS", "").strip()
+    if not raw:
+        return ()
+    descriptors: list[int] = []
+    for token in raw.split(","):
+        value = token.strip()
+        if not value.isdecimal():
+            raise ValueError("HERMES_TEST_PASS_FDS must contain decimal file descriptors")
+        descriptor = int(value)
+        os.fstat(descriptor)
+        if descriptor not in descriptors:
+            descriptors.append(descriptor)
+    return tuple(descriptors)
 
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt
@@ -321,6 +341,7 @@ def _run_one_file_once(
         stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         env=os.environ,
+        pass_fds=_test_pass_fds(),
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;

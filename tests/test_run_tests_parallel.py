@@ -40,6 +40,38 @@ def test_duration_cache_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None
     assert _duration_cache_enabled() is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pass_fds is POSIX-only")
+def test_release_gate_file_descriptor_reaches_pytest_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.run_tests_parallel import _run_one_file_once
+
+    protected = tmp_path / "protected"
+    protected.write_text("release-visible", encoding="utf-8")
+    fd = os.open(protected, os.O_RDONLY)
+    try:
+        probe = tmp_path / "test_release_fd.py"
+        probe.write_text(
+            "import os\n\n"
+            "def test_release_fd_is_open():\n"
+            f"    assert os.read({fd}, 32) == b'release-visible'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_TEST_PASS_FDS", str(fd))
+
+        _file, returncode, output, _counts, _duration = _run_one_file_once(
+            probe,
+            [],
+            tmp_path,
+            30,
+        )
+    finally:
+        os.close(fd)
+
+    assert returncode == 0, output
+
+
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
 # so concurrent invocations of the suite don't clobber each other.

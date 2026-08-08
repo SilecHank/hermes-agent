@@ -103,6 +103,11 @@ class TestEnvironmentSafetyTests(unittest.TestCase):
 
         self.assertIn('PYTHONPYCACHEPREFIX="$PYTHONPYCACHEPREFIX"', runner)
 
+    def test_canonical_runner_preserves_release_gate_file_descriptors(self):
+        runner = (PROJECT_ROOT / "scripts/run_tests.sh").read_text(encoding="utf-8")
+
+        self.assertIn('HERMES_TEST_PASS_FDS="$HERMES_TEST_PASS_FDS"', runner)
+
 
 if __name__ == "__main__":
     unittest.main()
