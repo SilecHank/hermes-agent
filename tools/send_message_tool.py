@@ -16,6 +16,7 @@ from email.utils import formatdate
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
+from tools.qqbot_targets import is_qqbot_openid, parse_qqbot_typed_target
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,6 @@ _SLACK_MENTION_RE = re.compile(r"^\s*<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>\s*$")
 _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
-_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
-_QQBOT_TYPED_TARGET_RE = re.compile(
-    r"^\s*(group|direct):([A-Za-z0-9_-]{32})\s*$"
-)
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -585,17 +582,12 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
     if platform_name == "qqbot":
-        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target_ref)
-        if typed_match:
-            return f"{typed_match.group(1)}:{typed_match.group(2)}", None, True
+        typed_target = parse_qqbot_typed_target(target_ref)
+        if typed_target:
+            kind, openid = typed_target
+            return f"{kind}:{openid}", None, True
         stripped = target_ref.strip()
-        if ":" in stripped:
-            raise ValueError(
-                "Malformed QQBot typed target. Expected "
-                "'group:<32-character-openid>' or "
-                "'direct:<32-character-openid>'."
-            )
-        if _QQBOT_OPENID_RE.fullmatch(stripped):
+        if is_qqbot_openid(stripped):
             return stripped, None, True
     if platform_name == "ntfy":
         topic = target_ref.strip()
@@ -2016,6 +2008,11 @@ async def _send_qqbot(pconfig, chat_id, message):
     bare targets retain the legacy guild/C2C/group endpoint probing.
     """
     try:
+        typed_target = parse_qqbot_typed_target(str(chat_id))
+    except ValueError as exc:
+        return _error(str(exc))
+
+    try:
         import httpx
     except ImportError:
         return _error("QQBot direct send requires httpx. Run: pip install httpx")
@@ -2027,12 +2024,8 @@ async def _send_qqbot(pconfig, chat_id, message):
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
-    typed_kind = None
-    target_id = chat_id
-    typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(str(chat_id))
-    if typed_match:
-        typed_kind = typed_match.group(1)
-        target_id = typed_match.group(2)
+    typed_kind = typed_target[0] if typed_target else None
+    target_id = typed_target[1] if typed_target else chat_id
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:

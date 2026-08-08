@@ -37,7 +37,6 @@ import json
 import logging
 import mimetypes
 import os
-import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -72,11 +71,9 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.platforms.helpers import strip_markdown
+from tools.qqbot_targets import parse_qqbot_typed_target
 
 logger = logging.getLogger(__name__)
-_QQBOT_TYPED_TARGET_RE = re.compile(
-    r"^(group|direct):([A-Za-z0-9_-]{32})$"
-)
 
 
 class QQCloseError(Exception):
@@ -3214,9 +3211,9 @@ class QQAdapter(BasePlatformAdapter):
 
     def _guess_chat_type(self, chat_id: str) -> str:
         """Determine chat type from stored inbound metadata, fallback to 'c2c'."""
-        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(str(chat_id))
-        if typed_match:
-            return "group" if typed_match.group(1) == "group" else "c2c"
+        typed_target = parse_qqbot_typed_target(str(chat_id))
+        if typed_target:
+            return "group" if typed_target[0] == "group" else "c2c"
         if chat_id in self._chat_type_map:
             return self._chat_type_map[chat_id]
         return "c2c"
@@ -3224,14 +3221,11 @@ class QQAdapter(BasePlatformAdapter):
     def _resolve_chat_target(self, chat_id: str) -> Tuple[str, str]:
         """Resolve an explicit typed target to adapter chat type and raw ID."""
         target = str(chat_id)
-        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target)
-        if typed_match:
-            chat_type = "group" if typed_match.group(1) == "group" else "c2c"
-            return chat_type, typed_match.group(2)
-        if target.startswith(("group:", "direct:")):
-            raise ValueError(
-                "Malformed QQBot typed target. Expected a 32-character openid."
-            )
+        typed_target = parse_qqbot_typed_target(target)
+        if typed_target:
+            kind, openid = typed_target
+            chat_type = "group" if kind == "group" else "c2c"
+            return chat_type, openid
         return self._guess_chat_type(target), target
 
     @staticmethod

@@ -17,6 +17,12 @@ from tools.send_message_tool import _send_qqbot
 GROUP_OPENID = "0123456789abcdef0123456789abcdef"
 DIRECT_OPENID = "fedcba9876543210fedcba9876543210"
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
+MALFORMED_TYPED_TARGETS = [
+    "group:short",
+    "direct:bad",
+    f"Group:{GROUP_OPENID}",
+    f"groupx:{GROUP_OPENID}",
+]
 
 
 class _FakeQQResponse:
@@ -156,6 +162,21 @@ def test_standalone_bare_openid_keeps_multi_endpoint_probe(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("typed_target", MALFORMED_TYPED_TARGETS)
+def test_standalone_malformed_typed_target_fails_without_bare_probe(
+    monkeypatch,
+    typed_target,
+):
+    result, fake = _run_standalone_qq_send(
+        monkeypatch,
+        typed_target,
+        [404, 404, 404],
+    )
+
+    assert "Malformed QQBot typed target" in result["error"]
+    assert _qq_send_urls(fake) == []
+
+
 @pytest.mark.parametrize(
     ("kind", "openid"),
     [("group", GROUP_OPENID), ("direct", DIRECT_OPENID)],
@@ -173,6 +194,17 @@ def test_delivery_target_parse_preserves_qq_typed_chat_id(kind, openid):
 def test_delivery_target_parse_rejects_malformed_qq_typed_chat_id(kind):
     with pytest.raises(ValueError, match="Malformed QQBot typed target"):
         DeliveryTarget.parse(f"qqbot:{kind}:short")
+
+
+@pytest.mark.parametrize(
+    "typed_target",
+    [f"Group:{GROUP_OPENID}", f"groupx:{GROUP_OPENID}"],
+)
+def test_delivery_target_parse_rejects_unknown_or_case_mismatched_kind(
+    typed_target,
+):
+    with pytest.raises(ValueError, match="Malformed QQBot typed target"):
+        DeliveryTarget.parse(f"qqbot:{typed_target}")
 
 
 @pytest.mark.asyncio
@@ -235,6 +267,35 @@ async def test_live_delivery_failure_does_not_cross_qq_endpoints(
         )
 
     assert paths == [("POST", f"/v2/{resource}/{openid}/messages")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed_target",
+    [f"Group:{GROUP_OPENID}", f"groupx:{GROUP_OPENID}"],
+)
+async def test_live_delivery_rejects_unknown_or_case_mismatched_kind(
+    typed_target,
+):
+    paths = []
+
+    async def fake_api_request(method, path, body):
+        paths.append((method, path))
+        return {"id": "must-not-send"}
+
+    pconfig, adapter = _connected_adapter(fake_api_request)
+    config = GatewayConfig(platforms={Platform.QQBOT: pconfig})
+    router = DeliveryRouter(config, adapters={Platform.QQBOT: adapter})
+    target = DeliveryTarget(
+        platform=Platform.QQBOT,
+        chat_id=typed_target,
+        is_explicit=True,
+    )
+
+    with pytest.raises(ValueError, match="Malformed QQBot typed target"):
+        await router._deliver_to_platform(target, "live hello", metadata=None)
+
+    assert paths == []
 
 
 @pytest.mark.parametrize(

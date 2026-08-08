@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 from hermes_cli.config import get_hermes_home
+from tools.qqbot_targets import parse_qqbot_typed_target
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,6 @@ _SILENCE_NARRATION = re.compile(
     r'^[\s*_~`]*\(?\s*(silent|silence|no\s+response|no\s+reply)\s*\.?\)?[\s*_~`]*$'
     r'|^[\s*_~`]*[\U0001F507\.\u2026]+[\s*_~`]*$',
     re.IGNORECASE,
-)
-_QQBOT_TYPED_TARGET_RE = re.compile(
-    r"^(group|direct):([A-Za-z0-9_-]{32})$"
 )
 
 
@@ -266,20 +264,13 @@ class DeliveryTarget:
             platform_str = parts[0].lower()  # Platform names are case-insensitive
             if platform_str == "qqbot":
                 target_ref = target_stripped.split(":", 1)[1]
-                typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target_ref)
-                if typed_match:
+                typed_target = parse_qqbot_typed_target(target_ref)
+                if typed_target:
+                    kind, openid = typed_target
                     return cls(
                         platform=Platform.QQBOT,
-                        chat_id=(
-                            f"{typed_match.group(1)}:{typed_match.group(2)}"
-                        ),
+                        chat_id=f"{kind}:{openid}",
                         is_explicit=True,
-                    )
-                if target_ref.startswith(("group:", "direct:")):
-                    raise ValueError(
-                        "Malformed QQBot typed target. Expected "
-                        "'group:<32-character-openid>' or "
-                        "'direct:<32-character-openid>'."
                     )
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
@@ -660,5 +651,3 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
-
