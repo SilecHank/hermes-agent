@@ -105,6 +105,7 @@ env -i \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
   PYTHONHASHSEED=0 \
+  ${IVD_KB_ROOT:+IVD_KB_ROOT="$IVD_KB_ROOT"} \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
 test_status=$?
