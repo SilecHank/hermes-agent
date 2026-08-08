@@ -29,3 +29,24 @@ def parse_qqbot_typed_target(value: str) -> Optional[Tuple[str, str]]:
 def is_qqbot_openid(value: str) -> bool:
     """Return whether *value* is a bare 32-character QQ openid."""
     return bool(QQBOT_OPENID_RE.fullmatch(str(value).strip()))
+
+
+def canonical_qqbot_target_id(value: str) -> str:
+    """Return the bare openid used for QQ session identity and deduplication."""
+    target = str(value).strip()
+    typed_target = parse_qqbot_typed_target(target)
+    return typed_target[1] if typed_target else target
+
+
+def format_qqbot_typed_target(openid: str, chat_type: object) -> Optional[str]:
+    """Format a typed QQ target only when both id and chat type are reliable."""
+    target_id = str(openid).strip()
+    if not is_qqbot_openid(target_id):
+        return None
+
+    normalized_type = str(chat_type or "").strip().lower()
+    if normalized_type == "group":
+        return f"qqbot:group:{target_id}"
+    if normalized_type in {"dm", "c2c", "direct"}:
+        return f"qqbot:direct:{target_id}"
+    return None

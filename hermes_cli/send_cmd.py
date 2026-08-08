@@ -28,27 +28,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+from tools.qqbot_targets import format_qqbot_typed_target, is_qqbot_openid
 
 
 _USAGE_EXIT = 2
 _FAILURE_EXIT = 1
 _SUCCESS_EXIT = 0
-_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
 
-def _list_target_ref(platform_name: str, channel: dict) -> str:
+def _list_target_ref(platform_name: str, channel: dict) -> Optional[str]:
     """Return the safest copyable target for a directory entry."""
     chat_id = str(channel.get("id") or channel.get("chat_id") or "")
-    chat_type = str(channel.get("type") or "").lower()
-    if platform_name == "qqbot" and _QQBOT_OPENID_RE.fullmatch(chat_id):
-        if chat_type == "group":
-            return f"qqbot:group:{chat_id}"
-        if chat_type in {"dm", "c2c", "direct"}:
-            return f"qqbot:direct:{chat_id}"
+    if platform_name == "qqbot" and is_qqbot_openid(chat_id):
+        return format_qqbot_typed_target(chat_id, channel.get("type"))
     return f"{platform_name}:{channel.get('name', '?')}"
 
 
@@ -216,6 +212,8 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
             name = ch.get("name", "?")
             chat_id = ch.get("id") or ch.get("chat_id") or ""
             target_ref = _list_target_ref(plat_name, ch)
+            if target_ref is None:
+                continue
             if target_ref.startswith(("qqbot:group:", "qqbot:direct:")):
                 print(f"  {target_ref}  [{name}]")
                 continue

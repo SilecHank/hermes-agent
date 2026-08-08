@@ -655,6 +655,21 @@ class TestChannelAliases:
             injected = [e for e in entries if e["id"] == "999@g.us"]
             assert injected and injected[0]["type"] == "group"
 
+    def test_qq_alias_without_discovered_type_is_not_listed_as_direct(self, tmp_path):
+        openid = "0123456789abcdef0123456789abcdef"
+        cache_file = _write_directory(tmp_path, {"qqbot": []})
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
+             self._setup_aliases(tmp_path, {"qqbot": {openid: "release-room"}}):
+            directory = load_directory()
+            display = format_directory_for_display()
+
+        injected = directory["platforms"]["qqbot"][0]
+        assert injected["type"] == "unknown"
+        assert f"qqbot:direct:{openid}" not in display
+        assert f"qqbot:group:{openid}" not in display
+        assert "release-room" not in display
+
     def test_no_alias_file_is_noop(self, tmp_path):
         cache_file = _write_directory(tmp_path, {
             "whatsapp": [{"id": "120363@g.us", "name": "120363", "type": "group"}]

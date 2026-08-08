@@ -9,12 +9,12 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 import asyncio
 import json
 import logging
-import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
+from tools.qqbot_targets import format_qqbot_typed_target, is_qqbot_openid
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,6 @@ _slack_directory_warning_last: Dict[tuple[str, str], float] = {}
 # letting you pre-name a chat before it has produced any traffic).
 # Format: {"<platform>": {"<chat_id>": "<friendly name>", ...}, ...}
 CHANNEL_ALIASES_PATH = get_hermes_home() / "channel_aliases.json"
-_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
 
 def _load_channel_aliases() -> Dict[str, Dict[str, str]]:
@@ -77,7 +76,11 @@ def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
                 entries.append({
                     "id": chat_id,
                     "name": friendly,
-                    "type": "group" if str(chat_id).endswith("@g.us") else "dm",
+                    "type": (
+                        "unknown"
+                        if plat_name == "qqbot"
+                        else "group" if chat_id.endswith("@g.us") else "dm"
+                    ),
                     "thread_id": None,
                 })
 
@@ -96,15 +99,13 @@ def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     return name
 
 
-def _channel_target_ref(platform_name: str, channel: Dict[str, Any]) -> str:
+def _channel_target_ref(
+    platform_name: str, channel: Dict[str, Any]
+) -> Optional[str]:
     """Return a copyable target reference for a directory entry."""
     chat_id = str(channel.get("id") or "")
-    chat_type = str(channel.get("type") or "").lower()
-    if platform_name == "qqbot" and _QQBOT_OPENID_RE.fullmatch(chat_id):
-        if chat_type == "group":
-            return f"qqbot:group:{chat_id}"
-        if chat_type in {"dm", "c2c", "direct"}:
-            return f"qqbot:direct:{chat_id}"
+    if platform_name == "qqbot" and is_qqbot_openid(chat_id):
+        return format_qqbot_typed_target(chat_id, channel.get("type"))
     return f"{platform_name}:{_channel_target_name(platform_name, channel)}"
 
 
@@ -592,9 +593,18 @@ def format_directory_for_display() -> str:
                     lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
             lines.append("")
         else:
+            visible_channels = [
+                (ch, _channel_target_ref(plat_name, ch)) for ch in channels
+            ]
+            visible_channels = [
+                (ch, target_ref)
+                for ch, target_ref in visible_channels
+                if target_ref is not None
+            ]
+            if not visible_channels:
+                continue
             lines.append(f"{plat_name.title()}:")
-            for ch in channels:
-                target_ref = _channel_target_ref(plat_name, ch)
+            for ch, target_ref in visible_channels:
                 if target_ref.startswith(("qqbot:group:", "qqbot:direct:")):
                     lines.append(f"  {target_ref}  [{ch['name']}]")
                 else:

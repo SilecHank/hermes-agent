@@ -16,7 +16,11 @@ from email.utils import formatdate
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
-from tools.qqbot_targets import is_qqbot_openid, parse_qqbot_typed_target
+from tools.qqbot_targets import (
+    canonical_qqbot_target_id,
+    is_qqbot_openid,
+    parse_qqbot_typed_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +293,10 @@ def _handle_react(args, remove=False):
     target_ref = parts[1].strip() if len(parts) > 1 else None
     chat_id = None
     if target_ref:
-        chat_id, _thread_id, _ = _parse_target_ref(platform_name, target_ref)
+        try:
+            chat_id, _thread_id, _ = _parse_target_ref(platform_name, target_ref)
+        except ValueError as exc:
+            return json.dumps(_error(str(exc)))
         if not chat_id:
             try:
                 from gateway.channel_directory import resolve_channel_name
@@ -468,7 +475,14 @@ def _handle_send(args):
                 f"or set a home channel via: hermes config set {home_env} <channel_id>"
             })
 
-    duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
+    identity_chat_id = (
+        canonical_qqbot_target_id(chat_id)
+        if platform_name == "qqbot"
+        else chat_id
+    )
+    duplicate_skip = _maybe_skip_cron_duplicate_send(
+        platform_name, identity_chat_id, thread_id
+    )
     if duplicate_skip:
         return json.dumps(duplicate_skip)
 
@@ -514,7 +528,7 @@ def _handle_send(args):
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
                 if mirror_to_session(
                     platform_name,
-                    chat_id,
+                    identity_chat_id,
                     mirror_text,
                     source_label=source_label,
                     thread_id=thread_id,
