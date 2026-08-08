@@ -31,6 +31,15 @@ from pathlib import Path
 import pytest
 
 
+def test_duration_cache_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.run_tests_parallel import _duration_cache_enabled
+
+    monkeypatch.setenv("HERMES_TEST_DURATION_CACHE", "0")
+    assert _duration_cache_enabled() is False
+    monkeypatch.setenv("HERMES_TEST_DURATION_CACHE", "1")
+    assert _duration_cache_enabled() is True
+
+
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
 # so concurrent invocations of the suite don't clobber each other.

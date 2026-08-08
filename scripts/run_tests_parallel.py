@@ -100,6 +100,11 @@ _DEFAULT_FILE_RETRIES = 1
 _DURATIONS_FILE = "test_durations.json"
 
 
+def _duration_cache_enabled() -> bool:
+    value = os.environ.get("HERMES_TEST_DURATION_CACHE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def _approximately_count_tests(
     files: List[Path], repo_root: Path
 ) -> dict[Path, int]:
@@ -972,7 +977,7 @@ def main() -> int:
     # partial test_durations.json; a CI merge step joins them later.
     # Locally, _save_durations merges with any existing cache so entries
     # from previous runs aren't lost.
-    if file_times:
+    if file_times and _duration_cache_enabled():
         _save_durations(file_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(file_times)} files)")
 
