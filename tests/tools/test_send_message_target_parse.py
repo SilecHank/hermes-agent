@@ -9,6 +9,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from gateway.config import Platform
 from tools.send_message_tool import _parse_target_ref, send_message_tool
 
@@ -90,3 +92,63 @@ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
         force_document=False,
     )
 
+
+QQ_GROUP_OPENID = "0123456789abcdef0123456789abcdef"
+QQ_DIRECT_OPENID = "fedcba9876543210fedcba9876543210"
+
+
+@pytest.mark.parametrize(
+    ("target_ref", "expected"),
+    [
+        (f"group:{QQ_GROUP_OPENID}", f"group:{QQ_GROUP_OPENID}"),
+        (f"direct:{QQ_DIRECT_OPENID}", f"direct:{QQ_DIRECT_OPENID}"),
+    ],
+)
+def test_qqbot_typed_target_is_explicit_and_preserves_type(
+    target_ref: str,
+    expected: str,
+) -> None:
+    assert _parse_target_ref("qqbot", target_ref) == (expected, None, True)
+
+
+def test_qqbot_bare_32_character_openid_remains_explicit() -> None:
+    assert _parse_target_ref("qqbot", QQ_GROUP_OPENID) == (
+        QQ_GROUP_OPENID,
+        None,
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    "target_ref",
+    [
+        f"group:{QQ_GROUP_OPENID[:-1]}",
+        f"direct:{QQ_DIRECT_OPENID}x",
+        "group:not-an-openid",
+        "direct:",
+    ],
+)
+def test_qqbot_malformed_typed_target_is_rejected(target_ref: str) -> None:
+    with pytest.raises(ValueError, match="Malformed QQBot typed target"):
+        _parse_target_ref("qqbot", target_ref)
+
+
+def test_send_message_rejects_malformed_qqbot_target_without_home_fallback() -> None:
+    with patch(
+        "gateway.config.load_gateway_config",
+        side_effect=AssertionError("malformed target must fail before config/home lookup"),
+    ), patch(
+        "gateway.channel_directory.resolve_channel_name",
+        side_effect=AssertionError("malformed typed target must not use directory lookup"),
+    ):
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": f"qqbot:group:{QQ_GROUP_OPENID[:-1]}",
+                    "message": "must not send",
+                }
+            )
+        )
+
+    assert "Malformed QQBot typed target" in result["error"]

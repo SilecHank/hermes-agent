@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,19 @@ from typing import Optional
 _USAGE_EXIT = 2
 _FAILURE_EXIT = 1
 _SUCCESS_EXIT = 0
+_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
+
+
+def _list_target_ref(platform_name: str, channel: dict) -> str:
+    """Return the safest copyable target for a directory entry."""
+    chat_id = str(channel.get("id") or channel.get("chat_id") or "")
+    chat_type = str(channel.get("type") or "").lower()
+    if platform_name == "qqbot" and _QQBOT_OPENID_RE.fullmatch(chat_id):
+        if chat_type == "group":
+            return f"qqbot:group:{chat_id}"
+        if chat_type in {"dm", "c2c", "direct"}:
+            return f"qqbot:direct:{chat_id}"
+    return f"{platform_name}:{channel.get('name', '?')}"
 
 
 def _read_message_body(
@@ -201,8 +215,12 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         for ch in channels:
             name = ch.get("name", "?")
             chat_id = ch.get("id") or ch.get("chat_id") or ""
+            target_ref = _list_target_ref(plat_name, ch)
+            if target_ref.startswith(("qqbot:group:", "qqbot:direct:")):
+                print(f"  {target_ref}  [{name}]")
+                continue
             suffix = f"  [{chat_id}]" if chat_id and chat_id != name else ""
-            print(f"  {plat_name}:{name}{suffix}")
+            print(f"  {target_ref}{suffix}")
         print()
 
     return _SUCCESS_EXIT
@@ -318,6 +336,8 @@ def cmd_send(args: argparse.Namespace) -> None:
             "Examples:\n"
             "  hermes send --to telegram \"hello\"\n"
             "  hermes send --to discord:#ops --file report.md\n"
+            "  hermes send --to qqbot:group:<32-char-openid> \"hello group\"\n"
+            "  hermes send --to qqbot:direct:<32-char-openid> \"hello user\"\n"
             "  hermes send --list      # list available targets",
             file=sys.stderr,
         )
@@ -388,6 +408,8 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "  echo \"RAM 92%\" | hermes send --to telegram:-1001234567890\n"
             "  hermes send --to discord:#ops --file /tmp/report.md\n"
             "  hermes send --to slack:#eng --subject \"[CI]\" --file build.log\n"
+            "  hermes send --to qqbot:group:<32-char-openid> \"release ready\"\n"
+            "  hermes send --to qqbot:direct:<32-char-openid> \"job finished\"\n"
             "  hermes send --to telegram \"MEDIA:/tmp/chart.png\"   # send a media attachment\n"
             "  hermes send --list                  # all platforms\n"
             "  hermes send --list telegram         # filter by platform\n"
@@ -407,7 +429,8 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "'platform:chat_id', 'platform:chat_id:thread_id', or "
             "'platform:#channel-name'. Examples: telegram, "
             "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, "
-            "signal:+15551234567."
+            "signal:+15551234567, qqbot:group:<32-char-openid>, or "
+            "qqbot:direct:<32-char-openid>."
         ),
     )
 

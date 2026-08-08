@@ -35,6 +35,10 @@ _SLACK_MENTION_RE = re.compile(r"^\s*<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>\s*$")
 _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
+_QQBOT_TYPED_TARGET_RE = re.compile(
+    r"^\s*(group|direct):([A-Za-z0-9_-]{32})\s*$"
+)
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -368,10 +372,13 @@ def _handle_send(args):
     chat_id = None
     thread_id = None
 
-    if target_ref:
-        chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
-    else:
-        is_explicit = False
+    try:
+        if target_ref:
+            chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+        else:
+            is_explicit = False
+    except ValueError as exc:
+        return json.dumps(_error(str(exc)))
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
@@ -577,6 +584,19 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "qqbot":
+        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target_ref)
+        if typed_match:
+            return f"{typed_match.group(1)}:{typed_match.group(2)}", None, True
+        stripped = target_ref.strip()
+        if ":" in stripped:
+            raise ValueError(
+                "Malformed QQBot typed target. Expected "
+                "'group:<32-character-openid>' or "
+                "'direct:<32-character-openid>'."
+            )
+        if _QQBOT_OPENID_RE.fullmatch(stripped):
+            return stripped, None, True
     if platform_name == "ntfy":
         topic = target_ref.strip()
         if topic:
@@ -1992,8 +2012,8 @@ async def _send_qqbot(pconfig, chat_id, message):
     """Send via QQBot using the REST API directly (no WebSocket needed).
 
     Uses the QQ Bot Open Platform REST endpoints to get an access token
-    and post a message. Supports guild channels, C2C (private) chats,
-    and group chats by trying the appropriate endpoints.
+    and post a message. Typed group/direct targets use exactly one endpoint;
+    bare targets retain the legacy guild/C2C/group endpoint probing.
     """
     try:
         import httpx
@@ -2006,6 +2026,13 @@ async def _send_qqbot(pconfig, chat_id, message):
               or os.getenv("QQ_CLIENT_SECRET", ""))
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
+
+    typed_kind = None
+    target_id = chat_id
+    typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(str(chat_id))
+    if typed_match:
+        typed_kind = typed_match.group(1)
+        target_id = typed_match.group(2)
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -2030,28 +2057,50 @@ async def _send_qqbot(pconfig, chat_id, message):
             }
             payload = {"content": message[:4000], "msg_type": 0}
 
+            if typed_kind:
+                resource = "groups" if typed_kind == "group" else "users"
+                typed_url = (
+                    f"https://api.sgroup.qq.com/v2/{resource}/{target_id}/messages"
+                )
+                typed_resp = await client.post(
+                    typed_url,
+                    json=payload,
+                    headers=headers,
+                )
+                if typed_resp.status_code in {200, 201}:
+                    data = typed_resp.json()
+                    return {
+                        "success": True,
+                        "platform": "qqbot",
+                        "chat_id": target_id,
+                        "message_id": data.get("id"),
+                    }
+                return _error(
+                    f"QQBot {typed_kind} send failed: {typed_resp.status_code}"
+                )
+
             # Try channel endpoint first (works for guild channels)
-            url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
+            url = f"https://api.sgroup.qq.com/channels/{target_id}/messages"
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in {200, 201}:
                 data = resp.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # If channel endpoint failed (likely "频道不存在"), try C2C endpoint
-            url_c2c = f"https://api.sgroup.qq.com/v2/users/{chat_id}/messages"
+            url_c2c = f"https://api.sgroup.qq.com/v2/users/{target_id}/messages"
             resp_c2c = await client.post(url_c2c, json=payload, headers=headers)
             if resp_c2c.status_code in {200, 201}:
                 data = resp_c2c.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # If C2C also failed, try group endpoint
-            url_group = f"https://api.sgroup.qq.com/v2/groups/{chat_id}/messages"
+            url_group = f"https://api.sgroup.qq.com/v2/groups/{target_id}/messages"
             resp_group = await client.post(url_group, json=payload, headers=headers)
             if resp_group.status_code in {200, 201}:
                 data = resp_group.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # All endpoints failed — return the most informative error

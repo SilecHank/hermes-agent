@@ -9,6 +9,7 @@ action="list" and for resolving human-friendly channel names to numeric IDs.
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,7 @@ _slack_directory_warning_last: Dict[tuple[str, str], float] = {}
 # letting you pre-name a chat before it has produced any traffic).
 # Format: {"<platform>": {"<chat_id>": "<friendly name>", ...}, ...}
 CHANNEL_ALIASES_PATH = get_hermes_home() / "channel_aliases.json"
+_QQBOT_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
 
 def _load_channel_aliases() -> Dict[str, Dict[str, str]]:
@@ -92,6 +94,18 @@ def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     if platform_name != "discord" and channel.get("type"):
         return f"{name} ({channel['type']})"
     return name
+
+
+def _channel_target_ref(platform_name: str, channel: Dict[str, Any]) -> str:
+    """Return a copyable target reference for a directory entry."""
+    chat_id = str(channel.get("id") or "")
+    chat_type = str(channel.get("type") or "").lower()
+    if platform_name == "qqbot" and _QQBOT_OPENID_RE.fullmatch(chat_id):
+        if chat_type == "group":
+            return f"qqbot:group:{chat_id}"
+        if chat_type in {"dm", "c2c", "direct"}:
+            return f"qqbot:direct:{chat_id}"
+    return f"{platform_name}:{_channel_target_name(platform_name, channel)}"
 
 
 def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
@@ -580,7 +594,11 @@ def format_directory_for_display() -> str:
         else:
             lines.append(f"{plat_name.title()}:")
             for ch in channels:
-                lines.append(f"  {plat_name}:{_channel_target_name(plat_name, ch)}")
+                target_ref = _channel_target_ref(plat_name, ch)
+                if target_ref.startswith(("qqbot:group:", "qqbot:direct:")):
+                    lines.append(f"  {target_ref}  [{ch['name']}]")
+                else:
+                    lines.append(f"  {target_ref}")
             lines.append("")
 
     lines.append('Use these as the "target" parameter when sending.')

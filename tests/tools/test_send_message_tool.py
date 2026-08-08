@@ -3557,3 +3557,108 @@ class TestSendTelegramThreadNotFoundRetry:
         finally:
             if media_path and os.path.exists(media_path):
                 os.unlink(media_path)
+
+
+# ---------------------------------------------------------------------------
+# QQBot typed proactive targets
+# ---------------------------------------------------------------------------
+
+
+class _FakeQQResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+class _FakeQQHttp:
+    def __init__(self, send_statuses):
+        self.send_statuses = list(send_statuses)
+        self.calls = []
+
+    def __call__(self, *_args, **_kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.calls.append({"url": url, "payload": json, "headers": headers})
+        if url == "https://bots.qq.com/app/getAppAccessToken":
+            return _FakeQQResponse(200, {"access_token": "qq-access-token"})
+        if not self.send_statuses:
+            raise AssertionError(f"Unexpected QQBot endpoint probe: {url}")
+        status = self.send_statuses.pop(0)
+        return _FakeQQResponse(status, {"id": "qq-message-id"})
+
+
+def _qq_send_urls(fake):
+    return [
+        call["url"]
+        for call in fake.calls
+        if call["url"] != "https://bots.qq.com/app/getAppAccessToken"
+    ]
+
+
+def _run_qq_send(monkeypatch, target, send_statuses):
+    import httpx
+    from tools.send_message_tool import _send_qqbot
+
+    fake = _FakeQQHttp(send_statuses)
+    monkeypatch.setattr(httpx, "AsyncClient", fake)
+    pconfig = SimpleNamespace(token="qq-secret", extra={"app_id": "qq-app"})
+    result = asyncio.run(_send_qqbot(pconfig, target, "hello qq"))
+    return result, fake
+
+
+def test_qqbot_typed_group_uses_only_group_endpoint(monkeypatch):
+    openid = "0123456789abcdef0123456789abcdef"
+
+    result, fake = _run_qq_send(monkeypatch, f"group:{openid}", [201])
+
+    assert result["success"] is True
+    assert result["chat_id"] == openid
+    assert _qq_send_urls(fake) == [
+        f"https://api.sgroup.qq.com/v2/groups/{openid}/messages"
+    ]
+
+
+def test_qqbot_typed_direct_uses_only_direct_endpoint(monkeypatch):
+    openid = "fedcba9876543210fedcba9876543210"
+
+    result, fake = _run_qq_send(monkeypatch, f"direct:{openid}", [200])
+
+    assert result["success"] is True
+    assert result["chat_id"] == openid
+    assert _qq_send_urls(fake) == [
+        f"https://api.sgroup.qq.com/v2/users/{openid}/messages"
+    ]
+
+
+def test_qqbot_failed_typed_group_does_not_probe_or_fallback(monkeypatch):
+    openid = "0123456789abcdef0123456789abcdef"
+
+    result, fake = _run_qq_send(monkeypatch, f"group:{openid}", [500])
+
+    assert "error" in result
+    assert _qq_send_urls(fake) == [
+        f"https://api.sgroup.qq.com/v2/groups/{openid}/messages"
+    ]
+
+
+def test_qqbot_bare_openid_keeps_multi_endpoint_probe(monkeypatch):
+    openid = "0123456789abcdef0123456789abcdef"
+
+    result, fake = _run_qq_send(monkeypatch, openid, [404, 404, 201])
+
+    assert result["success"] is True
+    assert _qq_send_urls(fake) == [
+        f"https://api.sgroup.qq.com/channels/{openid}/messages",
+        f"https://api.sgroup.qq.com/v2/users/{openid}/messages",
+        f"https://api.sgroup.qq.com/v2/groups/{openid}/messages",
+    ]

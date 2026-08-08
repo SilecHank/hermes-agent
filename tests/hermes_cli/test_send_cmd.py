@@ -399,3 +399,41 @@ def test_load_hermes_env_handles_missing_files(tmp_path, monkeypatch):
 
     # Should not raise.
     send_cmd._load_hermes_env()
+
+
+def test_send_help_documents_qqbot_typed_targets(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _parse(["--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "qqbot:group:<32-char-openid>" in help_text
+    assert "qqbot:direct:<32-char-openid>" in help_text
+
+
+def test_list_qqbot_displays_safe_typed_targets(monkeypatch, capsys):
+    import sys as _sys
+    import types as _types
+
+    group_openid = "0123456789abcdef0123456789abcdef"
+    direct_openid = "fedcba9876543210fedcba9876543210"
+    fake_dir = _types.ModuleType("gateway.channel_directory")
+    fake_dir.format_directory_for_display = lambda: "(unused for filtered output)"
+    fake_dir.load_directory = lambda: {
+        "platforms": {
+            "qqbot": [
+                {"id": group_openid, "name": "Release Group", "type": "group"},
+                {"id": direct_openid, "name": "Operator", "type": "dm"},
+            ]
+        }
+    }
+    monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
+
+    args = _parse(["--list", "qqbot"])
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert f"qqbot:group:{group_openid}" in output
+    assert f"qqbot:direct:{direct_openid}" in output
