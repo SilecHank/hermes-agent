@@ -24,6 +24,7 @@ _BOUNDED_INTERNAL_RE = re.compile(
     r"(?:"
     r"\[(?:System validation|System note):[^\]]*\]"
     r"|\[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED[^\]\r\n]*\]"
+    r"|\[Gateway verified sender identity:[^\]\r\n]*\]"
     r")",
     re.IGNORECASE | re.DOTALL,
 )

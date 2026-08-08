@@ -13,7 +13,8 @@ unsafe because another member could inherit it from group context.
 
 ## Goals
 
-- Restore `老板` for the verified primary operator identities.
+- Restore `老板` for the verified primary operator identities and `我是海`
+  for the separately verified QQ group member.
 - Resolve the address from the current inbound sender, not conversation history.
 - Keep group conversation context shared while keeping identity and address
   isolated per member.
@@ -32,10 +33,18 @@ this registry. A match contributes a turn-local identity note to the model
 context. It does not change the session key, authorization identity, chat ID, or
 another member's context. An unmatched or malformed record contributes nothing.
 
-The initial runtime configuration binds the verified QQ home identity and Weixin
-home identity to `display_name: 斯霖` and `preferred_address: 老板`. WeCom remains
-unchanged until an owner identity is explicitly confirmed because it has no
-configured home user.
+The initial runtime configuration binds QQ member
+`A071C72D625932F8520407E574D6AE17` to `display_name: 斯霖` and
+`preferred_address: 老板`, and QQ member
+`9383D64A9ABFABBEDFFD45BB1BB95FA8` to `display_name: 我是海` and
+`preferred_address: 我是海`. The verified Weixin home identity remains bound to
+the primary operator. WeCom remains unchanged until an owner identity is
+explicitly confirmed because it has no configured home user.
+
+When the registry is enabled but the current sender has no exact match, the
+gateway adds a turn-local no-alias boundary. This explicitly prevents the model
+from copying a name or form of address out of global `USER.md`, memory, or an
+earlier participant's group message.
 
 `USER.md` may continue to describe the operator, but it is no longer authoritative
 for per-platform addressing.
@@ -50,7 +59,8 @@ for per-platform addressing.
 ## Tests
 
 - Exact platform and user ID receives the configured address.
-- A second member in the same group receives no address.
+- A separately configured member in the same group receives only their address.
+- An unknown member in the same group receives no inferred address.
 - The same user ID on another platform does not cross-match.
 - Malformed configuration is ignored safely.
 - Shared group session keys remain unchanged.

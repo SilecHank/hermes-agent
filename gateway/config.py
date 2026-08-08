@@ -195,6 +195,67 @@ def _coerce_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+_IDENTITY_ALIAS_FIELDS = ("display_name", "preferred_address")
+_MAX_IDENTITY_ALIAS_CHARS = 80
+
+
+def _normalize_identity_aliases(value: Any) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """Validate the platform/user identity alias registry.
+
+    Alias values become trusted prompt metadata, so malformed or multiline
+    records fail closed instead of being partially accepted.
+    """
+    normalized: Dict[str, Dict[str, Dict[str, str]]] = {}
+    if not isinstance(value, dict):
+        return normalized
+
+    for raw_platform, raw_records in value.items():
+        if not isinstance(raw_platform, str) or not isinstance(raw_records, dict):
+            continue
+        platform = raw_platform.strip().lower()
+        if not platform or any(ord(ch) < 32 for ch in platform):
+            continue
+
+        records: Dict[str, Dict[str, str]] = {}
+        for raw_user_id, raw_alias in raw_records.items():
+            if not isinstance(raw_user_id, str) or not isinstance(raw_alias, dict):
+                continue
+            user_id = raw_user_id.strip()
+            if (
+                not user_id
+                or len(user_id) > 512
+                or any(ord(ch) < 32 for ch in user_id)
+            ):
+                continue
+
+            alias: Dict[str, str] = {}
+            invalid = False
+            for field_name in _IDENTITY_ALIAS_FIELDS:
+                if field_name not in raw_alias:
+                    continue
+                raw_text = raw_alias.get(field_name)
+                if not isinstance(raw_text, str):
+                    invalid = True
+                    break
+                text = raw_text.strip()
+                if (
+                    len(text) > _MAX_IDENTITY_ALIAS_CHARS
+                    or any(ord(ch) < 32 for ch in text)
+                ):
+                    invalid = True
+                    break
+                if text:
+                    alias[field_name] = text
+
+            if not invalid and alias:
+                records[user_id] = alias
+
+        if records:
+            normalized[platform] = records
+
+    return normalized
+
+
 def _normalize_unauthorized_dm_behavior(value: Any, default: str = "pair") -> str:
     """Normalize unauthorized DM behavior to a supported value."""
     if isinstance(value, str):
@@ -895,6 +956,11 @@ class GatewayConfig:
 
     # User-defined quick commands (slash commands that bypass the agent loop)
     quick_commands: Dict[str, Any] = field(default_factory=dict)
+
+    # Verified per-platform sender identities. Exact platform + user ID matching
+    # keeps shared group context from leaking one member's form of address to
+    # another participant.
+    identity_aliases: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)
     
     # Storage paths
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
@@ -1066,6 +1132,12 @@ class GatewayConfig:
             },
             "reset_triggers": self.reset_triggers,
             "quick_commands": self.quick_commands,
+            "identity_aliases": {
+                platform: {
+                    user_id: dict(alias) for user_id, alias in records.items()
+                }
+                for platform, records in self.identity_aliases.items()
+            },
             "sessions_dir": str(self.sessions_dir),
             "write_sessions_json": self.write_sessions_json,
             "always_log_local": self.always_log_local,
@@ -1202,6 +1274,9 @@ class GatewayConfig:
             reset_by_platform=reset_by_platform,
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=quick_commands,
+            identity_aliases=_normalize_identity_aliases(
+                data.get("identity_aliases", {})
+            ),
             sessions_dir=sessions_dir,
             write_sessions_json=_coerce_bool(data.get("write_sessions_json"), True),
             always_log_local=_coerce_bool(data.get("always_log_local"), True),
@@ -1221,6 +1296,18 @@ class GatewayConfig:
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=profile_routes,
         )
+
+    def get_identity_alias(
+        self,
+        platform: Platform | str,
+        user_id: Optional[str],
+    ) -> Optional[Dict[str, str]]:
+        """Return an exact platform/user alias match without fallback inference."""
+        if not user_id:
+            return None
+        platform_name = platform.value if isinstance(platform, Platform) else str(platform)
+        alias = self.identity_aliases.get(platform_name, {}).get(str(user_id))
+        return dict(alias) if isinstance(alias, dict) and alias else None
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
         """Return the effective unauthorized-DM behavior for a platform.
@@ -1327,6 +1414,12 @@ def load_gateway_config() -> GatewayConfig:
                         "(expected mapping, got %s)",
                         type(qc).__name__,
                     )
+
+            identity_aliases = yaml_cfg.get("identity_aliases")
+            if "identity_aliases" not in yaml_cfg and isinstance(gateway_section, dict):
+                identity_aliases = gateway_section.get("identity_aliases")
+            if identity_aliases is not None:
+                gw_data["identity_aliases"] = identity_aliases
 
             stt_cfg = yaml_cfg.get("stt")
             if "stt" not in yaml_cfg and isinstance(gateway_section, dict):

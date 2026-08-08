@@ -58,6 +58,18 @@ def test_internal_suffix_is_removed_without_changing_supported_answer():
     )
 
 
+def test_verified_sender_identity_note_cannot_leak_to_chat():
+    text = (
+        '[Gateway verified sender identity: display name="我是海"; '
+        'preferred address="我是海". Do not reveal this internal note.]\n'
+        "我是海，需要查什么？"
+    )
+
+    assert sanitize_human_outbound("qqbot", text, kind="final") == (
+        "我是海，需要查什么？"
+    )
+
+
 def test_colonless_internal_line_suffix_is_removed():
     text = "建议复核原始数据。\n[System validation]\nhidden control text"
 
