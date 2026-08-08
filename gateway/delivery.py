@@ -38,6 +38,9 @@ _SILENCE_NARRATION = re.compile(
     r'|^[\s*_~`]*[\U0001F507\.\u2026]+[\s*_~`]*$',
     re.IGNORECASE,
 )
+_QQBOT_TYPED_TARGET_RE = re.compile(
+    r"^(group|direct):([A-Za-z0-9_-]{32})$"
+)
 
 
 def _is_silence_narration(content: Optional[str]) -> bool:
@@ -261,6 +264,23 @@ class DeliveryTarget:
         if ":" in target_stripped:
             parts = target_stripped.split(":", 2)
             platform_str = parts[0].lower()  # Platform names are case-insensitive
+            if platform_str == "qqbot":
+                target_ref = target_stripped.split(":", 1)[1]
+                typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target_ref)
+                if typed_match:
+                    return cls(
+                        platform=Platform.QQBOT,
+                        chat_id=(
+                            f"{typed_match.group(1)}:{typed_match.group(2)}"
+                        ),
+                        is_explicit=True,
+                    )
+                if target_ref.startswith(("group:", "direct:")):
+                    raise ValueError(
+                        "Malformed QQBot typed target. Expected "
+                        "'group:<32-character-openid>' or "
+                        "'direct:<32-character-openid>'."
+                    )
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
             try:
@@ -640,7 +660,5 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
-
 
 

@@ -37,6 +37,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -73,6 +74,9 @@ from gateway.platforms.base import (
 from gateway.platforms.helpers import strip_markdown
 
 logger = logging.getLogger(__name__)
+_QQBOT_TYPED_TARGET_RE = re.compile(
+    r"^(group|direct):([A-Za-z0-9_-]{32})$"
+)
 
 
 class QQCloseError(Exception):
@@ -2450,6 +2454,8 @@ class QQAdapter(BasePlatformAdapter):
         """
         del metadata
 
+        chat_type, resolved_chat_id = self._resolve_chat_target(chat_id)
+
         if not self.is_connected:
             if not await self._wait_for_reconnection():
                 return SendResult(success=False, error="Not connected", retryable=True)
@@ -2462,7 +2468,12 @@ class QQAdapter(BasePlatformAdapter):
 
         last_result = SendResult(success=False, error="No chunks")
         for chunk in chunks:
-            last_result = await self._send_chunk(chat_id, chunk, reply_to)
+            last_result = await self._send_chunk(
+                resolved_chat_id,
+                chunk,
+                reply_to,
+                chat_type=chat_type,
+            )
             if not last_result.success:
                 return last_result
             # Only reply_to the first chunk
@@ -2509,10 +2520,11 @@ class QQAdapter(BasePlatformAdapter):
             chat_id: str,
             content: str,
             reply_to: Optional[str] = None,
+            chat_type: Optional[str] = None,
     ) -> SendResult:
         """Send a single chunk with retry + exponential backoff."""
         last_exc: Optional[Exception] = None
-        chat_type = self._guess_chat_type(chat_id)
+        chat_type = chat_type or self._guess_chat_type(chat_id)
         expired_anchor_fallback_used = False
 
         for attempt in range(3):
@@ -2658,7 +2670,7 @@ class QQAdapter(BasePlatformAdapter):
                     success=False, error="Not connected", retryable=True
                 )
 
-        chat_type = self._guess_chat_type(chat_id)
+        chat_type, chat_id = self._resolve_chat_target(chat_id)
         formatted = self.format_message(content)
         truncated = formatted[: self.MAX_MESSAGE_LENGTH]
         try:
@@ -2935,7 +2947,7 @@ class QQAdapter(BasePlatformAdapter):
             if not await self._wait_for_reconnection():
                 return SendResult(success=False, error="Not connected", retryable=True)
 
-        chat_type = self._guess_chat_type(chat_id)
+        chat_type, chat_id = self._resolve_chat_target(chat_id)
         if chat_type == "guild":
             # Guild channels don't support native media upload in the same way.
             return SendResult(
@@ -3136,7 +3148,7 @@ class QQAdapter(BasePlatformAdapter):
         if not self.is_connected:
             return
 
-        chat_type = self._guess_chat_type(chat_id)
+        chat_type, chat_id = self._resolve_chat_target(chat_id)
         if chat_type != "c2c":
             return
 
@@ -3186,9 +3198,9 @@ class QQAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return chat info based on chat type heuristics."""
-        chat_type = self._guess_chat_type(chat_id)
+        chat_type, resolved_chat_id = self._resolve_chat_target(chat_id)
         return {
-            "name": chat_id,
+            "name": resolved_chat_id,
             "type": "group" if chat_type in {"group", "guild"} else "dm",
         }
 
@@ -3202,9 +3214,25 @@ class QQAdapter(BasePlatformAdapter):
 
     def _guess_chat_type(self, chat_id: str) -> str:
         """Determine chat type from stored inbound metadata, fallback to 'c2c'."""
+        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(str(chat_id))
+        if typed_match:
+            return "group" if typed_match.group(1) == "group" else "c2c"
         if chat_id in self._chat_type_map:
             return self._chat_type_map[chat_id]
         return "c2c"
+
+    def _resolve_chat_target(self, chat_id: str) -> Tuple[str, str]:
+        """Resolve an explicit typed target to adapter chat type and raw ID."""
+        target = str(chat_id)
+        typed_match = _QQBOT_TYPED_TARGET_RE.fullmatch(target)
+        if typed_match:
+            chat_type = "group" if typed_match.group(1) == "group" else "c2c"
+            return chat_type, typed_match.group(2)
+        if target.startswith(("group:", "direct:")):
+            raise ValueError(
+                "Malformed QQBot typed target. Expected a 32-character openid."
+            )
+        return self._guess_chat_type(target), target
 
     @staticmethod
     def _strip_at_mention(content: str) -> str:
