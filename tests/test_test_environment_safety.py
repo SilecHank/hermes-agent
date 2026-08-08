@@ -98,6 +98,11 @@ class TestEnvironmentSafetyTests(unittest.TestCase):
         self.assertNotIn("python -m pytest tests/e2e/", workflow)
         self.assertIn("scripts/run_tests.sh tests/e2e/", workflow)
 
+    def test_canonical_runner_preserves_external_bytecode_cache(self):
+        runner = (PROJECT_ROOT / "scripts/run_tests.sh").read_text(encoding="utf-8")
+
+        self.assertIn('PYTHONPYCACHEPREFIX="$PYTHONPYCACHEPREFIX"', runner)
+
 
 if __name__ == "__main__":
     unittest.main()
