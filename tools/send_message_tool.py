@@ -475,11 +475,14 @@ def _handle_send(args):
                 f"or set a home channel via: hermes config set {home_env} <channel_id>"
             })
 
-    identity_chat_id = (
-        canonical_qqbot_target_id(chat_id)
-        if platform_name == "qqbot"
-        else chat_id
-    )
+    try:
+        identity_chat_id = (
+            canonical_qqbot_target_id(chat_id)
+            if platform_name == "qqbot"
+            else chat_id
+        )
+    except ValueError as exc:
+        return json.dumps(_error(str(exc)))
     duplicate_skip = _maybe_skip_cron_duplicate_send(
         platform_name, identity_chat_id, thread_id
     )
@@ -526,9 +529,12 @@ def _handle_send(args):
                 from gateway.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                mirror_chat_id = (
+                    identity_chat_id if platform_name == "qqbot" else chat_id
+                )
                 if mirror_to_session(
                     platform_name,
-                    identity_chat_id,
+                    mirror_chat_id,
                     mirror_text,
                     source_label=source_label,
                     thread_id=thread_id,

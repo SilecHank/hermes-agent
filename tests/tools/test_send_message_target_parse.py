@@ -241,6 +241,82 @@ def test_typed_qqbot_send_mirrors_to_bare_openid_session() -> None:
     assert mirror_mock.call_args.args[0:2] == ("qqbot", QQ_GROUP_OPENID)
 
 
+def test_slack_user_send_mirrors_to_resolved_dm_channel() -> None:
+    slack_cfg = SimpleNamespace(enabled=True, token="slack-secret", extra={})
+    config = SimpleNamespace(
+        platforms={Platform.SLACK: slack_cfg},
+        get_home_channel=lambda _platform: None,
+    )
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._get_cron_auto_delivery_target",
+        return_value=None,
+    ), patch(
+        "model_tools._run_async",
+        side_effect=_run_async_immediately,
+    ), patch(
+        "tools.send_message_tool._resolve_slack_user_target",
+        new=AsyncMock(return_value=("D87654321", None)),
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock, patch(
+        "gateway.mirror.mirror_to_session",
+        return_value=True,
+    ) as mirror_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": "slack:U12345678",
+                    "message": "hello dm",
+                }
+            )
+        )
+
+    assert result["success"] is True
+    send_mock.assert_awaited_once_with(
+        Platform.SLACK,
+        slack_cfg,
+        "D87654321",
+        "hello dm",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
+    assert mirror_mock.call_args.args[0:2] == ("slack", "D87654321")
+
+
+def test_malformed_qqbot_home_target_returns_structured_error() -> None:
+    config, _qq_cfg = _qqbot_config()
+    config.get_home_channel = lambda _platform: SimpleNamespace(
+        chat_id="group:short"
+    )
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": "qqbot",
+                    "message": "must not send",
+                }
+            )
+        )
+
+    assert "Malformed QQBot typed target" in result["error"]
+    send_mock.assert_not_awaited()
+
+
 @pytest.mark.parametrize("action", ["react", "unreact"])
 def test_qqbot_reaction_rejects_malformed_typed_target(action: str) -> None:
     args = {
