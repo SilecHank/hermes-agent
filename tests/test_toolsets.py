@@ -64,6 +64,10 @@ class TestResolveToolset:
         assert set(resolve_toolset("ivd_maintenance")) == {"ivd_wsl_maintenance"}
         assert "ivd_wsl_maintenance" not in resolve_toolset("hermes-cli")
 
+    def test_ivd_standby_status_is_standalone(self):
+        assert set(resolve_toolset("ivd_standby_status")) == {"ivd_standby_status"}
+        assert "ivd_standby_status" not in resolve_toolset("hermes-cli")
+
     def test_leaf_toolset(self):
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_extract"}

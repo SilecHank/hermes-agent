@@ -106,6 +106,12 @@ TOOLSETS = {
         "tools": ["ivd_wsl_maintenance"],
         "includes": [],
     },
+
+    "ivd_standby_status": {
+        "description": "Read-only Mac standby verification receipt for the local Telegram profile",
+        "tools": ["ivd_standby_status"],
+        "includes": [],
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",

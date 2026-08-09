@@ -325,6 +325,24 @@ def test_ivd_maintenance_is_default_off_for_telegram():
     assert "ivd_maintenance" not in _get_platform_tools({}, "telegram")
 
 
+def test_ivd_standby_status_is_explicit_and_telegram_only():
+    telegram = _get_platform_tools(
+        {"platform_toolsets": {"telegram": ["hermes-telegram", "ivd_standby_status"]}},
+        "telegram",
+    )
+    assert "ivd_standby_status" in telegram
+    for platform in ("qqbot", "wecom", "weixin", "cli", "cron"):
+        configured = _get_platform_tools(
+            {"platform_toolsets": {platform: [f"hermes-{platform}", "ivd_standby_status"]}},
+            platform,
+        )
+        assert "ivd_standby_status" not in configured
+
+
+def test_ivd_standby_status_is_default_off_for_telegram():
+    assert "ivd_standby_status" not in _get_platform_tools({}, "telegram")
+
+
 def test_discord_explicit_workaround_still_works():
     """Regression guard: the documented workaround of listing toolsets
     explicitly must keep working after the fix."""
