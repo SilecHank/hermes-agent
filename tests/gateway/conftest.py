@@ -32,6 +32,7 @@ incident.
 """
 
 import ast
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -249,6 +250,7 @@ _ensure_discord_mock()
 # ---------------------------------------------------------------------------
 
 _GATEWAY_DIR = Path(__file__).resolve().parent
+_GUARD_CACHE_DIR_ENV = "HERMES_GATEWAY_GUARD_CACHE_DIR"
 _GUARD_HINT = (
     "Plugin adapter tests must use "
     "``from tests.gateway._plugin_adapter_loader import load_plugin_adapter`` "
@@ -399,10 +401,11 @@ def pytest_configure(config):
        manipulation or bare ``import adapter``.  This drops ~95% of files
        from needing AST parsing.
     2. **File-locked cache**: the scan result is cached in
-       ``.pytest-cache/gw-adapter-guard-<fingerprint>`` keyed on a
-       fingerprint of the gateway test file mtimes/sizes.  Concurrent
-       subprocesses acquire a lock; only the first performs the scan;
-       the rest wait and read the cached result.
+       ``.pytest-cache/gw-adapter-guard-<fingerprint>`` by default, or under
+       ``HERMES_GATEWAY_GUARD_CACHE_DIR`` when set, keyed on a fingerprint of
+       the gateway test file mtimes/sizes. Concurrent subprocesses acquire a
+       lock; only the first performs the scan; the rest wait and read the
+       cached result.
     """
     # Only run on the xdist controller (or in non-xdist runs). Skip on
     # worker subprocesses so we don't scan the filesystem N times.
@@ -410,7 +413,9 @@ def pytest_configure(config):
         return
 
     fp = _fingerprint_gateway_tests()
-    cache_dir = Path.cwd() / ".pytest-cache"
+    cache_dir = Path(
+        os.environ.get(_GUARD_CACHE_DIR_ENV) or Path.cwd() / ".pytest-cache"
+    )
     cache_file = cache_dir / f"gw-adapter-guard-{fp}"
     lock_file = cache_dir / f".gw-adapter-guard-{fp}.lock"
 
@@ -464,4 +469,3 @@ def pytest_configure(config):
             raise pytest.UsageError(msg)
         else:
             cache_file.write_text("clean", encoding="utf-8")
-

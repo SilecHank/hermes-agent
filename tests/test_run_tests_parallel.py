@@ -31,6 +31,16 @@ from pathlib import Path
 import pytest
 
 
+def test_canonical_runner_forwards_gateway_guard_cache_directory() -> None:
+    runner = Path(__file__).resolve().parents[1] / "scripts/run_tests.sh"
+    source = runner.read_text(encoding="utf-8")
+
+    assert (
+        '${HERMES_GATEWAY_GUARD_CACHE_DIR:+'
+        'HERMES_GATEWAY_GUARD_CACHE_DIR="$HERMES_GATEWAY_GUARD_CACHE_DIR"}'
+    ) in source
+
+
 def test_duration_cache_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts.run_tests_parallel import _duration_cache_enabled
 
