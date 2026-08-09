@@ -129,3 +129,116 @@ async def test_preprocess_slack_shared_thread_without_user_id_keeps_name_only():
     )
 
     assert result == "[Alice] hello"
+
+
+@pytest.mark.asyncio
+async def test_preprocess_injects_exact_verified_sender_alias():
+    runner = _make_runner(
+        GatewayConfig.from_dict(
+            {
+                "group_sessions_per_user": False,
+                "identity_aliases": {
+                    "qqbot": {
+                        "owner-id": {
+                            "display_name": "斯霖",
+                            "preferred_address": "老板",
+                        },
+                        "colleague-id": {
+                            "display_name": "我是海",
+                            "preferred_address": "我是海",
+                        },
+                    }
+                },
+            }
+        )
+    )
+    source = SessionSource(
+        platform=Platform.QQBOT,
+        chat_id="group-id",
+        chat_type="group",
+        user_id="colleague-id",
+    )
+    event = MessageEvent(text="你叫我什么", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert 'display name="我是海"' in result
+    assert 'preferred address="我是海"' in result
+    assert "Use this identity only for the current sender" in result
+    assert result.endswith("你叫我什么")
+    assert "老板" not in result
+
+
+@pytest.mark.asyncio
+async def test_preprocess_blocks_global_profile_alias_for_unknown_group_member():
+    runner = _make_runner(
+        GatewayConfig.from_dict(
+            {
+                "group_sessions_per_user": False,
+                "identity_aliases": {
+                    "qqbot": {
+                        "owner-id": {
+                            "display_name": "斯霖",
+                            "preferred_address": "老板",
+                        }
+                    }
+                },
+            }
+        )
+    )
+    source = SessionSource(
+        platform=Platform.QQBOT,
+        chat_id="group-id",
+        chat_type="group",
+        user_id="unknown-id",
+    )
+    event = MessageEvent(text="hello", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert "no address alias is configured" in result
+    assert "Do not infer the current sender's name or form of address" in result
+    assert "老板" not in result
+    assert result.endswith("hello")
+
+
+@pytest.mark.asyncio
+async def test_preprocess_does_not_cross_match_alias_between_platforms():
+    runner = _make_runner(
+        GatewayConfig.from_dict(
+            {
+                "identity_aliases": {
+                    "qqbot": {
+                        "shared-id": {
+                            "display_name": "斯霖",
+                            "preferred_address": "老板",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    source = SessionSource(
+        platform=Platform.WEIXIN,
+        chat_id="shared-id",
+        chat_type="dm",
+        user_id="shared-id",
+    )
+    event = MessageEvent(text="hello", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert "no address alias is configured" in result
+    assert "老板" not in result

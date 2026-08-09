@@ -9,6 +9,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from gateway.config import Platform
 from tools.send_message_tool import _parse_target_ref, send_message_tool
 
@@ -90,3 +92,244 @@ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
         force_document=False,
     )
 
+
+QQ_GROUP_OPENID = "0123456789abcdef0123456789abcdef"
+QQ_DIRECT_OPENID = "fedcba9876543210fedcba9876543210"
+
+
+@pytest.mark.parametrize(
+    ("target_ref", "expected"),
+    [
+        (f"group:{QQ_GROUP_OPENID}", f"group:{QQ_GROUP_OPENID}"),
+        (f"direct:{QQ_DIRECT_OPENID}", f"direct:{QQ_DIRECT_OPENID}"),
+    ],
+)
+def test_qqbot_typed_target_is_explicit_and_preserves_type(
+    target_ref: str,
+    expected: str,
+) -> None:
+    assert _parse_target_ref("qqbot", target_ref) == (expected, None, True)
+
+
+def test_qqbot_bare_32_character_openid_remains_explicit() -> None:
+    assert _parse_target_ref("qqbot", QQ_GROUP_OPENID) == (
+        QQ_GROUP_OPENID,
+        None,
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    "target_ref",
+    [
+        f"group:{QQ_GROUP_OPENID[:-1]}",
+        f"direct:{QQ_DIRECT_OPENID}x",
+        "group:not-an-openid",
+        "direct:",
+    ],
+)
+def test_qqbot_malformed_typed_target_is_rejected(target_ref: str) -> None:
+    with pytest.raises(ValueError, match="Malformed QQBot typed target"):
+        _parse_target_ref("qqbot", target_ref)
+
+
+def test_send_message_rejects_malformed_qqbot_target_without_home_fallback() -> None:
+    with patch(
+        "gateway.config.load_gateway_config",
+        side_effect=AssertionError("malformed target must fail before config/home lookup"),
+    ), patch(
+        "gateway.channel_directory.resolve_channel_name",
+        side_effect=AssertionError("malformed typed target must not use directory lookup"),
+    ):
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": f"qqbot:group:{QQ_GROUP_OPENID[:-1]}",
+                    "message": "must not send",
+                }
+            )
+        )
+
+    assert "Malformed QQBot typed target" in result["error"]
+
+
+def _qqbot_config():
+    qq_cfg = SimpleNamespace(
+        enabled=True,
+        token="qq-secret",
+        extra={"app_id": "qq-app"},
+    )
+    config = SimpleNamespace(
+        platforms={Platform.QQBOT: qq_cfg},
+        get_home_channel=lambda _platform: None,
+    )
+    return config, qq_cfg
+
+
+def test_typed_qqbot_target_matches_bare_cron_duplicate() -> None:
+    config, _qq_cfg = _qqbot_config()
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._get_cron_auto_delivery_target",
+        return_value={
+            "platform": "qqbot",
+            "chat_id": QQ_GROUP_OPENID,
+            "thread_id": None,
+        },
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": f"qqbot:group:{QQ_GROUP_OPENID}",
+                    "message": "duplicate",
+                }
+            )
+        )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "cron_auto_delivery_duplicate_target"
+    send_mock.assert_not_awaited()
+
+
+def test_typed_qqbot_send_mirrors_to_bare_openid_session() -> None:
+    config, qq_cfg = _qqbot_config()
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._get_cron_auto_delivery_target",
+        return_value=None,
+    ), patch(
+        "model_tools._run_async",
+        side_effect=_run_async_immediately,
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock, patch(
+        "gateway.mirror.mirror_to_session",
+        return_value=True,
+    ) as mirror_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": f"qqbot:group:{QQ_GROUP_OPENID}",
+                    "message": "mirror me",
+                }
+            )
+        )
+
+    assert result["success"] is True
+    send_mock.assert_awaited_once_with(
+        Platform.QQBOT,
+        qq_cfg,
+        f"group:{QQ_GROUP_OPENID}",
+        "mirror me",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
+    assert mirror_mock.call_args.args[0:2] == ("qqbot", QQ_GROUP_OPENID)
+
+
+def test_slack_user_send_mirrors_to_resolved_dm_channel() -> None:
+    slack_cfg = SimpleNamespace(enabled=True, token="slack-secret", extra={})
+    config = SimpleNamespace(
+        platforms={Platform.SLACK: slack_cfg},
+        get_home_channel=lambda _platform: None,
+    )
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._get_cron_auto_delivery_target",
+        return_value=None,
+    ), patch(
+        "model_tools._run_async",
+        side_effect=_run_async_immediately,
+    ), patch(
+        "tools.send_message_tool._resolve_slack_user_target",
+        new=AsyncMock(return_value=("D87654321", None)),
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock, patch(
+        "gateway.mirror.mirror_to_session",
+        return_value=True,
+    ) as mirror_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": "slack:U12345678",
+                    "message": "hello dm",
+                }
+            )
+        )
+
+    assert result["success"] is True
+    send_mock.assert_awaited_once_with(
+        Platform.SLACK,
+        slack_cfg,
+        "D87654321",
+        "hello dm",
+        thread_id=None,
+        media_files=[],
+        force_document=False,
+    )
+    assert mirror_mock.call_args.args[0:2] == ("slack", "D87654321")
+
+
+def test_malformed_qqbot_home_target_returns_structured_error() -> None:
+    config, _qq_cfg = _qqbot_config()
+    config.get_home_channel = lambda _platform: SimpleNamespace(
+        chat_id="group:short"
+    )
+
+    with patch("gateway.config.load_gateway_config", return_value=config), patch(
+        "tools.interrupt.is_interrupted",
+        return_value=False,
+    ), patch(
+        "tools.send_message_tool._send_to_platform",
+        new=AsyncMock(return_value={"success": True}),
+    ) as send_mock:
+        result = json.loads(
+            send_message_tool(
+                {
+                    "action": "send",
+                    "target": "qqbot",
+                    "message": "must not send",
+                }
+            )
+        )
+
+    assert "Malformed QQBot typed target" in result["error"]
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("action", ["react", "unreact"])
+def test_qqbot_reaction_rejects_malformed_typed_target(action: str) -> None:
+    args = {
+        "action": action,
+        "target": f"qqbot:Group:{QQ_GROUP_OPENID}",
+    }
+    if action == "react":
+        args["emoji"] = "thumbsup"
+
+    with patch(
+        "gateway.config.load_gateway_config",
+        side_effect=AssertionError("malformed reaction must fail before config lookup"),
+    ):
+        result = json.loads(send_message_tool(args))
+
+    assert "Malformed QQBot typed target" in result["error"]

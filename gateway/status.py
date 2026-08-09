@@ -283,6 +283,19 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
     return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
 
 
+def _parse_proc_stat_start_ticks(payload: str) -> Optional[int]:
+    """Parse field 22 after the final ``)`` that terminates Linux ``comm``."""
+    end = payload.rfind(")")
+    if end <= 0:
+        return None
+    try:
+        fields = payload[end + 2 :].split()
+        value = int(fields[19])
+    except (ValueError, IndexError):
+        return None
+    return value if value >= 0 else None
+
+
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return a stable per-process start-time fingerprint, or None.
 
@@ -304,8 +317,10 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text(encoding="utf-8").split()[21])
-    except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        parsed = _parse_proc_stat_start_ticks(stat_path.read_text(encoding="utf-8"))
+        if parsed is not None:
+            return parsed
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
         pass
 
     # No /proc (macOS / Windows): psutil is a hard dependency and exposes a
@@ -986,8 +1001,14 @@ def write_runtime_status(
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
-    payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
+    payload = _read_json_file(path)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("pid") != current_record["pid"]
+        or payload.get("start_time") != current_record["start_time"]
+    ):
+        payload = _build_runtime_status_record()
     payload.setdefault("platforms", {})
     payload["kind"] = current_record["kind"]
     payload["pid"] = current_record["pid"]

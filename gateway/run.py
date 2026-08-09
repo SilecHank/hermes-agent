@@ -2225,6 +2225,7 @@ from gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
     neutralize_untrusted_inline_text,
+    build_turn_identity_note,
 )
 from gateway.delivery import (
     DeliveryRouter,
@@ -12539,6 +12540,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"{_safe_user_name} | Slack user <@{source.user_id}>"
                 )
             message_text = f"[{_safe_user_name}] {message_text}"
+
+        # USER.md is process-global, while a gateway can serve multiple people.
+        # Once an identity registry is configured, attach an exact sender match
+        # (or an explicit no-alias boundary) to every external turn. Keeping the
+        # note in the turn instead of the cached system prompt is essential for
+        # shared group sessions where the sender changes from message to message.
+        if (
+            source.platform != Platform.LOCAL
+            and getattr(self.config, "identity_aliases", None)
+        ):
+            alias = self.config.get_identity_alias(source.platform, source.user_id)
+            message_text = f"{build_turn_identity_note(alias)}\n{message_text}"
 
         # Prepend channel context from history backfill (if any).  This
         # happens after sender-prefix so the prefix only applies to the

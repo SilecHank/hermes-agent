@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 from hermes_cli.config import get_hermes_home
+from tools.qqbot_targets import parse_qqbot_typed_target
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,16 @@ class DeliveryTarget:
         if ":" in target_stripped:
             parts = target_stripped.split(":", 2)
             platform_str = parts[0].lower()  # Platform names are case-insensitive
+            if platform_str == "qqbot":
+                target_ref = target_stripped.split(":", 1)[1]
+                typed_target = parse_qqbot_typed_target(target_ref)
+                if typed_target:
+                    kind, openid = typed_target
+                    return cls(
+                        platform=Platform.QQBOT,
+                        chat_id=f"{kind}:{openid}",
+                        is_explicit=True,
+                    )
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
             try:
@@ -640,7 +651,3 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
-
-
-

@@ -16,6 +16,11 @@ from email.utils import formatdate
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
+from tools.qqbot_targets import (
+    canonical_qqbot_target_id,
+    is_qqbot_openid,
+    parse_qqbot_typed_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +293,10 @@ def _handle_react(args, remove=False):
     target_ref = parts[1].strip() if len(parts) > 1 else None
     chat_id = None
     if target_ref:
-        chat_id, _thread_id, _ = _parse_target_ref(platform_name, target_ref)
+        try:
+            chat_id, _thread_id, _ = _parse_target_ref(platform_name, target_ref)
+        except ValueError as exc:
+            return json.dumps(_error(str(exc)))
         if not chat_id:
             try:
                 from gateway.channel_directory import resolve_channel_name
@@ -368,10 +376,13 @@ def _handle_send(args):
     chat_id = None
     thread_id = None
 
-    if target_ref:
-        chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
-    else:
-        is_explicit = False
+    try:
+        if target_ref:
+            chat_id, thread_id, is_explicit = _parse_target_ref(platform_name, target_ref)
+        else:
+            is_explicit = False
+    except ValueError as exc:
+        return json.dumps(_error(str(exc)))
 
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
@@ -464,7 +475,17 @@ def _handle_send(args):
                 f"or set a home channel via: hermes config set {home_env} <channel_id>"
             })
 
-    duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
+    try:
+        identity_chat_id = (
+            canonical_qqbot_target_id(chat_id)
+            if platform_name == "qqbot"
+            else chat_id
+        )
+    except ValueError as exc:
+        return json.dumps(_error(str(exc)))
+    duplicate_skip = _maybe_skip_cron_duplicate_send(
+        platform_name, identity_chat_id, thread_id
+    )
     if duplicate_skip:
         return json.dumps(duplicate_skip)
 
@@ -508,9 +529,12 @@ def _handle_send(args):
                 from gateway.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                mirror_chat_id = (
+                    identity_chat_id if platform_name == "qqbot" else chat_id
+                )
                 if mirror_to_session(
                     platform_name,
-                    chat_id,
+                    mirror_chat_id,
                     mirror_text,
                     source_label=source_label,
                     thread_id=thread_id,
@@ -577,6 +601,14 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "qqbot":
+        typed_target = parse_qqbot_typed_target(target_ref)
+        if typed_target:
+            kind, openid = typed_target
+            return f"{kind}:{openid}", None, True
+        stripped = target_ref.strip()
+        if is_qqbot_openid(stripped):
+            return stripped, None, True
     if platform_name == "ntfy":
         topic = target_ref.strip()
         if topic:
@@ -1992,9 +2024,14 @@ async def _send_qqbot(pconfig, chat_id, message):
     """Send via QQBot using the REST API directly (no WebSocket needed).
 
     Uses the QQ Bot Open Platform REST endpoints to get an access token
-    and post a message. Supports guild channels, C2C (private) chats,
-    and group chats by trying the appropriate endpoints.
+    and post a message. Typed group/direct targets use exactly one endpoint;
+    bare targets retain the legacy guild/C2C/group endpoint probing.
     """
+    try:
+        typed_target = parse_qqbot_typed_target(str(chat_id))
+    except ValueError as exc:
+        return _error(str(exc))
+
     try:
         import httpx
     except ImportError:
@@ -2006,6 +2043,9 @@ async def _send_qqbot(pconfig, chat_id, message):
               or os.getenv("QQ_CLIENT_SECRET", ""))
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
+
+    typed_kind = typed_target[0] if typed_target else None
+    target_id = typed_target[1] if typed_target else chat_id
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -2030,28 +2070,50 @@ async def _send_qqbot(pconfig, chat_id, message):
             }
             payload = {"content": message[:4000], "msg_type": 0}
 
+            if typed_kind:
+                resource = "groups" if typed_kind == "group" else "users"
+                typed_url = (
+                    f"https://api.sgroup.qq.com/v2/{resource}/{target_id}/messages"
+                )
+                typed_resp = await client.post(
+                    typed_url,
+                    json=payload,
+                    headers=headers,
+                )
+                if typed_resp.status_code in {200, 201}:
+                    data = typed_resp.json()
+                    return {
+                        "success": True,
+                        "platform": "qqbot",
+                        "chat_id": target_id,
+                        "message_id": data.get("id"),
+                    }
+                return _error(
+                    f"QQBot {typed_kind} send failed: {typed_resp.status_code}"
+                )
+
             # Try channel endpoint first (works for guild channels)
-            url = f"https://api.sgroup.qq.com/channels/{chat_id}/messages"
+            url = f"https://api.sgroup.qq.com/channels/{target_id}/messages"
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in {200, 201}:
                 data = resp.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # If channel endpoint failed (likely "频道不存在"), try C2C endpoint
-            url_c2c = f"https://api.sgroup.qq.com/v2/users/{chat_id}/messages"
+            url_c2c = f"https://api.sgroup.qq.com/v2/users/{target_id}/messages"
             resp_c2c = await client.post(url_c2c, json=payload, headers=headers)
             if resp_c2c.status_code in {200, 201}:
                 data = resp_c2c.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # If C2C also failed, try group endpoint
-            url_group = f"https://api.sgroup.qq.com/v2/groups/{chat_id}/messages"
+            url_group = f"https://api.sgroup.qq.com/v2/groups/{target_id}/messages"
             resp_group = await client.post(url_group, json=payload, headers=headers)
             if resp_group.status_code in {200, 201}:
                 data = resp_group.json()
-                return {"success": True, "platform": "qqbot", "chat_id": chat_id,
+                return {"success": True, "platform": "qqbot", "chat_id": target_id,
                         "message_id": data.get("id")}
 
             # All endpoints failed — return the most informative error
