@@ -1188,6 +1188,23 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     delivery_claimed_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS ivd_verified_facts (
+    fact_id TEXT PRIMARY KEY,
+    product_scope TEXT NOT NULL,
+    product_variant TEXT NOT NULL DEFAULT '',
+    question_type TEXT NOT NULL,
+    fact_key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    unit TEXT NOT NULL DEFAULT '',
+    conditions_json TEXT NOT NULL DEFAULT '[]',
+    answer_template TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
@@ -1198,6 +1215,8 @@ CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usag
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
+CREATE INDEX IF NOT EXISTS idx_ivd_verified_fact_lookup
+    ON ivd_verified_facts(product_scope, product_variant, fact_key, status);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -2257,7 +2276,144 @@ class SessionDB:
                 except Exception as exc:
                     logger.debug("WAL checkpoint (TRUNCATE) at close failed: %s", exc)
                 self._conn.close()
-                self._conn = None
+        self._conn = None
+
+    def upsert_ivd_verified_fact(
+        self,
+        record: dict[str, Any],
+        expected_revision: str | None = None,
+    ) -> bool:
+        """Create or replace a rebuildable verified fact transactionally."""
+        now = time.time()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            existing = conn.execute(
+                "SELECT source_revision, created_at FROM ivd_verified_facts WHERE fact_id = ?",
+                (record["fact_id"],),
+            ).fetchone()
+            if expected_revision is not None:
+                if existing is None or existing["source_revision"] != expected_revision:
+                    return False
+            created_at = float(existing["created_at"]) if existing is not None else now
+            conn.execute(
+                """INSERT INTO ivd_verified_facts (
+                       fact_id, product_scope, product_variant, question_type,
+                       fact_key, value, unit, conditions_json, answer_template,
+                       evidence_json, source_revision, status, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(fact_id) DO UPDATE SET
+                       product_scope=excluded.product_scope,
+                       product_variant=excluded.product_variant,
+                       question_type=excluded.question_type,
+                       fact_key=excluded.fact_key,
+                       value=excluded.value,
+                       unit=excluded.unit,
+                       conditions_json=excluded.conditions_json,
+                       answer_template=excluded.answer_template,
+                       evidence_json=excluded.evidence_json,
+                       source_revision=excluded.source_revision,
+                       status=excluded.status,
+                       updated_at=excluded.updated_at""",
+                (
+                    record["fact_id"],
+                    record["product_scope"],
+                    record.get("product_variant", ""),
+                    record["question_type"],
+                    record["fact_key"],
+                    record["value"],
+                    record.get("unit", ""),
+                    json.dumps(record.get("conditions") or [], ensure_ascii=False, sort_keys=True),
+                    record["answer_template"],
+                    json.dumps(record.get("evidence") or [], ensure_ascii=False, sort_keys=True),
+                    record["source_revision"],
+                    record["status"],
+                    created_at,
+                    now,
+                ),
+            )
+            return True
+
+        return self._execute_write(write)
+
+    def find_ivd_verified_fact(
+        self,
+        *,
+        product_scope: str,
+        product_variant: str,
+        fact_key: str,
+        conditions: list[str],
+        source_revisions: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Return one exact active fact only when every evidence revision is current."""
+        expected_conditions = json.dumps(conditions or [], ensure_ascii=False, sort_keys=True)
+        rows = self._conn.execute(
+            """SELECT * FROM ivd_verified_facts
+               WHERE product_scope = ? AND product_variant = ? AND fact_key = ?
+                 AND status = 'active' AND conditions_json = ?""",
+            (product_scope, product_variant, fact_key, expected_conditions),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        result = dict(rows[0])
+        try:
+            evidence = json.loads(result["evidence_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not evidence:
+            return None
+        for item in evidence:
+            path = str(item.get("source_path") or "")
+            revision = str(item.get("source_revision") or "")
+            if not path or source_revisions.get(path) != revision:
+                return None
+        result["conditions"] = json.loads(result["conditions_json"])
+        result["evidence"] = evidence
+        return result
+
+    def mark_ivd_facts_for_revalidation(self, changed_paths: Any) -> int:
+        """Mark active facts stale when any adopted source path changed."""
+        paths = {str(path) for path in changed_paths if str(path)}
+        if not paths:
+            return 0
+
+        def write(conn: sqlite3.Connection) -> int:
+            rows = conn.execute(
+                "SELECT fact_id, evidence_json FROM ivd_verified_facts WHERE status = 'active'"
+            ).fetchall()
+            fact_ids = []
+            for row in rows:
+                try:
+                    evidence = json.loads(row["evidence_json"])
+                except (TypeError, json.JSONDecodeError):
+                    evidence = []
+                if any(str(item.get("source_path") or "") in paths for item in evidence):
+                    fact_ids.append(row["fact_id"])
+            if not fact_ids:
+                return 0
+            placeholders = ",".join("?" for _ in fact_ids)
+            conn.execute(
+                f"UPDATE ivd_verified_facts SET status = 'revalidate', updated_at = ? "
+                f"WHERE fact_id IN ({placeholders})",
+                (time.time(), *fact_ids),
+            )
+            return len(fact_ids)
+
+        return self._execute_write(write)
+
+    def revoke_ivd_verified_fact(self, fact_id: str, reason: str) -> bool:
+        """Revoke one derived fact; reason is logged but not stored as knowledge."""
+        def write(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                "UPDATE ivd_verified_facts SET status = 'revoked', updated_at = ? "
+                "WHERE fact_id = ? AND status != 'revoked'",
+                (time.time(), fact_id),
+            )
+            return cursor.rowcount == 1
+
+        result = self._execute_write(write)
+        if result:
+            logger.info("revoked IVD verified fact %s: %s", fact_id, reason)
+        return result
 
     # ── Chunked FTS rebuild engine (v23 opt-in optimize) ──
     #
