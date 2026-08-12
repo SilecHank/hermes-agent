@@ -2295,6 +2295,21 @@ class SessionDB:
                 if existing is None or existing["source_revision"] != expected_revision:
                     return False
             created_at = float(existing["created_at"]) if existing is not None else now
+            conditions_json = json.dumps(
+                record.get("conditions") or [], ensure_ascii=False, sort_keys=True
+            )
+            conn.execute(
+                """DELETE FROM ivd_verified_facts
+                   WHERE product_scope = ? AND product_variant = ? AND fact_key = ?
+                     AND conditions_json = ? AND fact_id != ?""",
+                (
+                    record["product_scope"],
+                    record.get("product_variant", ""),
+                    record["fact_key"],
+                    conditions_json,
+                    record["fact_id"],
+                ),
+            )
             conn.execute(
                 """INSERT INTO ivd_verified_facts (
                        fact_id, product_scope, product_variant, question_type,
@@ -2322,7 +2337,7 @@ class SessionDB:
                     record["fact_key"],
                     record["value"],
                     record.get("unit", ""),
-                    json.dumps(record.get("conditions") or [], ensure_ascii=False, sort_keys=True),
+                    conditions_json,
                     record["answer_template"],
                     json.dumps(record.get("evidence") or [], ensure_ascii=False, sort_keys=True),
                     record["source_revision"],

@@ -93,6 +93,8 @@ def build_runtime_event(
     preflight_decision: str = "",
     preflight_action: str = "",
     preflight_issues: Iterable[str] = (),
+    answer_shape: str = "",
+    verified_fact_reuse: str = "",
 ) -> dict[str, object]:
     del answer_text
     tools = [str(name) for name in tool_names if str(name)]
@@ -122,6 +124,8 @@ def build_runtime_event(
         "tool_count": len(tools),
         "source_paths": sources,
         "validation_status": str(validation_status or "unknown"),
+        "answer_shape": str(answer_shape or "unknown")[:32],
+        "verified_fact_reuse": str(verified_fact_reuse or "off")[:32],
         "question_preview": preview,
         "question_fingerprint": question_fingerprint(preview),
         "retrieval_outcome": classify_retrieval_outcome(retrieval),

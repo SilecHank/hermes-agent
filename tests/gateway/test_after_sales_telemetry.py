@@ -107,6 +107,28 @@ def test_runtime_event_records_sanitized_preflight_gate_decision():
     }
 
 
+def test_runtime_event_records_fact_reuse_without_answer_content():
+    event = build_runtime_event(
+        platform="weixin",
+        session_key="session",
+        product_scope="WES",
+        route_id="verified-fact",
+        route_version="v1",
+        fast_path=True,
+        elapsed_seconds=0,
+        api_calls=0,
+        tool_names=[],
+        source_paths=["knowledge-base/reference/wes-v5-sop-index.md"],
+        validation_status="pass",
+        answer_shape="scalar_lookup",
+        verified_fact_reuse="active_hit",
+    )
+
+    assert event["answer_shape"] == "scalar_lookup"
+    assert event["verified_fact_reuse"] == "active_hit"
+    assert "answer" not in event
+
+
 def test_runtime_event_records_sanitized_retrieval_miss_preview():
     event = build_runtime_event(
         platform="weixin",

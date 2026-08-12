@@ -21347,6 +21347,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     platform=platform_key,
                     message=message,
                     history=history,
+                    session_db=getattr(self._session_db, "_db", self._session_db),
                 )
                 if _after_sales_turn is not None:
                     combined_ephemeral = (
@@ -21399,6 +21400,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 _blocked_telemetry_exc,
                             )
                         return _blocked_result
+                    if _after_sales_turn.direct_response:
+                        from gateway.after_sales_guard import build_direct_fact_result
+                        from gateway.after_sales_telemetry import (
+                            append_runtime_event,
+                            build_runtime_event,
+                            default_runtime_event_path,
+                        )
+
+                        _direct_result = build_direct_fact_result(
+                            _after_sales_turn, message
+                        )
+                        try:
+                            _direct_event = build_runtime_event(
+                                platform=platform_key,
+                                session_key=session_key or session_id or "",
+                                product_scope=_after_sales_turn.product_scope,
+                                product_variant=_after_sales_turn.product_variant,
+                                route_id=_after_sales_turn.route_id,
+                                route_version=_after_sales_turn.route_version,
+                                fast_path=True,
+                                elapsed_seconds=0,
+                                api_calls=0,
+                                tool_names=(),
+                                source_paths=_after_sales_turn.source_paths,
+                                validation_status="pass",
+                                question_text=_ivd_question_text,
+                                answer_shape=_after_sales_turn.answer_shape,
+                                verified_fact_reuse="active_hit",
+                            )
+                            _guard_config = user_config.get("after_sales_guard") or {}
+                            append_runtime_event(
+                                _guard_config.get("runtime_events_path")
+                                or default_runtime_event_path(),
+                                _direct_event,
+                            )
+                        except Exception as _direct_telemetry_exc:
+                            logger.warning(
+                                "IVD direct-fact telemetry skipped: %s",
+                                _direct_telemetry_exc,
+                            )
+                        return _direct_result
             except Exception as _guard_exc:
                 logger.warning(
                     "After-sales workflow fact injection skipped: %s", _guard_exc
@@ -22598,6 +22640,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             messages=_turn_messages,
                         )
                         _validation_status = "pass" if _validation.get("ok") else "fallback"
+                        if _validation.get("ok") and _validation.get("adopted_claims"):
+                            try:
+                                from gateway.after_sales_guard import activate_validated_fact
+
+                                activate_validated_fact(
+                                    getattr(self._session_db, "_db", self._session_db),
+                                    _after_sales_turn,
+                                    question=_ivd_question_text,
+                                    validation=_validation,
+                                )
+                            except Exception as _fact_activation_exc:
+                                logger.warning(
+                                    "IVD verified-fact activation skipped: %s",
+                                    _fact_activation_exc,
+                                )
                     _event = build_runtime_event(
                         platform=platform_key,
                         session_key=session_key or session_id or "",
@@ -22647,6 +22704,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _after_sales_turn.preflight_issues
                             if _after_sales_turn is not None
                             else ()
+                        ),
+                        answer_shape=(
+                            _after_sales_turn.answer_shape
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        verified_fact_reuse=(
+                            "shadow_hit"
+                            if _after_sales_turn is not None
+                            and _after_sales_turn.verified_fact_hit
+                            and not _after_sales_turn.direct_response
+                            else "off"
                         ),
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (

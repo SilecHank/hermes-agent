@@ -6,11 +6,14 @@ import importlib.util
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
+
+from gateway.ivd_evidence import build_runtime_evidence_id
+from gateway.ivd_verified_facts import VerifiedFactService
 
 
 MEASUREMENT_VALUE_RE = re.compile(
@@ -37,6 +40,13 @@ class AfterSalesTurn:
     preflight_action: str = ""
     preflight_issues: tuple[str, ...] = ()
     answer_shape: str = "diagnostic"
+    verified_fact_hit: bool = False
+    verified_fact_status: str = "off"
+    direct_response: str = ""
+    direct_evidence_ids: tuple[str, ...] = ()
+    fact_key: str = ""
+    source_revisions: dict[str, str] = field(default_factory=dict)
+    evidence_sidecar_enabled: bool = False
 
     @property
     def blocks_answer_generation(self) -> bool:
@@ -61,7 +71,7 @@ class AfterSalesTurn:
             return {"ok": True, "reasons": [], "fallback": ""}
         assert self.validator is not None
         if self.requires_source_validation and not self.facts:
-            trusted_claims, source_read = _trusted_tool_numeric_evidence(
+            trusted_claims, source_read, claim_sources = _trusted_tool_numeric_evidence_details(
                 messages or [],
                 self.source_paths,
                 self.validator,
@@ -93,7 +103,13 @@ class AfterSalesTurn:
                         "请补充产品版本或SOP编号，以便继续核实。"
                     ),
                 }
-            return {"ok": True, "reasons": [], "fallback": ""}
+            adopted_claims = self._runtime_adopted_claims(answer, claim_sources)
+            return {
+                "ok": True,
+                "reasons": [],
+                "fallback": "",
+                "adopted_claims": adopted_claims,
+            }
         allowed_numeric_claims = list(self.allowed_numeric_claims)
         trusted_claims, _ = _trusted_tool_numeric_evidence(
             messages or [],
@@ -116,7 +132,46 @@ class AfterSalesTurn:
             "fallback": ""
             if result.ok
             else self.validator.build_safe_clarification(result, self.facts),
+            "adopted_claims": list(getattr(result, "adopted_claims", ()) or ()),
         }
+
+    def _runtime_adopted_claims(
+        self,
+        answer: str,
+        claim_sources: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        if not self.evidence_sidecar_enabled or not self.fact_key:
+            return []
+        assert self.validator is not None
+        claims = list(self.validator.extract_numeric_claims(answer))
+        if len(claims) != 1:
+            return []
+        claim = claims[0]
+        source_path = claim_sources.get(_normalize_numeric_claim(claim), "")
+        relative_path = _relative_source_path(source_path, self.source_revisions)
+        revision = self.source_revisions.get(relative_path, "")
+        if not relative_path or not revision:
+            return []
+        value, unit = _split_numeric_claim(claim)
+        if not value:
+            return []
+        return [
+            {
+                "fact_key": self.fact_key,
+                "value": value,
+                "unit": unit,
+                "conditions": [],
+                "evidence_id": build_runtime_evidence_id(
+                    source_revision=revision,
+                    source_path=relative_path,
+                    locator="tool:read_file",
+                    adopted_excerpt=claim,
+                ),
+                "source_path": relative_path,
+                "source_revision": revision,
+                "locator": "tool:read_file",
+            }
+        ]
 
 
 def build_preflight_block_result(
@@ -144,6 +199,88 @@ def build_preflight_block_result(
         "agent_persisted": False,
         "preflight_blocked": True,
     }
+
+
+def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, Any]:
+    """Build the standard zero-model result for an exact active fact hit."""
+    if not turn.direct_response:
+        raise ValueError("direct fact result requires a validated response")
+    return {
+        "final_response": turn.direct_response,
+        "messages": [
+            {"role": "user", "content": str(message or "")},
+            {"role": "assistant", "content": turn.direct_response},
+        ],
+        "api_calls": 0,
+        "completed": True,
+        "partial": False,
+        "interrupted": False,
+        "error": None,
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "agent_persisted": False,
+        "verified_fact_reused": True,
+        "evidence_ids": list(turn.direct_evidence_ids),
+    }
+
+
+def activate_validated_fact(
+    session_db: Any,
+    turn: AfterSalesTurn,
+    *,
+    question: str,
+    validation: dict[str, Any],
+) -> bool:
+    """Activate exactly one adopted scalar claim after final validation."""
+    if not validation.get("ok") or turn.answer_shape not in {"scalar_lookup", "direct_fact"}:
+        return False
+    if not turn.product_scope:
+        return False
+    claims = list(validation.get("adopted_claims") or [])
+    if len(claims) != 1:
+        return False
+    claim = claims[0]
+    fact_key = str(claim.get("fact_key") or _fact_key_for_question(question))
+    if not fact_key or not claim.get("evidence_id") or not claim.get("source_path"):
+        return False
+    revision = str(claim.get("source_revision") or "")
+    if not revision:
+        return False
+    unit = str(claim.get("unit") or "")
+    template = "{value} {unit}。" if unit else "{value}。"
+    fact_id_payload = "\x1f".join(
+        (
+            turn.product_scope,
+            turn.product_variant,
+            fact_key,
+            json.dumps(claim.get("conditions") or [], ensure_ascii=False, sort_keys=True),
+        )
+    )
+    import hashlib
+
+    fact_id = "fact-" + hashlib.sha256(fact_id_payload.encode("utf-8")).hexdigest()[:24]
+    return VerifiedFactService(session_db).activate(
+        {
+            "fact_id": fact_id,
+            "product_scope": turn.product_scope,
+            "product_variant": turn.product_variant,
+            "question_type": turn.answer_shape,
+            "fact_key": fact_key,
+            "value": str(claim.get("value") or ""),
+            "unit": unit,
+            "conditions": list(claim.get("conditions") or []),
+            "answer_template": template,
+            "evidence": [
+                {
+                    "evidence_id": str(claim["evidence_id"]),
+                    "source_path": str(claim["source_path"]),
+                    "source_revision": revision,
+                }
+            ],
+            "source_revision": revision,
+            "status": "active",
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -208,15 +345,26 @@ def _trusted_tool_numeric_evidence(
     source_paths: Any,
     validator: ModuleType,
 ) -> tuple[tuple[str, ...], bool]:
+    claims, source_read, _ = _trusted_tool_numeric_evidence_details(
+        messages, source_paths, validator
+    )
+    return claims, source_read
+
+
+def _trusted_tool_numeric_evidence_details(
+    messages: list[dict[str, Any]],
+    source_paths: Any,
+    validator: ModuleType,
+) -> tuple[tuple[str, ...], bool, dict[str, str]]:
     trusted_paths = {
         str(Path(str(path)).expanduser().resolve())
         for path in source_paths
         if path
     }
     if not trusted_paths:
-        return (), False
+        return (), False, {}
 
-    trusted_call_ids: set[str] = set()
+    trusted_call_ids: dict[str, str] = {}
     for message in messages:
         if message.get("role") != "assistant":
             continue
@@ -236,18 +384,22 @@ def _trusted_tool_numeric_evidence(
             if candidate in trusted_paths:
                 call_id = call.get("id") or call.get("call_id")
                 if call_id:
-                    trusted_call_ids.add(str(call_id))
+                    trusted_call_ids[str(call_id)] = candidate
 
     claims: list[str] = []
+    claim_sources: dict[str, str] = {}
     source_read = False
     for message in messages:
         if message.get("role") != "tool":
             continue
-        if str(message.get("tool_call_id") or "") not in trusted_call_ids:
+        call_id = str(message.get("tool_call_id") or "")
+        if call_id not in trusted_call_ids:
             continue
         source_read = True
-        claims.extend(validator.extract_numeric_claims(str(message.get("content") or "")))
-    return tuple(dict.fromkeys(claims)), source_read
+        for claim in validator.extract_numeric_claims(str(message.get("content") or "")):
+            claims.append(claim)
+            claim_sources.setdefault(_normalize_numeric_claim(claim), trusted_call_ids[call_id])
+    return tuple(dict.fromkeys(claims)), source_read, claim_sources
 
 
 @lru_cache(maxsize=8)
@@ -269,6 +421,7 @@ def prepare_after_sales_turn(
     platform: str,
     message: str,
     history: list[dict[str, Any]],
+    session_db: Any | None = None,
 ) -> AfterSalesTurn | None:
     """Return verified per-turn facts when an enabled workflow card matches."""
 
@@ -317,7 +470,8 @@ def prepare_after_sales_turn(
             for item in history[-12:]
             if item.get("role") == "user"
         ) + f" {message}"
-        return AfterSalesTurn(
+        return _attach_verified_fact(
+            AfterSalesTurn(
             context=combined_context,
             facts={},
             validator=validator if requires_source_validation else None,
@@ -337,6 +491,10 @@ def prepare_after_sales_turn(
             preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
             answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
+            ),
+            guard=guard,
+            question=message,
+            session_db=session_db,
         )
 
     context = module.render_fact_context(match)
@@ -361,7 +519,8 @@ def prepare_after_sales_turn(
         unit = unit_match.group(0)
         for value_match in MEASUREMENT_VALUE_RE.finditer(source_text):
             allowed_numeric_claims.append(f"{value_match.group(1)} {unit}")
-    return AfterSalesTurn(
+    return _attach_verified_fact(
+        AfterSalesTurn(
         context=context,
         facts=match["facts"],
         validator=validator,
@@ -386,7 +545,104 @@ def prepare_after_sales_turn(
         preflight_action=str(fast_result.get("preflight_action") or ""),
         preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
         answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
+        ),
+        guard=guard,
+        question=message,
+        session_db=session_db,
     )
+
+
+def _attach_verified_fact(
+    turn: AfterSalesTurn,
+    *,
+    guard: dict[str, Any],
+    question: str,
+    session_db: Any | None,
+) -> AfterSalesTurn:
+    fact_key = _fact_key_for_question(question)
+    source_revisions = _load_source_revisions(guard.get("knowledge_release_manifest"))
+    turn = replace(
+        turn,
+        fact_key=fact_key,
+        source_revisions=source_revisions,
+        evidence_sidecar_enabled=bool(guard.get("evidence_sidecar_enabled", False)),
+    )
+    mode = str(guard.get("verified_fact_reuse_mode") or "off").strip().lower()
+    if mode not in {"off", "shadow", "active"}:
+        mode = "off"
+    if mode == "off" or session_db is None:
+        return turn
+    if turn.answer_shape not in {"scalar_lookup", "direct_fact"} or not turn.product_scope:
+        return turn
+    if not fact_key:
+        return turn
+    if not source_revisions:
+        return turn
+    match = VerifiedFactService(session_db).lookup(
+        product_scope=turn.product_scope,
+        product_variant=turn.product_variant,
+        fact_key=fact_key,
+        conditions=[],
+        source_revisions=source_revisions,
+    )
+    if match is None:
+        return turn
+    evidence_ids = tuple(
+        str(item.get("evidence_id") or "")
+        for item in match.get("evidence") or []
+        if item.get("evidence_id")
+    )
+    return replace(
+        turn,
+        verified_fact_hit=True,
+        verified_fact_status="active",
+        direct_response=str(match.get("rendered_answer") or "") if mode == "active" else "",
+        direct_evidence_ids=evidence_ids,
+    )
+
+
+def _load_source_revisions(path_value: Any) -> dict[str, str]:
+    path = Path(str(path_value or "")).expanduser()
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if payload.get("status") != "ready":
+        return {}
+    revisions = payload.get("source_revisions") or {}
+    return {str(path): str(revision) for path, revision in revisions.items() if path and revision}
+
+
+def _fact_key_for_question(question: str) -> str:
+    text = str(question or "")
+    rules = (
+        (r"DNA.{0,8}(?:起始|投入)|(?:起始|投入).{0,8}DNA|建库投入", "dna_starting_input"),
+        (r"循环数|几个循环|多少循环", "pcr_cycles"),
+        (r"温度|多少度", "temperature"),
+        (r"时长|多长时间|多少分钟|多少小时", "duration"),
+        (r"体积|多少[μu]?L", "volume"),
+        (r"浓度|阈值|标准", "threshold"),
+        (r"通量|数据量|reads?", "throughput"),
+    )
+    for pattern, fact_key in rules:
+        if re.search(pattern, text, re.I):
+            return fact_key
+    return ""
+
+
+def _relative_source_path(source_path: str, revisions: dict[str, str]) -> str:
+    normalized = str(source_path or "").replace("\\", "/")
+    matches = [path for path in revisions if normalized == path or normalized.endswith("/" + path)]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _split_numeric_claim(claim: str) -> tuple[str, str]:
+    match = re.search(r"(\d+(?:\.\d+)?(?:\s*[-~～]\s*\d+(?:\.\d+)?)?)\s*(.*)", claim)
+    if not match:
+        return "", ""
+    return match.group(1).strip(), match.group(2).strip()
 
 
 def _render_fast_response_context(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any, Iterable
 
@@ -17,6 +19,25 @@ UNUSABLE_MARKERS = (
 )
 NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?")
 NUMERIC_SHAPES = {"scalar_lookup", "scoped_scalar"}
+
+
+def build_runtime_evidence_id(
+    *,
+    source_revision: str,
+    source_path: str,
+    locator: str,
+    adopted_excerpt: str,
+) -> str:
+    payload = {
+        "source_revision": str(source_revision).strip(),
+        "source_path": _normalise_path(source_path),
+        "locator": str(locator).strip(),
+        "adopted_excerpt": " ".join(str(adopted_excerpt).split()),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"ev-{digest[:24]}"
 
 
 def build_answer_sidecar(
