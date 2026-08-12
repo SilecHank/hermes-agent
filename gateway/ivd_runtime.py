@@ -20,7 +20,7 @@ class IVDRetrievalPolicy:
 
 DIRECT_POLICY = IVDRetrievalPolicy("direct", (), 0)
 INDEX_FALLBACK_POLICY = IVDRetrievalPolicy(
-    "index_fallback", ("index_fallback",), 1
+    "index_fallback", ("index_fallback",), 2
 )
 EVIDENCE_SUPPLEMENT_POLICY = IVDRetrievalPolicy(
     "evidence_supplement",

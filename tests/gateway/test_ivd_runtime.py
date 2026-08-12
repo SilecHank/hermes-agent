@@ -68,11 +68,11 @@ def test_literature_intent_uses_evidence_profile_without_direct_source():
     assert policy.max_searches == 2
 
 
-def test_unmatched_question_uses_single_index_fallback():
+def test_unmatched_question_uses_two_index_fallback_searches():
     policy = resolve_ivd_retrieval_policy("这个问题怎么处理", None)
 
     assert policy.profile == "index_fallback"
-    assert policy.max_searches == 1
+    assert policy.max_searches == 2
 
 
 def test_direct_context_requires_reads_without_searching(tmp_path):
@@ -182,9 +182,9 @@ def test_direct_profile_blocks_file_search():
         end_ivd_answer_turn(token)
 
 
-def test_profile_allowances_are_one_two_and_three():
+def test_profile_allowances_are_two_two_and_three():
     for policy, expected in (
-        (INDEX_FALLBACK_POLICY, 1),
+        (INDEX_FALLBACK_POLICY, 2),
         (EVIDENCE_SUPPLEMENT_POLICY, 2),
         (COMPLEX_DIAGNOSIS_POLICY, 3),
     ):
