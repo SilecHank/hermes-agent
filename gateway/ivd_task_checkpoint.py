@@ -127,6 +127,19 @@ def build_checkpoint_result(message: str, *, user_message: str = "") -> dict[str
     }
 
 
+def checkpoint_with_effect(receipt: dict[str, Any]) -> dict[str, Any]:
+    from agent.tool_result_classification import build_effect_receipt
+
+    normalized = build_effect_receipt(
+        str(receipt.get("idempotency_id") or ""),
+        str(receipt.get("tool_name") or ""),
+        str(receipt.get("effect_disposition") or "unknown_effect"),
+        str(receipt.get("result_locator") or ""),
+        recorded_at=float(receipt.get("recorded_at") or 0.0),
+    )
+    return sanitize_checkpoint_payload({"side_effects": [normalized]})
+
+
 class IVDTaskCheckpointService:
     def __init__(self, session_db: Any) -> None:
         self.db = session_db

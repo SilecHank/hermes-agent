@@ -2,6 +2,7 @@ import pytest
 
 from gateway.ivd_task_checkpoint import (
     build_checkpoint_result,
+    checkpoint_with_effect,
     CheckpointConflict,
     CheckpointScope,
     IVDTaskCheckpointService,
@@ -191,3 +192,15 @@ def test_authorized_participants_survive_normal_checkpoint_update(tmp_path):
         payload=_payload(unfinished_steps=["下一步"]), expected_revision=1,
     )
     assert len(service.find_resumable(_scope(user_id="user-b"))) == 1
+
+
+def test_checkpoint_preserves_side_effect_receipt():
+    receipt = {
+        "idempotency_id": "call-approve",
+        "tool_name": "approve",
+        "effect_disposition": "effect_committed",
+        "result_locator": "message:82",
+        "recorded_at": 10.0,
+    }
+    checkpoint = checkpoint_with_effect(receipt)
+    assert checkpoint["side_effects"][0]["idempotency_id"] == "call-approve"

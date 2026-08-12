@@ -58,6 +58,10 @@ def _receipt_text(
     source = str(receipt.get("source") or "").strip()
     if source:
         payload["source"] = source
+    for key in ("effect_disposition", "idempotency_id", "result_locator"):
+        value = str(receipt.get(key) or "").strip()
+        if value:
+            payload[key] = value
     return "[IVD validated tool receipt]\n" + json.dumps(
         payload,
         ensure_ascii=False,
@@ -93,6 +97,11 @@ def _completed_receipt_groups(
             continue
         # One assistant tool-call block and every referenced result are atomic.
         if any(call_id not in tool_results or call_id not in receipts for call_id in call_ids):
+            continue
+        if any(
+            str(receipts[call_id].get("effect_disposition") or "") == "unknown_effect"
+            for call_id in call_ids
+        ):
             continue
         result_indices = tuple(tool_results[call_id] for call_id in call_ids)
         if any(index <= assistant_index for index in result_indices):

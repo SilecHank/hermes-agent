@@ -81,3 +81,42 @@ def test_non_ivd_profile_is_byte_identical_noop():
         estimated_tokens=50000,
         estimated_reclaim_tokens=10000,
     ).messages is messages
+
+
+def test_unknown_side_effect_result_is_never_projected_away():
+    messages = [{"role": "system", "content": "sys"}, *_tool_exchange(), {"role": "user", "content": "next"}]
+    result = project_ivd_context(
+        messages,
+        policy=DEFAULT_POLICY,
+        receipts={
+            "call-1": {
+                "evidence_ids": [],
+                "effect_disposition": "unknown_effect",
+                "idempotency_id": "call-1",
+            }
+        },
+        estimated_tokens=50000,
+        estimated_reclaim_tokens=10000,
+    )
+    assert result.messages is messages
+
+
+def test_committed_side_effect_projects_to_idempotency_receipt():
+    messages = [{"role": "system", "content": "sys"}, *_tool_exchange(), {"role": "user", "content": "next"}]
+    result = project_ivd_context(
+        messages,
+        policy=DEFAULT_POLICY,
+        receipts={
+            "call-1": {
+                "effect_disposition": "effect_committed",
+                "idempotency_id": "call-1",
+                "result_locator": "tool:call-1",
+            }
+        },
+        estimated_tokens=50000,
+        estimated_reclaim_tokens=10000,
+    )
+    rendered = str(result.messages)
+    assert "effect_committed" in rendered
+    assert "call-1" in rendered
+    assert "X" * 100 not in rendered

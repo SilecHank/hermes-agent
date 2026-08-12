@@ -22770,6 +22770,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _tool_names.append(
                                 str((_tool_call.get("function") or {}).get("name") or "")
                             )
+                    from agent.tool_result_classification import (
+                        build_effect_receipts_from_messages,
+                    )
+
+                    _turn_effect_receipts = build_effect_receipts_from_messages(
+                        list(result.get("messages") or [])
+                    )
                     _validation_status = "not_applicable"
                     _validation: dict[str, object] = {
                         "ok": True,
@@ -22796,30 +22803,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "IVD verified-fact activation skipped: %s",
                                     _fact_activation_exc,
                                 )
-                            try:
-                                _receipt_updates: dict[str, dict[str, object]] = {}
-                                for _claim in _validation.get("adopted_claims") or ():
-                                    _call_id = str(_claim.get("tool_call_id") or "")
-                                    _evidence_id = str(_claim.get("evidence_id") or "")
-                                    if not _call_id or not _evidence_id:
-                                        continue
-                                    _receipt = _receipt_updates.setdefault(
-                                        _call_id,
-                                        {
-                                            "evidence_ids": [],
-                                            "source": str(_claim.get("source_path") or ""),
-                                        },
-                                    )
-                                    _receipt["evidence_ids"].append(_evidence_id)
-                                _context_engine = getattr(agent, "context_compressor", None)
-                                _add_receipts = getattr(_context_engine, "add_receipts", None)
-                                if _receipt_updates and callable(_add_receipts):
-                                    _add_receipts(_receipt_updates)
-                            except Exception as _receipt_exc:
-                                logger.warning(
-                                    "IVD validated context receipt skipped: %s",
-                                    _receipt_exc,
-                                )
+                    try:
+                        _receipt_updates: dict[str, dict[str, object]] = {}
+                        for _claim in _validation.get("adopted_claims") or ():
+                            _call_id = str(_claim.get("tool_call_id") or "")
+                            _evidence_id = str(_claim.get("evidence_id") or "")
+                            if not _call_id or not _evidence_id:
+                                continue
+                            _receipt = _receipt_updates.setdefault(
+                                _call_id,
+                                {
+                                    "evidence_ids": [],
+                                    "source": str(_claim.get("source_path") or ""),
+                                },
+                            )
+                            _receipt["evidence_ids"].append(_evidence_id)
+                        for _effect in _turn_effect_receipts:
+                            if _effect.get("effect_disposition") == "read_only":
+                                continue
+                            _call_id = str(_effect.get("idempotency_id") or "")
+                            if _call_id:
+                                _receipt_updates[_call_id] = dict(_effect)
+                        _context_engine = getattr(agent, "context_compressor", None)
+                        _add_receipts = getattr(_context_engine, "add_receipts", None)
+                        if _receipt_updates and callable(_add_receipts):
+                            _add_receipts(_receipt_updates)
+                    except Exception as _receipt_exc:
+                        logger.warning(
+                            "IVD validated context receipt skipped: %s",
+                            _receipt_exc,
+                        )
                     if (
                         _ivd_checkpoint_enabled
                         and _ivd_checkpoint_service is not None
@@ -22846,6 +22859,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _checkpoint_claims = list(
                                 _validation.get("adopted_claims") or []
                             )
+                            _checkpoint_effects = _turn_effect_receipts
                             _checkpoint_evidence_ids = [
                                 str(item.get("evidence_id") or "")
                                 for item in _checkpoint_claims
@@ -22863,6 +22877,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 if _checkpoint_evidence_ids:
                                     _next_payload["evidence_ids"] = _checkpoint_evidence_ids
                                     _next_payload["adopted_facts"] = _checkpoint_claims
+                                if _checkpoint_effects:
+                                    _next_payload["side_effects"] = _checkpoint_effects
                                 if _checkpoint_is_unfinished:
                                     _next_payload["unfinished_steps"] = [
                                         "继续当前未完成任务"
@@ -22895,6 +22911,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                         "unfinished_steps": ["继续当前未完成任务"],
                                         "evidence_ids": _checkpoint_evidence_ids,
                                         "adopted_facts": _checkpoint_claims,
+                                        "side_effects": _checkpoint_effects,
                                     },
                                 )
                         except CheckpointConflict as _checkpoint_conflict:
