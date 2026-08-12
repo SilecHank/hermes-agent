@@ -1729,6 +1729,25 @@ def _skill_view_with_bump(args, **kw):
     """Invoke skill_view, then bump view_count on success. Best-effort: a
     telemetry failure never breaks the tool call."""
     name = args.get("name", "")
+    try:
+        from agent.ivd_skill_governance import (
+            decide_ivd_skill_load,
+            record_ivd_skill_block,
+        )
+
+        decision = decide_ivd_skill_load(name)
+        if not decision.allowed:
+            record_ivd_skill_block(decision.reason)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Skill load is not applicable to the current IVD task.",
+                    "reason": decision.reason,
+                },
+                ensure_ascii=False,
+            )
+    except Exception:
+        decision = None
     result = skill_view(
         name, file_path=args.get("file_path"), task_id=kw.get("task_id")
     )
@@ -1745,6 +1764,21 @@ def _skill_view_with_bump(args, **kw):
                 # to act on it — that counts as use, not just a browse/view.
                 # Curator's stale timer keys off last_used_at (see agent/curator.py).
                 bump_use(str(resolved))
+                try:
+                    from agent.ivd_skill_governance import record_ivd_skill_load
+
+                    body = str(parsed.get("content") or "")
+                    record_ivd_skill_load(
+                        str(resolved),
+                        body_chars=len(body),
+                        reason=(
+                            decision.reason
+                            if decision is not None
+                            else "governance_inactive"
+                        ),
+                    )
+                except Exception:
+                    pass
     except Exception:
         pass
     return result

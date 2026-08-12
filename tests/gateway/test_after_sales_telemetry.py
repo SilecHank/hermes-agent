@@ -129,6 +129,36 @@ def test_runtime_event_records_fact_reuse_without_answer_content():
     assert "answer" not in event
 
 
+def test_runtime_event_records_compact_skill_governance_metrics():
+    event = build_runtime_event(
+        platform="weixin",
+        session_key="session",
+        product_scope="WES",
+        route_id="standard",
+        route_version="v1",
+        fast_path=False,
+        elapsed_seconds=1,
+        api_calls=1,
+        tool_names=["skill_view", "read_file"],
+        source_paths=["knowledge-base/reference/wes-v5-sop-index.md"],
+        validation_status="pass",
+        skill_snapshot={
+            "skill_load_count": 1,
+            "skill_body_chars": 900,
+            "skill_unused_loads": 0,
+            "skill_blocked_loads": 1,
+            "skill_shadow_would_block": 0,
+            "skill_max_concurrent": 1,
+            "skill_names": ["ngs-workflow-router"],
+        },
+    )
+
+    assert event["skill_load_count"] == 1
+    assert event["skill_body_chars"] == 900
+    assert event["skill_blocked_loads"] == 1
+    assert event["skill_names"] == ["ngs-workflow-router"]
+
+
 def test_runtime_event_records_sanitized_retrieval_miss_preview():
     event = build_runtime_event(
         platform="weixin",

@@ -22663,6 +22663,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _approval_session_token = set_current_session_key(_approval_session_key)
             _ivd_runtime_token = None
             _ivd_retrieval_snapshot: dict[str, object] = {}
+            _ivd_skill_token = None
+            _ivd_skill_snapshot: dict[str, object] = {}
             _after_sales_config = user_config.get("after_sales_guard") or {}
             _after_sales_platforms = _after_sales_config.get("platforms") or []
             if isinstance(_after_sales_platforms, str):
@@ -22675,6 +22677,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and platform_key in _after_sales_platforms
             ):
                 from gateway.ivd_runtime import begin_ivd_answer_turn
+                from agent.ivd_skill_governance import begin_ivd_skill_turn
+
+                _ivd_skill_token = begin_ivd_skill_turn(
+                    question=_ivd_question_text,
+                    governance_mode=str(
+                        _after_sales_config.get("skill_governance_mode") or "off"
+                    ),
+                )
 
                 if _ivd_retrieval_policy is not None:
                     _ivd_runtime_token = begin_ivd_answer_turn(
@@ -22742,6 +22752,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
+                if _ivd_skill_token is not None:
+                    from agent.ivd_skill_governance import (
+                        end_ivd_skill_turn,
+                        get_ivd_skill_snapshot,
+                    )
+
+                    try:
+                        _ivd_skill_snapshot = get_ivd_skill_snapshot()
+                    finally:
+                        end_ivd_skill_turn(_ivd_skill_token)
                 if _ivd_runtime_token is not None:
                     from gateway.ivd_runtime import (
                         end_ivd_answer_turn,
@@ -23056,6 +23076,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             and not _after_sales_turn.direct_response
                             else "off"
                         ),
+                        skill_snapshot=_ivd_skill_snapshot,
                     )
                     _telemetry_path = _after_sales_config.get("runtime_events_path") or (
                         default_runtime_event_path()

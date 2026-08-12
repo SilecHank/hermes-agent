@@ -95,6 +95,7 @@ def build_runtime_event(
     preflight_issues: Iterable[str] = (),
     answer_shape: str = "",
     verified_fact_reuse: str = "",
+    skill_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     del answer_text
     tools = [str(name) for name in tool_names if str(name)]
@@ -149,6 +150,22 @@ def build_runtime_event(
             "pipeline_action": str(preflight_action or "unknown")[:64],
             "issues": gate_issues,
         }
+    skill_metrics = skill_snapshot or {}
+    event.update(
+        {
+            "skill_load_count": max(0, int(skill_metrics.get("skill_load_count") or 0)),
+            "skill_body_chars": max(0, int(skill_metrics.get("skill_body_chars") or 0)),
+            "skill_unused_loads": max(0, int(skill_metrics.get("skill_unused_loads") or 0)),
+            "skill_blocked_loads": max(0, int(skill_metrics.get("skill_blocked_loads") or 0)),
+            "skill_shadow_would_block": max(0, int(skill_metrics.get("skill_shadow_would_block") or 0)),
+            "skill_max_concurrent": max(0, int(skill_metrics.get("skill_max_concurrent") or 0)),
+            "skill_names": [
+                str(item)[:80]
+                for item in (skill_metrics.get("skill_names") or [])
+                if str(item)
+            ][:4],
+        }
+    )
     return event
 
 
