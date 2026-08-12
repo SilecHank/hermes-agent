@@ -136,7 +136,11 @@ def evaluate_final_response(
         )
 
     if result.get("ok") is True:
-        return FinalResponseDecision(action="accept", response=response)
+        normalized = str(result.get("normalized_response") or "").strip()
+        return FinalResponseDecision(
+            action="accept",
+            response=normalized or response,
+        )
 
     reasons = tuple(str(reason) for reason in result.get("reasons") or ())
     fallback = str(result.get("fallback") or "").strip()

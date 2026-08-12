@@ -6296,6 +6296,11 @@ def run_conversation(
                     )
                 if (
                     _validation_decision is not None
+                    and _validation_decision.action == "accept"
+                ):
+                    final_response = _validation_decision.response
+                if (
+                    _validation_decision is not None
                     and _validation_decision.action == "retry"
                 ):
                     final_validation_retries += 1

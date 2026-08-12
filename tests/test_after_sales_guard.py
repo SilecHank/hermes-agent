@@ -1,5 +1,6 @@
 import os
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,7 +48,13 @@ def _config_with_fast_response(enabled=True):
     return config
 
 
-def _verified_fact_fixture(tmp_path, *, mode="active", manifest_revision="rev-a"):
+def _verified_fact_fixture(
+    tmp_path,
+    *,
+    mode="active",
+    manifest_revision="rev-a",
+    value="30-240",
+):
     db = SessionDB(db_path=tmp_path / "state.db")
     service = VerifiedFactService(db)
     assert service.activate(
@@ -57,7 +64,7 @@ def _verified_fact_fixture(tmp_path, *, mode="active", manifest_revision="rev-a"
             "product_variant": "V5",
             "question_type": "scalar_lookup",
             "fact_key": "dna_starting_input",
-            "value": "240",
+            "value": value,
             "unit": "ng",
             "conditions": [],
             "answer_template": "{value} {unit}。",
@@ -386,7 +393,7 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
         history=[],
     )
     source_path = turn.source_paths[0]
-    missing_source = turn.validate("建库投入量为100ng。", messages=[])
+    missing_source = turn.validate("建库投入量为30-240ng。", messages=[])
     messages = [
         {
             "role": "assistant",
@@ -404,11 +411,11 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
         {
             "role": "tool",
             "tool_call_id": "source-read",
-            "content": "当前正式SOP规定建库投入量为100ng。",
+            "content": "当前受控参数索引规定建库投入量为30-240ng。",
         },
     ]
 
-    supported = turn.validate("建库投入量为100ng。", messages=messages)
+    supported = turn.validate("建库投入量为30-240ng。", messages=messages)
     unsupported = turn.validate("建库投入量为400ng。", messages=messages)
 
     assert missing_source["ok"] is False
@@ -419,9 +426,9 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
     assert "SOP编号" not in missing_source["fallback"]
     assert supported["ok"] is True
     assert unsupported["ok"] is False
-    assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
+    assert "scalar_claim_mismatch" in unsupported["reasons"]
     assert "请重新读取" not in unsupported["fallback"]
-    assert "与已核实的正式来源不一致" in unsupported["fallback"]
+    assert "与该产品、该参数字段的正式值不一致" in unsupported["fallback"]
 
 
 def test_fast_plan_carries_canonical_answer_shape_into_turn():
@@ -434,6 +441,170 @@ def test_fast_plan_carries_canonical_answer_shape_into_turn():
 
     assert turn is not None
     assert turn.answer_shape == "scalar_lookup"
+
+
+def test_scalar_turn_uses_canonical_fact_key_from_knowledgehub():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.fact_key == "plasma_starting_volume"
+    assert "NIFTY项目手工提取富集建库实验标准作业指导书.md" in turn.source_paths[0]
+    assert "只输出一个已核实数值及单位" in turn.context
+    assert "不要补充原因、建议、下一步或可见来源标签" in turn.context
+
+
+def test_validated_scalar_answer_returns_canonical_value_and_unit_only():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "向浅孔板中加入200μL血浆样本。",
+        },
+    ]
+
+    result = turn.validate(
+        "无创提取需要200 μL血浆。建议同时注意样本质量并按SOP操作。",
+        messages=messages,
+    )
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "200 μL。"
+
+
+def test_scalar_answer_with_multiple_supported_values_is_not_truncated():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "标准流程使用200μL血浆；另一个条件使用600μL。",
+        },
+    ]
+
+    result = turn.validate("标准流程200μL，另一个条件600μL。", messages=messages)
+
+    assert result["ok"] is False
+    assert "scalar_claim_not_unique" in result["reasons"]
+    assert "normalized_response" not in result
+
+
+def test_scalar_answer_rejects_a_different_number_from_the_same_sop():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "提取加样使用200μL血浆；血浆分装时可见600μL。",
+        },
+    ]
+
+    result = turn.validate("600 μL。", messages=messages)
+
+    assert result["ok"] is False
+    assert "scalar_claim_mismatch" in result["reasons"]
+
+
+def test_fact_card_scalar_answer_uses_the_same_canonical_boundary():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.facts
+
+    result = turn.validate("文库浓度应≥2 ng/μL，建议再检查质控记录。")
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "≥2 ng/μL。"
+
+
+def test_fact_card_scalar_rejects_value_outside_current_route_contract():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+    turn = replace(turn, expected_scalar_claims=(">=2 ng/μL",))
+
+    result = turn.validate("文库浓度是4 ng/μL。")
+
+    assert result["ok"] is False
+    assert "scalar_claim_mismatch" in result["reasons"]
 
 
 def test_shadow_fact_hit_does_not_bypass_model(tmp_path):
@@ -466,9 +637,42 @@ def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
 
     assert turn is not None
     assert turn.answer_shape == "scalar_lookup"
-    assert turn.direct_response == "240 ng。"
+    assert turn.direct_response == "30-240 ng。"
     assert result["api_calls"] == 0
-    assert result["final_response"] == "240 ng。"
+    assert result["final_response"] == "30-240 ng。"
+
+
+def test_active_fact_with_old_scalar_value_does_not_bypass_current_route(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is False
+    assert turn.direct_response == ""
+
+
+def test_ascii_threshold_operator_is_preserved_in_canonical_response():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+
+    result = turn.validate("文库浓度应>=2 ng/μL。")
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "≥2 ng/μL。"
 
 
 def test_stale_source_revision_disables_direct_fact_reuse(tmp_path):
@@ -505,7 +709,7 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
         "adopted_claims": [
             {
                 "fact_key": "dna_starting_input",
-                "value": "100",
+                "value": "30-240",
                 "unit": "ng",
                 "conditions": [],
                 "evidence_id": "ev-new",
@@ -529,7 +733,38 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
         conditions=[],
         source_revisions={"knowledge-base/reference/wes-v5-sop-index.md": "rev-a"},
     )
-    assert match["rendered_answer"] == "100 ng。"
+    assert match["rendered_answer"] == "30-240 ng。"
+
+
+def test_fact_activation_rejects_value_outside_current_scalar_contract(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation={
+            "ok": True,
+            "adopted_claims": [
+                {
+                    "fact_key": "dna_starting_input",
+                    "value": "100",
+                    "unit": "ng",
+                    "conditions": [],
+                    "evidence_id": "ev-old",
+                    "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                    "source_revision": "rev-a",
+                }
+            ],
+        },
+    ) is False
 
 
 def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
@@ -559,15 +794,15 @@ def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
         {
             "role": "tool",
             "tool_call_id": "source-read",
-            "content": "当前正式SOP规定建库投入量为100ng。",
+            "content": "当前受控参数索引规定建库投入量为30-240ng。",
         },
     ]
 
-    result = turn.validate("100 ng。", messages=messages)
+    result = turn.validate("30-240 ng。", messages=messages)
 
     assert result["ok"] is True
     assert len(result["adopted_claims"]) == 1
-    assert result["adopted_claims"][0]["value"] == "100"
+    assert result["adopted_claims"][0]["value"] == "30-240"
     assert result["adopted_claims"][0]["source_revision"] == "rev-a"
     assert result["adopted_claims"][0]["tool_call_id"] == "source-read"
 

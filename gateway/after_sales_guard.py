@@ -47,6 +47,8 @@ class AfterSalesTurn:
     direct_response: str = ""
     direct_evidence_ids: tuple[str, ...] = ()
     fact_key: str = ""
+    expected_scalar_claims: tuple[str, ...] = ()
+    source_locator: str = ""
     source_revisions: dict[str, str] = field(default_factory=dict)
     evidence_sidecar_enabled: bool = False
 
@@ -88,9 +90,14 @@ class AfterSalesTurn:
                 }
             allowed = tuple(self.allowed_numeric_claims) + trusted_claims
             allowed_normalized = {_normalize_numeric_claim(item) for item in allowed}
+            answer_claims = tuple(self.validator.extract_numeric_claims(answer))
+            scalar_gate = self._validate_scalar_claims(answer_claims)
+            if scalar_gate is not None:
+                return scalar_gate
+            unique_answer_claims = _unique_numeric_claims(answer_claims)
             unsupported = [
                 claim
-                for claim in self.validator.extract_numeric_claims(answer)
+                for claim in answer_claims
                 if _normalize_numeric_claim(claim) not in allowed_normalized
             ]
             if unsupported:
@@ -104,12 +111,17 @@ class AfterSalesTurn:
                     ),
                 }
             adopted_claims = self._runtime_adopted_claims(answer, claim_sources)
-            return {
+            result = {
                 "ok": True,
                 "reasons": [],
                 "fallback": "",
                 "adopted_claims": adopted_claims,
             }
+            if self.answer_shape == "scalar_lookup":
+                result["normalized_response"] = _canonical_scalar_response(
+                    next(iter(unique_answer_claims.values()))
+                )
+            return result
         allowed_numeric_claims = list(self.allowed_numeric_claims)
         trusted_claims, _ = _trusted_tool_numeric_evidence(
             messages or [],
@@ -121,12 +133,17 @@ class AfterSalesTurn:
             self.validator,
         )
         allowed_numeric_claims.extend(trusted_claims)
+        answer_claims = tuple(self.validator.extract_numeric_claims(answer))
+        scalar_gate = self._validate_scalar_claims(answer_claims)
+        if scalar_gate is not None:
+            scalar_gate["adopted_claims"] = []
+            return scalar_gate
         result = self.validator.validate_answer(
             answer,
             self.facts,
             allowed_numeric_claims=tuple(dict.fromkeys(allowed_numeric_claims)),
         )
-        return {
+        response = {
             "ok": result.ok,
             "reasons": result.reasons,
             "fallback": ""
@@ -134,6 +151,38 @@ class AfterSalesTurn:
             else self.validator.build_safe_clarification(result, self.facts),
             "adopted_claims": list(getattr(result, "adopted_claims", ()) or ()),
         }
+        if result.ok and self.answer_shape == "scalar_lookup":
+            unique_answer_claims = _unique_numeric_claims(answer_claims)
+            response["normalized_response"] = _canonical_scalar_response(
+                next(iter(unique_answer_claims.values()))
+            )
+        return response
+
+    def _validate_scalar_claims(
+        self,
+        claims: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        if self.answer_shape != "scalar_lookup":
+            return None
+        unique_claims = _unique_numeric_claims(claims)
+        if len(unique_claims) != 1:
+            return {
+                "ok": False,
+                "reasons": ["scalar_claim_not_unique"],
+                "fallback": "当前问题需要唯一数值，但草稿中未形成唯一的已核实数值。",
+            }
+        if self.expected_scalar_claims:
+            expected = {
+                _normalize_numeric_claim(claim)
+                for claim in self.expected_scalar_claims
+            }
+            if set(unique_claims) != expected:
+                return {
+                    "ok": False,
+                    "reasons": ["scalar_claim_mismatch"],
+                    "fallback": "当前草稿数值与该产品、该参数字段的正式值不一致。",
+                }
+        return None
 
     def _runtime_adopted_claims(
         self,
@@ -263,6 +312,12 @@ def activate_validated_fact(
     if len(claims) != 1:
         return False
     claim = claims[0]
+    if turn.expected_scalar_claims:
+        claim_text = f"{claim.get('value', '')} {claim.get('unit', '')}".strip()
+        if _normalize_numeric_claim(claim_text) not in {
+            _normalize_numeric_claim(item) for item in turn.expected_scalar_claims
+        }:
+            return False
     fact_key = str(claim.get("fact_key") or _fact_key_for_question(question))
     if not fact_key or not claim.get("evidence_id") or not claim.get("source_path"):
         return False
@@ -330,6 +385,10 @@ def _normalize_numeric_claim(value: str) -> str:
         .replace("<=", "≤")
         .lower()
     )
+
+
+def _unique_numeric_claims(claims: tuple[str, ...]) -> dict[str, str]:
+    return {_normalize_numeric_claim(claim): claim for claim in claims}
 
 
 def _canonical_preflight_action(gate: dict[str, Any]) -> str:
@@ -493,7 +552,10 @@ def prepare_after_sales_turn(
             return None
         route_id = str(fast_result.get("route_id") or "fast_preflight")
         source_paths = tuple(fast_result.get("source_paths") or ())
-        requires_source_validation = route_id == "sop_parameter_short_answer"
+        requires_source_validation = bool(
+            fast_result.get("requires_source_validation", False)
+            or route_id == "sop_parameter_short_answer"
+        )
         source_text = " ".join(
             str(item.get("content", ""))
             for item in history[-12:]
@@ -522,6 +584,11 @@ def prepare_after_sales_turn(
                 answer_contract=dict(fast_result.get("answer_contract") or {}),
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
+                fact_key=str(fast_result.get("fact_key") or ""),
+                expected_scalar_claims=tuple(
+                    str(item) for item in fast_result.get("expected_scalar_claims") or ()
+                ),
+                source_locator=str(fast_result.get("source_locator") or ""),
             ),
             guard=guard,
             question=message,
@@ -578,6 +645,11 @@ def prepare_after_sales_turn(
         answer_contract=dict(fast_result.get("answer_contract") or {}),
         source_location=dict(fast_result.get("source_location") or {}),
         answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
+        fact_key=str(fast_result.get("fact_key") or ""),
+        expected_scalar_claims=tuple(
+            str(item) for item in fast_result.get("expected_scalar_claims") or ()
+        ),
+        source_locator=str(fast_result.get("source_locator") or ""),
         ),
         guard=guard,
         question=message,
@@ -592,7 +664,7 @@ def _attach_verified_fact(
     question: str,
     session_db: Any | None,
 ) -> AfterSalesTurn:
-    fact_key = _fact_key_for_question(question)
+    fact_key = str(turn.fact_key or _fact_key_for_question(question))
     source_revisions = _load_source_revisions(guard.get("knowledge_release_manifest"))
     turn = replace(
         turn,
@@ -620,6 +692,23 @@ def _attach_verified_fact(
     )
     if match is None:
         return turn
+    rendered_answer = str(match.get("rendered_answer") or "")
+    if turn.answer_shape == "scalar_lookup" and turn.expected_scalar_claims:
+        if turn.validator is None:
+            return turn
+        rendered_claims = {
+            _normalize_numeric_claim(claim)
+            for claim in turn.validator.extract_numeric_claims(rendered_answer)
+        }
+        expected_claims = {
+            _normalize_numeric_claim(claim)
+            for claim in turn.expected_scalar_claims
+        }
+        if rendered_claims != expected_claims:
+            return turn
+        rendered_answer = _canonical_scalar_response(
+            turn.expected_scalar_claims[0]
+        )
     evidence_ids = tuple(
         str(item.get("evidence_id") or "")
         for item in match.get("evidence") or []
@@ -629,7 +718,7 @@ def _attach_verified_fact(
         turn,
         verified_fact_hit=True,
         verified_fact_status="active",
-        direct_response=str(match.get("rendered_answer") or "") if mode == "active" else "",
+        direct_response=rendered_answer if mode == "active" else "",
         direct_evidence_ids=evidence_ids,
     )
 
@@ -672,10 +761,20 @@ def _relative_source_path(source_path: str, revisions: dict[str, str]) -> str:
 
 
 def _split_numeric_claim(claim: str) -> tuple[str, str]:
-    match = re.search(r"(\d+(?:\.\d+)?(?:\s*[-~～]\s*\d+(?:\.\d+)?)?)\s*(.*)", claim)
+    match = re.search(
+        r"((?:>=|<=|[<>≥≤])?\s*\d+(?:\.\d+)?(?:\s*[-~～]\s*\d+(?:\.\d+)?)?)\s*(.*)",
+        claim,
+    )
     if not match:
         return "", ""
     return match.group(1).strip(), match.group(2).strip()
+
+
+def _canonical_scalar_response(claim: str) -> str:
+    value, unit = _split_numeric_claim(claim)
+    value = value.replace(">=", "≥").replace("<=", "≤")
+    normalized_unit = re.sub(r"\s+", "", unit).replace("µ", "μ")
+    return f"{value}{' ' + normalized_unit if normalized_unit else ''}。"
 
 
 def _render_fast_response_context(
@@ -759,12 +858,24 @@ def _render_fast_response_context(
         "answer_contract": answer_contract,
         "source_location": source_location,
         "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
+        "fact_key": str(plan.get("fact_key") or ""),
+        "expected_scalar_claims": tuple(
+            str(item) for item in plan.get("expected_scalar_claims") or ()
+        ),
+        "source_locator": str(plan.get("source_locator") or ""),
+        "requires_source_validation": str(fast_path.get("answer_shape") or "")
+        == "sop_parameter_short_answer",
     }
 
 
 def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
     if not contract:
         return []
+    if contract.get("deliverable") == "scalar_value":
+        return [
+            "当前交付物：只输出一个已核实数值及单位。",
+            "不要补充原因、建议、下一步或可见来源标签；内部证据校验照常执行。",
+        ]
     deliverable = {
         "difference_list": "只输出差异清单",
         "diagnostic_branches": "输出有区分度的排查分支",

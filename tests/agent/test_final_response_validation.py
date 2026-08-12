@@ -2,6 +2,7 @@ from agent.final_response_validation import (
     evaluate_final_response,
     strip_validation_scaffolding,
 )
+from pathlib import Path
 import run_agent as ra
 
 
@@ -14,6 +15,31 @@ def test_accepts_valid_response():
 
     assert decision.action == "accept"
     assert decision.response == "valid"
+
+
+def test_accepts_validator_normalized_response_without_model_retry():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": True,
+            "reasons": (),
+            "fallback": "",
+            "normalized_response": "200 μL。",
+        },
+        "需要200 μL血浆，另外建议检查样本质量。",
+        attempts=0,
+    )
+
+    assert decision.action == "accept"
+    assert decision.response == "200 μL。"
+
+
+def test_conversation_loop_applies_accepted_normalized_response():
+    source = (Path(__file__).resolve().parents[2] / "agent" / "conversation_loop.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'and _validation_decision.action == "accept"' in source
+    assert "final_response = _validation_decision.response" in source
 
 
 def test_first_invalid_response_requests_internal_retry():
