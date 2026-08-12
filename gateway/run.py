@@ -21332,6 +21332,95 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
+            # Resolve durable IVD task state before any broad transcript recall.
+            # This is opt-in and intent-gated: a new full question never resumes
+            # an old task merely because product terms look similar.
+            _ivd_checkpoint_loaded = False
+            _ivd_checkpoint_service = None
+            _ivd_checkpoint_scope = None
+            _ivd_checkpoint_record = None
+            _ivd_checkpoint_owner = f"gateway:{os.getpid()}:{session_id}"
+            _ivd_checkpoint_config = user_config.get("after_sales_guard") or {}
+            _ivd_checkpoint_platforms = _ivd_checkpoint_config.get("platforms") or []
+            if isinstance(_ivd_checkpoint_platforms, str):
+                _ivd_checkpoint_platforms = [
+                    item.strip()
+                    for item in _ivd_checkpoint_platforms.split(",")
+                    if item.strip()
+                ]
+            _ivd_checkpoint_enabled = bool(
+                isinstance(_ivd_checkpoint_config, dict)
+                and _ivd_checkpoint_config.get("enabled", False)
+                and _ivd_checkpoint_config.get("task_checkpoint_enabled", False)
+                and platform_key in _ivd_checkpoint_platforms
+            )
+            if _ivd_checkpoint_enabled:
+                try:
+                    from gateway.ivd_task_checkpoint import (
+                        CheckpointScope,
+                        IVDTaskCheckpointService,
+                        build_checkpoint_result,
+                        message_allows_history_search,
+                        render_checkpoint_context,
+                        wants_task_continuation,
+                    )
+
+                    _checkpoint_chat_id = str(source.chat_id or "")
+                    _checkpoint_user_id = str(source.user_id_alt or source.user_id or "")
+                    if _checkpoint_chat_id and _checkpoint_user_id:
+                        _ivd_checkpoint_scope = CheckpointScope(
+                            profile=str(source.profile or "ivd"),
+                            platform=platform_key,
+                            chat_type=str(source.chat_type or "dm"),
+                            chat_id=_checkpoint_chat_id,
+                            user_id=_checkpoint_user_id,
+                        )
+                        _ivd_checkpoint_service = IVDTaskCheckpointService(
+                            getattr(self._session_db, "_db", self._session_db)
+                        )
+                    if (
+                        _ivd_checkpoint_service is not None
+                        and wants_task_continuation(str(message or ""))
+                    ):
+                        _checkpoint_resolution = _ivd_checkpoint_service.resolve_continuation(
+                            _ivd_checkpoint_scope
+                        )
+                        if _checkpoint_resolution["action"] == "clarify":
+                            return build_checkpoint_result(
+                                _checkpoint_resolution["message"],
+                                user_message=str(message or ""),
+                            )
+                        if _checkpoint_resolution["action"] == "resume":
+                            _ivd_checkpoint_record = _checkpoint_resolution["checkpoint"]
+                            _lease = _ivd_checkpoint_service.acquire_lease(
+                                _ivd_checkpoint_record["task_id"],
+                                owner_id=_ivd_checkpoint_owner,
+                                ttl_seconds=180,
+                            )
+                            if _lease is None:
+                                return build_checkpoint_result(
+                                    "该任务正在另一执行端处理中，请稍后再试。",
+                                    user_message=str(message or ""),
+                                )
+                            combined_ephemeral = (
+                                combined_ephemeral
+                                + "\n\n"
+                                + render_checkpoint_context(_ivd_checkpoint_record)
+                            ).strip()
+                            _ivd_checkpoint_loaded = True
+                            _ivd_checkpoint_allow_history = message_allows_history_search(
+                                str(message or "")
+                            )
+                        else:
+                            _ivd_checkpoint_allow_history = False
+                    else:
+                        _ivd_checkpoint_allow_history = False
+                except Exception as _checkpoint_exc:
+                    logger.warning("IVD task checkpoint resolution skipped: %s", _checkpoint_exc)
+                    _ivd_checkpoint_allow_history = False
+            else:
+                _ivd_checkpoint_allow_history = False
+
             # Product-specific troubleshooting facts are injected per turn so
             # they constrain the current model call without entering transcript
             # history or leaking into an unrelated follow-up. The guard is
@@ -22539,11 +22628,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _ivd_runtime_token = begin_ivd_answer_turn(
                         policy=_ivd_retrieval_policy,
                         mode="answer",
+                        checkpoint_loaded=_ivd_checkpoint_loaded,
+                        allow_history_search=_ivd_checkpoint_allow_history,
                     )
                 else:
                     _ivd_runtime_token = begin_ivd_answer_turn(
                         max_searches=4,
                         mode="answer",
+                        checkpoint_loaded=_ivd_checkpoint_loaded,
+                        allow_history_search=_ivd_checkpoint_allow_history,
                     )
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
@@ -22678,6 +22771,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 str((_tool_call.get("function") or {}).get("name") or "")
                             )
                     _validation_status = "not_applicable"
+                    _validation: dict[str, object] = {
+                        "ok": True,
+                        "adopted_claims": [],
+                    }
                     if _after_sales_turn is not None and _after_sales_turn.has_validator:
                         _validation = _after_sales_turn.validate(
                             str(final_response or ""),
@@ -22723,6 +22820,93 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "IVD validated context receipt skipped: %s",
                                     _receipt_exc,
                                 )
+                    if (
+                        _ivd_checkpoint_enabled
+                        and _ivd_checkpoint_service is not None
+                        and _ivd_checkpoint_scope is not None
+                    ):
+                        try:
+                            from gateway.ivd_task_checkpoint import CheckpointConflict
+
+                            _checkpoint_is_unfinished = bool(
+                                result.get("interrupted")
+                                or result.get("partial")
+                                or result.get("completed") is False
+                            )
+                            _checkpoint_constraints = []
+                            if _after_sales_turn is not None:
+                                if _after_sales_turn.product_scope:
+                                    _checkpoint_constraints.append(
+                                        f"产品={_after_sales_turn.product_scope}"
+                                    )
+                                if _after_sales_turn.product_variant:
+                                    _checkpoint_constraints.append(
+                                        f"版本={_after_sales_turn.product_variant}"
+                                    )
+                            _checkpoint_claims = list(
+                                _validation.get("adopted_claims") or []
+                            )
+                            _checkpoint_evidence_ids = [
+                                str(item.get("evidence_id") or "")
+                                for item in _checkpoint_claims
+                                if item.get("evidence_id")
+                            ]
+                            if _ivd_checkpoint_record is not None:
+                                _next_state = (
+                                    "active" if _checkpoint_is_unfinished else "completed"
+                                )
+                                _next_payload = dict(
+                                    _ivd_checkpoint_record.get("payload") or {}
+                                )
+                                if _checkpoint_constraints:
+                                    _next_payload["active_constraints"] = _checkpoint_constraints
+                                if _checkpoint_evidence_ids:
+                                    _next_payload["evidence_ids"] = _checkpoint_evidence_ids
+                                    _next_payload["adopted_facts"] = _checkpoint_claims
+                                if _checkpoint_is_unfinished:
+                                    _next_payload["unfinished_steps"] = [
+                                        "继续当前未完成任务"
+                                    ]
+                                _ivd_checkpoint_service.save(
+                                    task_id=_ivd_checkpoint_record["task_id"],
+                                    scope=_ivd_checkpoint_scope,
+                                    state=_next_state,
+                                    source_session_id=session_id,
+                                    payload=_next_payload,
+                                    expected_revision=int(
+                                        _ivd_checkpoint_record["revision"]
+                                    ),
+                                )
+                            elif _checkpoint_is_unfinished:
+                                import hashlib
+
+                                _checkpoint_task_id = "ivd-" + hashlib.sha256(
+                                    f"{session_key or session_id}\0{_ivd_question_text}".encode(
+                                        "utf-8"
+                                    )
+                                ).hexdigest()[:16]
+                                _ivd_checkpoint_service.save(
+                                    task_id=_checkpoint_task_id,
+                                    scope=_ivd_checkpoint_scope,
+                                    state="active",
+                                    source_session_id=session_id,
+                                    payload={
+                                        "active_constraints": _checkpoint_constraints,
+                                        "unfinished_steps": ["继续当前未完成任务"],
+                                        "evidence_ids": _checkpoint_evidence_ids,
+                                        "adopted_facts": _checkpoint_claims,
+                                    },
+                                )
+                        except CheckpointConflict as _checkpoint_conflict:
+                            logger.warning(
+                                "IVD task checkpoint revision conflict: %s",
+                                _checkpoint_conflict,
+                            )
+                        except Exception as _checkpoint_write_exc:
+                            logger.warning(
+                                "IVD task checkpoint write skipped: %s",
+                                _checkpoint_write_exc,
+                            )
                     _event = build_runtime_event(
                         platform=platform_key,
                         session_key=session_key or session_id or "",

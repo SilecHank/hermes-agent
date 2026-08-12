@@ -91,6 +91,17 @@ def test_ivd_verified_fact_schema_is_declaratively_reconciled(tmp_path):
     assert index is not None
 
 
+def test_ivd_task_checkpoint_schema_is_declaratively_reconciled(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    tables = {
+        row[0]
+        for row in session_db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {"ivd_task_checkpoints", "ivd_task_leases"}.issubset(tables)
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================

@@ -9,6 +9,7 @@ from gateway.ivd_runtime import (
     begin_ivd_answer_turn,
     build_ivd_retrieval_context,
     consume_ivd_search,
+    can_use_ivd_session_search,
     end_ivd_answer_turn,
     get_ivd_retrieval_snapshot,
     record_ivd_search_result,
@@ -165,6 +166,30 @@ def test_maintenance_mode_does_not_apply_answer_budget():
     try:
         assert consume_ivd_search() == (True, 0, 0)
         assert consume_ivd_search() == (True, 0, 0)
+    finally:
+        end_ivd_answer_turn(token)
+
+
+def test_checkpoint_suppresses_broad_history_search_unless_explicitly_allowed():
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=False,
+    )
+    try:
+        assert can_use_ivd_session_search() is False
+    finally:
+        end_ivd_answer_turn(token)
+
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=True,
+    )
+    try:
+        assert can_use_ivd_session_search() is True
     finally:
         end_ivd_answer_turn(token)
 

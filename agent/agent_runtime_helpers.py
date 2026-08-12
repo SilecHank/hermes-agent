@@ -2559,6 +2559,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
     elif function_name == "session_search":
         def _execute(next_args: dict) -> Any:
+            from gateway.ivd_runtime import can_use_ivd_session_search
+            if not can_use_ivd_session_search():
+                return _finish_agent_tool(json.dumps({
+                    "success": False,
+                    "error": "当前任务检查点已提供续接状态；本轮不执行宽泛历史检索。",
+                }, ensure_ascii=False), next_args)
             session_db = agent._get_session_db_for_recall()
             if not session_db:
                 from hermes_state import format_session_db_unavailable

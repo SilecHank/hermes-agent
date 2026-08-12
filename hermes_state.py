@@ -1205,6 +1205,30 @@ CREATE TABLE IF NOT EXISTS ivd_verified_facts (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ivd_task_checkpoints (
+    task_id TEXT PRIMARY KEY,
+    profile TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id_hash TEXT NOT NULL,
+    user_id_hash TEXT NOT NULL,
+    authorized_participants_json TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    source_session_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ivd_task_leases (
+    task_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    lease_until REAL NOT NULL,
+    generation INTEGER NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES ivd_task_checkpoints(task_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
@@ -1217,6 +1241,12 @@ CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 CREATE INDEX IF NOT EXISTS idx_ivd_verified_fact_lookup
     ON ivd_verified_facts(product_scope, product_variant, fact_key, status);
+CREATE INDEX IF NOT EXISTS idx_ivd_task_checkpoint_scope
+    ON ivd_task_checkpoints(
+        profile, platform, chat_type, chat_id_hash, user_id_hash, state, updated_at
+    );
+CREATE INDEX IF NOT EXISTS idx_ivd_task_lease_expiry
+    ON ivd_task_leases(lease_until);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -2429,6 +2459,129 @@ class SessionDB:
         if result:
             logger.info("revoked IVD verified fact %s: %s", fact_id, reason)
         return result
+
+    def save_ivd_task_checkpoint(
+        self,
+        record: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Create or compare-and-swap one scoped task checkpoint."""
+        now = float(record.get("updated_at") or time.time())
+
+        def write(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            existing = conn.execute(
+                "SELECT revision, created_at, state FROM ivd_task_checkpoints WHERE task_id = ?",
+                (record["task_id"],),
+            ).fetchone()
+            if existing is None:
+                if expected_revision not in (None, 0):
+                    return None
+                revision = 1
+                created_at = now
+            else:
+                if expected_revision is None or int(existing["revision"]) != expected_revision:
+                    return None
+                revision = int(existing["revision"]) + 1
+                created_at = float(existing["created_at"])
+            conn.execute(
+                """INSERT INTO ivd_task_checkpoints (
+                       task_id, profile, platform, chat_type, chat_id_hash,
+                       user_id_hash, authorized_participants_json, revision,
+                       state, source_session_id, payload_json, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       profile=excluded.profile,
+                       platform=excluded.platform,
+                       chat_type=excluded.chat_type,
+                       chat_id_hash=excluded.chat_id_hash,
+                       user_id_hash=excluded.user_id_hash,
+                       authorized_participants_json=excluded.authorized_participants_json,
+                       revision=excluded.revision,
+                       state=excluded.state,
+                       source_session_id=excluded.source_session_id,
+                       payload_json=excluded.payload_json,
+                       updated_at=excluded.updated_at""",
+                (
+                    record["task_id"], record["profile"], record["platform"],
+                    record["chat_type"], record["chat_id_hash"], record["user_id_hash"],
+                    record.get("authorized_participants_json", "[]"), revision,
+                    record["state"], record["source_session_id"], record["payload_json"],
+                    created_at, now,
+                ),
+            )
+            return {
+                **record,
+                "revision": revision,
+                "created_at": created_at,
+                "updated_at": now,
+            }
+
+        return self._execute_write(write)
+
+    def find_ivd_task_checkpoints(
+        self,
+        *,
+        profile: str,
+        platform: str,
+        chat_type: str,
+        chat_id_hash: str,
+        states: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        """Return resumable checkpoint candidates for one non-user scope."""
+        if not states:
+            return []
+        placeholders = ",".join("?" for _ in states)
+        rows = self._conn.execute(
+            f"""SELECT * FROM ivd_task_checkpoints
+                WHERE profile = ? AND platform = ? AND chat_type = ?
+                  AND chat_id_hash = ? AND state IN ({placeholders})
+                ORDER BY updated_at DESC, task_id ASC""",
+            (profile, platform, chat_type, chat_id_hash, *states),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def acquire_ivd_task_lease(
+        self,
+        task_id: str,
+        *,
+        owner_id: str,
+        lease_until: float,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """Acquire a missing/expired lease; never steal a live lease."""
+        def write(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            if conn.execute(
+                "SELECT 1 FROM ivd_task_checkpoints WHERE task_id = ?", (task_id,)
+            ).fetchone() is None:
+                return None
+            existing = conn.execute(
+                "SELECT owner_id, lease_until, generation FROM ivd_task_leases WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None and float(existing["lease_until"]) > now:
+                if str(existing["owner_id"]) != owner_id:
+                    return None
+                generation = int(existing["generation"])
+            else:
+                generation = int(existing["generation"]) + 1 if existing is not None else 1
+            conn.execute(
+                """INSERT INTO ivd_task_leases(task_id, owner_id, lease_until, generation)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       owner_id=excluded.owner_id,
+                       lease_until=excluded.lease_until,
+                       generation=excluded.generation""",
+                (task_id, owner_id, lease_until, generation),
+            )
+            return {
+                "task_id": task_id,
+                "owner_id": owner_id,
+                "lease_until": lease_until,
+                "generation": generation,
+            }
+
+        return self._execute_write(write)
 
     # ── Chunked FTS rebuild engine (v23 opt-in optimize) ──
     #
