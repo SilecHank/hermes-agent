@@ -22034,14 +22034,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     for item in _projection_platforms.split(",")
                     if item.strip()
                 ]
-            _projection_enabled = bool(
+            _projection_budget_enabled = bool(
                 _after_sales_turn is not None
                 and isinstance(_projection_config, dict)
                 and _projection_config.get("enabled", False)
-                and _projection_config.get("context_projection_enabled", False)
+                and _projection_config.get("context_budget_enabled", False)
                 and platform_key in _projection_platforms
             )
-            if _projection_enabled:
+            if _projection_budget_enabled:
                 try:
                     from agent.ivd_context_engine import ensure_ivd_context_engine
 
@@ -22063,6 +22063,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         tool_schemas=agent.tools or (),
                         answer_shape=_after_sales_turn.answer_shape,
                         max_output_tokens=int(agent.max_tokens or 8_000),
+                        projection_enabled=bool(
+                            _projection_config.get(
+                                "context_projection_enabled", False
+                            )
+                        ),
                     )
                 except Exception as _projection_exc:
                     logger.warning(

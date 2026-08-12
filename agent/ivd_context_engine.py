@@ -22,6 +22,7 @@ class IVDContextEngineProxy:
         tool_schemas: Sequence[Mapping[str, Any]] = (),
         answer_shape: str = "diagnostic",
         max_output_tokens: int | None = None,
+        projection_enabled: bool = True,
     ) -> None:
         self.delegate = delegate
         self.policy = dict(DEFAULT_POLICY)
@@ -36,6 +37,7 @@ class IVDContextEngineProxy:
         self.tool_schemas = list(tool_schemas)
         self.answer_shape = str(answer_shape or "diagnostic")
         self.max_output_tokens = max_output_tokens
+        self.projection_enabled = bool(projection_enabled)
         self.request_budget = IVDRequestBudget(self.policy)
         self.last_request_budget = None
         self.last_projection = None
@@ -55,6 +57,7 @@ class IVDContextEngineProxy:
         tool_schemas: Sequence[Mapping[str, Any]] | None = None,
         answer_shape: str | None = None,
         max_output_tokens: int | None = None,
+        projection_enabled: bool | None = None,
     ) -> None:
         if active_constraints is not None:
             self.active_constraints = tuple(active_constraints)
@@ -66,6 +69,8 @@ class IVDContextEngineProxy:
             self.answer_shape = str(answer_shape or "diagnostic")
         if max_output_tokens is not None:
             self.max_output_tokens = int(max_output_tokens)
+        if projection_enabled is not None:
+            self.projection_enabled = bool(projection_enabled)
 
     def add_receipts(self, receipts: Mapping[str, Mapping[str, Any]]) -> None:
         for call_id, receipt in receipts.items():
@@ -88,6 +93,9 @@ class IVDContextEngineProxy:
             int(getattr(self.delegate, "last_prompt_tokens", 0) or 0),
             self.last_request_budget.estimated_input_tokens,
         )
+        if not self.projection_enabled:
+            self.last_projection = None
+            return selected
         result = project_ivd_context(
             base_messages,
             policy=self.policy,
@@ -146,6 +154,7 @@ def ensure_ivd_context_engine(
     tool_schemas: Sequence[Mapping[str, Any]] = (),
     answer_shape: str = "diagnostic",
     max_output_tokens: int | None = None,
+    projection_enabled: bool = True,
 ) -> Any:
     """Attach/update the proxy only for an explicitly enabled IVD turn."""
     if not enabled:
@@ -157,6 +166,7 @@ def ensure_ivd_context_engine(
             tool_schemas=tool_schemas,
             answer_shape=answer_shape,
             max_output_tokens=max_output_tokens,
+            projection_enabled=projection_enabled,
         )
         return engine
     return IVDContextEngineProxy(
@@ -167,4 +177,5 @@ def ensure_ivd_context_engine(
         tool_schemas=tool_schemas,
         answer_shape=answer_shape,
         max_output_tokens=max_output_tokens,
+        projection_enabled=projection_enabled,
     )

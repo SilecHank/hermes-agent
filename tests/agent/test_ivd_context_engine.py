@@ -138,3 +138,24 @@ def test_provider_window_can_lower_ivd_hard_limit():
 
     assert proxy.last_request_budget.hard_limit_tokens == 38_000
     assert proxy.should_compress(38_000) is True
+
+
+def test_shadow_budget_measures_without_projecting_messages():
+    delegate = Delegate()
+    delegate.last_prompt_tokens = 50_000
+    proxy = IVDContextEngineProxy(
+        delegate,
+        projection_enabled=False,
+        receipts={"c": {"evidence_ids": ["ev-a"]}},
+    )
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "c", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c", "content": "X" * 50_000},
+        {"role": "user", "content": "next"},
+    ]
+
+    selected = proxy.select_context(messages)
+
+    assert selected is None
+    assert proxy.last_request_budget.estimated_input_tokens > 0
+    assert proxy.last_projection is None
