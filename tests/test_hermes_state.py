@@ -102,6 +102,14 @@ def test_ivd_task_checkpoint_schema_is_declaratively_reconciled(tmp_path):
     assert {"ivd_task_checkpoints", "ivd_task_leases"}.issubset(tables)
 
 
+def test_ivd_route_binding_schema_is_declaratively_reconciled(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    table = session_db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ivd_route_bindings'"
+    ).fetchone()
+    assert table is not None
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================

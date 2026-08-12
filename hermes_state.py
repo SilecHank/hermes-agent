@@ -1229,6 +1229,21 @@ CREATE TABLE IF NOT EXISTS ivd_task_leases (
     FOREIGN KEY(task_id) REFERENCES ivd_task_checkpoints(task_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS ivd_route_bindings (
+    scope_key TEXT PRIMARY KEY,
+    profile TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id_hash TEXT NOT NULL,
+    user_id_hash TEXT NOT NULL,
+    route_epoch INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    nonrecoverable_after REAL NOT NULL DEFAULT 0,
+    boundary_reason TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
@@ -1247,6 +1262,8 @@ CREATE INDEX IF NOT EXISTS idx_ivd_task_checkpoint_scope
     );
 CREATE INDEX IF NOT EXISTS idx_ivd_task_lease_expiry
     ON ivd_task_leases(lease_until);
+CREATE INDEX IF NOT EXISTS idx_ivd_route_binding_session
+    ON ivd_route_bindings(session_id, route_epoch);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -2582,6 +2599,87 @@ class SessionDB:
             }
 
         return self._execute_write(write)
+
+    def upsert_ivd_route_binding(
+        self,
+        record: dict[str, Any],
+        *,
+        expected_epoch: int | None = None,
+        expected_session_id: str | None = None,
+        advance_epoch: bool = False,
+    ) -> dict[str, Any] | None:
+        """CAS-bind one route, optionally advancing its non-recoverable epoch."""
+        now = float(record.get("updated_at") or time.time())
+
+        def write(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            existing = conn.execute(
+                "SELECT * FROM ivd_route_bindings WHERE scope_key = ?",
+                (record["scope_key"],),
+            ).fetchone()
+            if existing is None:
+                if expected_epoch not in (None, 0) or expected_session_id:
+                    return None
+                epoch = 1
+                created_at = now
+                nonrecoverable_after = float(record.get("nonrecoverable_after") or 0)
+            else:
+                if expected_epoch is not None and int(existing["route_epoch"]) != expected_epoch:
+                    return None
+                if expected_session_id and str(existing["session_id"]) != expected_session_id:
+                    return None
+                epoch = int(existing["route_epoch"]) + (1 if advance_epoch else 0)
+                created_at = float(existing["created_at"])
+                nonrecoverable_after = (
+                    float(record.get("nonrecoverable_after") or now)
+                    if advance_epoch
+                    else float(existing["nonrecoverable_after"])
+                )
+            conn.execute(
+                """INSERT INTO ivd_route_bindings (
+                       scope_key, profile, platform, chat_type, chat_id_hash,
+                       user_id_hash, route_epoch, session_id,
+                       nonrecoverable_after, boundary_reason, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(scope_key) DO UPDATE SET
+                       profile=excluded.profile,
+                       platform=excluded.platform,
+                       chat_type=excluded.chat_type,
+                       chat_id_hash=excluded.chat_id_hash,
+                       user_id_hash=excluded.user_id_hash,
+                       route_epoch=excluded.route_epoch,
+                       session_id=excluded.session_id,
+                       nonrecoverable_after=excluded.nonrecoverable_after,
+                       boundary_reason=excluded.boundary_reason,
+                       updated_at=excluded.updated_at""",
+                (
+                    record["scope_key"], record["profile"], record["platform"],
+                    record["chat_type"], record["chat_id_hash"], record["user_id_hash"],
+                    epoch, record["session_id"], nonrecoverable_after,
+                    record.get("boundary_reason", ""), created_at, now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM ivd_route_bindings WHERE scope_key = ?",
+                (record["scope_key"],),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+        return self._execute_write(write)
+
+    def get_ivd_route_binding(self, scope_key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM ivd_route_bindings WHERE scope_key = ?", (scope_key,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def has_user_message_after(self, session_id: str, timestamp: float) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM messages
+               WHERE session_id = ? AND role = 'user' AND timestamp > ?
+               LIMIT 1""",
+            (session_id, float(timestamp)),
+        ).fetchone()
+        return row is not None
 
     # ── Chunked FTS rebuild engine (v23 opt-in optimize) ──
     #

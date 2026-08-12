@@ -21339,6 +21339,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _ivd_checkpoint_service = None
             _ivd_checkpoint_scope = None
             _ivd_checkpoint_record = None
+            _ivd_route_scope = None
             _ivd_checkpoint_owner = f"gateway:{os.getpid()}:{session_id}"
             _ivd_checkpoint_config = user_config.get("after_sales_guard") or {}
             _ivd_checkpoint_platforms = _ivd_checkpoint_config.get("platforms") or []
@@ -21354,6 +21355,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and _ivd_checkpoint_config.get("task_checkpoint_enabled", False)
                 and platform_key in _ivd_checkpoint_platforms
             )
+            from gateway.ivd_route_epoch import route_epoch_enabled
+
+            _ivd_route_epoch_enabled = route_epoch_enabled(
+                _ivd_checkpoint_config, platform_key
+            )
+            if (
+                _ivd_route_epoch_enabled
+                and source.chat_id
+                and (source.user_id_alt or source.user_id)
+            ):
+                try:
+                    from gateway.ivd_route_epoch import (
+                        IVDRouteEpochService,
+                        RouteScope,
+                    )
+
+                    _route_scope = RouteScope(
+                        profile=str(source.profile or "ivd"),
+                        platform=platform_key,
+                        chat_type=str(source.chat_type or "dm"),
+                        chat_id=str(source.chat_id),
+                        user_id=str(source.user_id_alt or source.user_id),
+                    )
+                    _route_entry = self.session_store._entries.get(session_key)
+                    _route_previous_session_id = str(
+                        getattr(_route_entry, "prev_session_id", "") or ""
+                    )
+                    _route_boundary_reason = str(
+                        getattr(_route_entry, "auto_reset_reason", "") or ""
+                    )
+                    if _route_previous_session_id and not _route_boundary_reason:
+                        _route_boundary_reason = "explicit_reset"
+                    IVDRouteEpochService(
+                        getattr(self._session_db, "_db", self._session_db)
+                    ).reconcile_current(
+                        _route_scope,
+                        session_id=session_id,
+                        previous_session_id=_route_previous_session_id,
+                        boundary_reason=_route_boundary_reason,
+                        now=time.time(),
+                    )
+                except Exception as _route_epoch_exc:
+                    logger.warning("IVD route epoch reconciliation skipped: %s", _route_epoch_exc)
             if _ivd_checkpoint_enabled:
                 try:
                     from gateway.ivd_task_checkpoint import (
@@ -22893,6 +22937,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                         _ivd_checkpoint_record["revision"]
                                     ),
                                 )
+                                if (
+                                    _next_state == "completed"
+                                    and _ivd_route_epoch_enabled
+                                    and _ivd_route_scope is not None
+                                ):
+                                    from gateway.ivd_route_epoch import IVDRouteEpochService
+
+                                    IVDRouteEpochService(
+                                        getattr(
+                                            self._session_db,
+                                            "_db",
+                                            self._session_db,
+                                        )
+                                    ).mark_task_completed(
+                                        _ivd_route_scope,
+                                        session_id=session_id,
+                                        now=time.time(),
+                                    )
                             elif _checkpoint_is_unfinished:
                                 import hashlib
 
