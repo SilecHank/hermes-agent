@@ -1525,6 +1525,7 @@ def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None,
+    allowed_skill_names: "frozenset[str] | None" = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
@@ -1565,6 +1566,7 @@ def build_skills_system_prompt(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(compact_categories or ())),
+        tuple(sorted(allowed_skill_names or ())),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1591,6 +1593,8 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            if allowed_skill_names is not None and frontmatter_name not in allowed_skill_names:
+                continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
                 available_tools,
@@ -1615,6 +1619,8 @@ def build_skills_system_prompt(
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                continue
+            if allowed_skill_names is not None and entry["frontmatter_name"] not in allowed_skill_names:
                 continue
             if not _skill_should_show(
                 extract_skill_conditions(frontmatter),
@@ -1670,6 +1676,8 @@ def build_skills_system_prompt(
                 if frontmatter_name in seen_skill_names:
                     continue
                 if frontmatter_name in disabled or skill_name in disabled:
+                    continue
+                if allowed_skill_names is not None and frontmatter_name not in allowed_skill_names:
                     continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),
@@ -1745,12 +1753,21 @@ def build_skills_system_prompt(
                 else:
                     index_lines.append(f"    - {name}")
 
-        result = (
-            "## Skills (mandatory)\n"
+        _load_guidance = (
+            "Before replying, select the single most relevant skill below. Load its full body "
+            "with skill_view(name) only when it directly controls the current task. Do not load "
+            "a second business skill unless the task has a clearly independent role. "
+            if allowed_skill_names is not None
+            else
             "Before replying, scan the skills below. If a skill matches or is even partially relevant "
             "to your task, you MUST load it with skill_view(name) and follow its instructions. "
             "Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
+        )
+        result = (
+            "## Skills (mandatory)\n"
+            + _load_guidance
+            +
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
             "and proven workflows that outperform general-purpose approaches. Load the skill "
             "even if you think you could handle the task with basic tools like web_search or terminal. "

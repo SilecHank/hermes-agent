@@ -461,6 +461,35 @@ class TestGatewayRuntimeStatus:
         assert payload["pid"] == os.getpid()
         assert payload["start_time"] == 2000
 
+    def test_write_runtime_status_drops_platforms_from_previous_process(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "gateway_state.json").write_text(
+            json.dumps(
+                {
+                    "pid": 99999,
+                    "start_time": 1000,
+                    "kind": "hermes-gateway",
+                    "platforms": {
+                        "telegram": {
+                            "state": "connected",
+                            "error_message": "old secret",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 2000)
+
+        status.write_runtime_status(gateway_state="starting")
+
+        payload = status.read_runtime_status()
+        assert payload["pid"] == os.getpid()
+        assert payload["start_time"] == 2000
+        assert payload["platforms"] == {}
+
     def test_runtime_status_running_pid_rejects_stale_record_for_supervisor_pid(self, monkeypatch):
         """Regression: stale profile runtime state must not mark s6 supervisors live.
 
@@ -695,6 +724,24 @@ class TestGetProcessStartTime:
 
     def test_dead_pid_returns_none(self):
         assert status._get_process_start_time(999999999) is None
+
+    def test_proc_stat_parser_handles_spaces_and_right_parentheses_in_comm(
+        self, monkeypatch
+    ):
+        fields_from_state = ["S"] + [str(value) for value in range(4, 22)] + ["424242"]
+        payload = "123 (worker pool ) stage) " + " ".join(fields_from_state)
+
+        monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: payload)
+
+        assert status._get_process_start_time(123) == 424242
+
+    def test_proc_stat_parser_matches_knowledgehub_field_vector(self, monkeypatch):
+        fields_from_state = ["R"] + ["0"] * 18 + ["987654"]
+        payload = "77 (a b)c)d) " + " ".join(fields_from_state)
+
+        monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: payload)
+
+        assert status._get_process_start_time(77) == 987654
 
     def test_psutil_fallback_when_no_proc(self, monkeypatch):
         """When /proc is missing (macOS/Windows), psutil supplies a stable int."""

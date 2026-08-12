@@ -77,6 +77,39 @@ def db(tmp_path):
     session_db.close()
 
 
+def test_ivd_verified_fact_schema_is_declaratively_reconciled(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+
+    table = session_db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ivd_verified_facts'"
+    ).fetchone()
+    index = session_db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_ivd_verified_fact_lookup'"
+    ).fetchone()
+
+    assert table is not None
+    assert index is not None
+
+
+def test_ivd_task_checkpoint_schema_is_declaratively_reconciled(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    tables = {
+        row[0]
+        for row in session_db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {"ivd_task_checkpoints", "ivd_task_leases"}.issubset(tables)
+
+
+def test_ivd_route_binding_schema_is_declaratively_reconciled(tmp_path):
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    table = session_db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ivd_route_bindings'"
+    ).fetchone()
+    assert table is not None
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================
@@ -7563,4 +7596,3 @@ class TestDisplayMetadataReadPaths:
             }],
         )
         assert db.get_messages_as_conversation("s1")[0]["display_metadata"] == self.META
-

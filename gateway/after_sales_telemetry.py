@@ -93,6 +93,9 @@ def build_runtime_event(
     preflight_decision: str = "",
     preflight_action: str = "",
     preflight_issues: Iterable[str] = (),
+    answer_shape: str = "",
+    verified_fact_reuse: str = "",
+    skill_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     del answer_text
     tools = [str(name) for name in tool_names if str(name)]
@@ -122,6 +125,8 @@ def build_runtime_event(
         "tool_count": len(tools),
         "source_paths": sources,
         "validation_status": str(validation_status or "unknown"),
+        "answer_shape": str(answer_shape or "unknown")[:32],
+        "verified_fact_reuse": str(verified_fact_reuse or "off")[:32],
         "question_preview": preview,
         "question_fingerprint": question_fingerprint(preview),
         "retrieval_outcome": classify_retrieval_outcome(retrieval),
@@ -145,6 +150,22 @@ def build_runtime_event(
             "pipeline_action": str(preflight_action or "unknown")[:64],
             "issues": gate_issues,
         }
+    skill_metrics = skill_snapshot or {}
+    event.update(
+        {
+            "skill_load_count": max(0, int(skill_metrics.get("skill_load_count") or 0)),
+            "skill_body_chars": max(0, int(skill_metrics.get("skill_body_chars") or 0)),
+            "skill_unused_loads": max(0, int(skill_metrics.get("skill_unused_loads") or 0)),
+            "skill_blocked_loads": max(0, int(skill_metrics.get("skill_blocked_loads") or 0)),
+            "skill_shadow_would_block": max(0, int(skill_metrics.get("skill_shadow_would_block") or 0)),
+            "skill_max_concurrent": max(0, int(skill_metrics.get("skill_max_concurrent") or 0)),
+            "skill_names": [
+                str(item)[:80]
+                for item in (skill_metrics.get("skill_names") or [])
+                if str(item)
+            ][:4],
+        }
+    )
     return event
 
 

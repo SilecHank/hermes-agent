@@ -1,12 +1,17 @@
 import os
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 from gateway.after_sales_guard import (
+    activate_validated_fact,
     CriticalAfterSalesValidator,
+    build_direct_fact_result,
     build_preflight_block_result,
     prepare_after_sales_turn,
 )
+from gateway.ivd_verified_facts import VerifiedFactService
+from hermes_state import SessionDB
 
 
 def _knowledgehub_root():
@@ -40,6 +45,55 @@ def _config_with_fast_response(enabled=True):
     config = _config(enabled=enabled)
     config["after_sales_guard"]["fast_response_module"] = str(KB / "scripts/hermes_fast_response_pipeline.py")
     return config
+
+
+def _verified_fact_fixture(tmp_path, *, mode="active", manifest_revision="rev-a"):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    service = VerifiedFactService(db)
+    assert service.activate(
+        {
+            "fact_id": "fact-wes-dna-input",
+            "product_scope": "WES",
+            "product_variant": "V5",
+            "question_type": "scalar_lookup",
+            "fact_key": "dna_starting_input",
+            "value": "240",
+            "unit": "ng",
+            "conditions": [],
+            "answer_template": "{value} {unit}。",
+            "evidence": [
+                {
+                    "evidence_id": "ev-a",
+                    "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                    "source_revision": "rev-a",
+                }
+            ],
+            "source_revision": "rev-a",
+            "status": "active",
+        }
+    )
+    manifest = tmp_path / "knowledge-release.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "source_revisions": {
+                    "knowledge-base/reference/wes-v5-sop-index.md": manifest_revision
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config_with_fast_response()
+    config["after_sales_guard"].update(
+        {
+            "answer_shape_enabled": True,
+            "evidence_sidecar_enabled": True,
+            "verified_fact_reuse_mode": mode,
+            "knowledge_release_manifest": str(manifest),
+        }
+    )
+    return db, config
 
 
 def _write_experience_modules(tmp_path):
@@ -368,6 +422,172 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
     assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
     assert "请重新读取" not in unsupported["fallback"]
     assert "与已核实的正式来源不一致" in unsupported["fallback"]
+
+
+def test_fast_plan_carries_canonical_answer_shape_into_turn():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+
+
+def test_shadow_fact_hit_does_not_bypass_model(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="shadow")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is True
+    assert turn.direct_response == ""
+
+
+def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="active")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    result = build_direct_fact_result(turn, "WES V5 建库投入量是多少")
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.direct_response == "240 ng。"
+    assert result["api_calls"] == 0
+    assert result["final_response"] == "240 ng。"
+
+
+def test_stale_source_revision_disables_direct_fact_reuse(tmp_path):
+    db, config = _verified_fact_fixture(
+        tmp_path,
+        mode="active",
+        manifest_revision="rev-b",
+    )
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is False
+    assert turn.direct_response == ""
+
+
+def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    validation = {
+        "ok": True,
+        "adopted_claims": [
+            {
+                "fact_key": "dna_starting_input",
+                "value": "100",
+                "unit": "ng",
+                "conditions": [],
+                "evidence_id": "ev-new",
+                "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                "source_revision": "rev-a",
+                "locator": "fact:dna_starting_input",
+            }
+        ],
+    }
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation=validation,
+    ) is True
+    match = VerifiedFactService(db).lookup(
+        product_scope="WES",
+        product_variant="V5",
+        fact_key="dna_starting_input",
+        conditions=[],
+        source_revisions={"knowledge-base/reference/wes-v5-sop-index.md": "rev-a"},
+    )
+    assert match["rendered_answer"] == "100 ng。"
+
+
+def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "当前正式SOP规定建库投入量为100ng。",
+        },
+    ]
+
+    result = turn.validate("100 ng。", messages=messages)
+
+    assert result["ok"] is True
+    assert len(result["adopted_claims"]) == 1
+    assert result["adopted_claims"][0]["value"] == "100"
+    assert result["adopted_claims"][0]["source_revision"] == "rev-a"
+    assert result["adopted_claims"][0]["tool_call_id"] == "source-read"
+
+
+def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation={"ok": False, "adopted_claims": []},
+    ) is False
 
 
 def test_unsafe_fast_route_injects_only_shared_answer_experience():

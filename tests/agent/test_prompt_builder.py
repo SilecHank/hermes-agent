@@ -484,6 +484,28 @@ class TestBuildSkillsSystemPrompt:
         full = build_skills_system_prompt()
         assert "Write threads" in full
 
+    def test_allowed_skill_names_filter_catalog_without_breaking_cache(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for name in ("ivd-knowledge-delivery", "songsee"):
+            skill = tmp_path / "skills" / "general" / name
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Use {name}\n---\n"
+            )
+
+        focused = build_skills_system_prompt(
+            allowed_skill_names=frozenset({"ivd-knowledge-delivery"})
+        )
+        full = build_skills_system_prompt()
+
+        assert "ivd-knowledge-delivery" in focused
+        assert "songsee" not in focused
+        assert "single most relevant skill" in focused
+        assert "songsee" in full
+
+
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -1723,5 +1745,4 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 

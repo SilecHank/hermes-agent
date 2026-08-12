@@ -33,6 +33,8 @@ Usage:
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_TEST_PASS_FDS Preserve comma-separated POSIX file descriptors
+                         for release-gate pytest children
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -53,6 +55,24 @@ from typing import Dict, List, Tuple
 
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
+
+
+def _test_pass_fds() -> tuple[int, ...]:
+    if sys.platform == "win32":
+        return ()
+    raw = os.environ.get("HERMES_TEST_PASS_FDS", "").strip()
+    if not raw:
+        return ()
+    descriptors: list[int] = []
+    for token in raw.split(","):
+        value = token.strip()
+        if not value.isdecimal():
+            raise ValueError("HERMES_TEST_PASS_FDS must contain decimal file descriptors")
+        descriptor = int(value)
+        os.fstat(descriptor)
+        if descriptor not in descriptors:
+            descriptors.append(descriptor)
+    return tuple(descriptors)
 
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt
@@ -98,6 +118,11 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+
+def _duration_cache_enabled() -> bool:
+    value = os.environ.get("HERMES_TEST_DURATION_CACHE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def _approximately_count_tests(
@@ -316,6 +341,7 @@ def _run_one_file_once(
         stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         env=os.environ,
+        pass_fds=_test_pass_fds(),
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
@@ -972,7 +998,7 @@ def main() -> int:
     # partial test_durations.json; a CI merge step joins them later.
     # Locally, _save_durations merges with any existing cache so entries
     # from previous runs aren't lost.
-    if file_times:
+    if file_times and _duration_cache_enabled():
         _save_durations(file_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(file_times)} files)")
 

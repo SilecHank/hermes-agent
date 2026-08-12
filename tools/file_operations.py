@@ -866,9 +866,22 @@ class ShellFileOperations(FileOperations):
         )
     
     def _has_command(self, cmd: str) -> bool:
-        """Check if a command exists in the environment (cached)."""
+        """Check if a command is executable in the environment (cached).
+
+        WSL can inherit Windows application paths whose entries are visible to
+        ``command -v`` but cannot be executed by the active Linux shell.  Treat
+        those entries as unavailable so callers can use their portable
+        fallback instead of silently returning an empty search result.
+        """
         if cmd not in self._command_cache:
-            result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
+            quoted_cmd = self._escape_shell_arg(cmd)
+            result = self._exec(
+                "resolved=$(command -v -- " + quoted_cmd + " 2>/dev/null) || exit 1; "
+                "case \"$resolved\" in "
+                "/*) [ -x \"$resolved\" ] ;; "
+                "*) true ;; "
+                "esac && echo 'yes'"
+            )
             self._command_cache[cmd] = result.stdout.strip() == 'yes'
         return self._command_cache[cmd]
     
@@ -2076,6 +2089,37 @@ class ShellFileOperations(FileOperations):
             f"-g {self._escape_shell_arg(pattern)}"
             for pattern in self._ivd_broad_search_excludes(path)
         )
+
+    def _find_ivd_exclude_expr(self, path: str) -> str:
+        """find(1) equivalent of the IVD broad-search exclusions.
+
+        ripgrep's ``-g '!**/x/**'`` globs become ``-not -path '*/x/*'``
+        clauses (find's ``-path`` globs span directories, so ``**``
+        collapses to ``*``).  Empty for non-broad searches.
+        """
+        clauses = []
+        for pattern in self._ivd_broad_search_excludes(path):
+            glob = pattern.lstrip("!").replace("**", "*")
+            clauses.append(f"-not -path {self._escape_shell_arg(glob)}")
+        return " ".join(clauses)
+
+    def _grep_ivd_exclude_args(self, path: str) -> list[str]:
+        """grep(1) equivalent of the IVD broad-search exclusions.
+
+        Directory globs (``**/<name>/**``) become ``--exclude-dir=<name>``
+        (basename only — grep has no path-scoped dir exclusion); file
+        globs become ``--exclude``.  Empty for non-broad searches.
+        """
+        args = []
+        for pattern in self._ivd_broad_search_excludes(path):
+            glob = pattern.lstrip("!")
+            if glob.endswith("/**") and "/" in glob:
+                args.append(
+                    f"--exclude-dir={self._escape_shell_arg(glob[:-3].rsplit('/', 1)[-1])}"
+                )
+            elif "*" in glob:
+                args.append(f"--exclude={self._escape_shell_arg(glob)}")
+        return args
     
     def search(self, pattern: str, path: str = ".", target: str = "content",
                file_glob: Optional[str] = None, limit: int = 50, offset: int = 0,
@@ -2249,8 +2293,12 @@ class ShellFileOperations(FileOperations):
         if not has_hidden_path_ancestor:
             pagination_expr = f" | tail -n +{offset + 1} | head -n {limit}"
 
+        ivd_exclude_expr = self._find_ivd_exclude_expr(path)
+        if ivd_exclude_expr:
+            ivd_exclude_expr = f" {ivd_exclude_expr} "
+
         cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
-              f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
+              f"{ivd_exclude_expr}-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
         result = self._exec(cmd, timeout=60)
         stdout, limit_reason = _search_stdout_and_limit(result)
@@ -2258,7 +2306,7 @@ class ShellFileOperations(FileOperations):
         if not stdout.strip() and not limit_reason:
             # Try without -printf (BSD find compatibility -- macOS)
             cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
-                        f"2>/dev/null | sort -rn{pagination_expr}"
+                         f"{ivd_exclude_expr}2>/dev/null | sort -rn{pagination_expr}"
             result = self._exec(cmd_simple, timeout=60)
             stdout, limit_reason = _search_stdout_and_limit(result)
 
@@ -2500,6 +2548,8 @@ class ShellFileOperations(FileOperations):
         # Exclude hidden directories (matching ripgrep's default behavior).
         # This prevents searching inside .hub/index-cache/, .git/, etc.
         cmd_parts.append("--exclude-dir='.*'")
+        # Exclude IVD non-formal layers on broad knowledge-base searches.
+        cmd_parts.extend(self._grep_ivd_exclude_args(path))
         
         # Add context if requested
         if context > 0:

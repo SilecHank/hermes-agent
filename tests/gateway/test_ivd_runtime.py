@@ -9,6 +9,7 @@ from gateway.ivd_runtime import (
     begin_ivd_answer_turn,
     build_ivd_retrieval_context,
     consume_ivd_search,
+    can_use_ivd_session_search,
     end_ivd_answer_turn,
     get_ivd_retrieval_snapshot,
     record_ivd_search_result,
@@ -85,11 +86,11 @@ def test_literature_intent_uses_evidence_profile_without_direct_source():
     assert policy.max_searches == 2
 
 
-def test_unmatched_question_uses_single_index_fallback():
+def test_unmatched_question_uses_two_index_fallback_searches():
     policy = resolve_ivd_retrieval_policy("这个问题怎么处理", None)
 
     assert policy.profile == "index_fallback"
-    assert policy.max_searches == 1
+    assert policy.max_searches == 2
 
 
 def test_direct_context_requires_reads_without_searching(tmp_path):
@@ -186,6 +187,30 @@ def test_maintenance_mode_does_not_apply_answer_budget():
         end_ivd_answer_turn(token)
 
 
+def test_checkpoint_suppresses_broad_history_search_unless_explicitly_allowed():
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=False,
+    )
+    try:
+        assert can_use_ivd_session_search() is False
+    finally:
+        end_ivd_answer_turn(token)
+
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=True,
+    )
+    try:
+        assert can_use_ivd_session_search() is True
+    finally:
+        end_ivd_answer_turn(token)
+
+
 def test_direct_profile_blocks_file_search():
     token = begin_ivd_answer_turn(policy=DIRECT_POLICY, mode="answer")
     try:
@@ -199,9 +224,9 @@ def test_direct_profile_blocks_file_search():
         end_ivd_answer_turn(token)
 
 
-def test_profile_allowances_are_one_two_and_three():
+def test_profile_allowances_are_two_two_and_three():
     for policy, expected in (
-        (INDEX_FALLBACK_POLICY, 1),
+        (INDEX_FALLBACK_POLICY, 2),
         (EVIDENCE_SUPPLEMENT_POLICY, 2),
         (COMPLEX_DIAGNOSIS_POLICY, 3),
     ):

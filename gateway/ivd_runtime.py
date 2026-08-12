@@ -20,7 +20,7 @@ class IVDRetrievalPolicy:
 
 DIRECT_POLICY = IVDRetrievalPolicy("direct", (), 0)
 INDEX_FALLBACK_POLICY = IVDRetrievalPolicy(
-    "index_fallback", ("index_fallback",), 1
+    "index_fallback", ("index_fallback",), 2
 )
 EVIDENCE_SUPPLEMENT_POLICY = IVDRetrievalPolicy(
     "evidence_supplement",
@@ -141,6 +141,8 @@ class IVDTurnBudget:
     last_search_signature: tuple[str, str, str] | None = None
     last_search_had_gain: bool = False
     stop_reason: str = ""
+    checkpoint_loaded: bool = False
+    allow_history_search: bool = False
 
 
 _CURRENT_BUDGET: ContextVar[IVDTurnBudget | None] = ContextVar(
@@ -154,6 +156,8 @@ def begin_ivd_answer_turn(
     max_searches: int | None = None,
     mode: str = "answer",
     policy: IVDRetrievalPolicy | None = None,
+    checkpoint_loaded: bool = False,
+    allow_history_search: bool = False,
 ) -> Token:
     if policy is None:
         requested = max(1, int(max_searches if max_searches is not None else 4))
@@ -171,12 +175,21 @@ def begin_ivd_answer_turn(
         profile=policy.profile,
         stages=policy.stages,
         hard_limit=max(1, int(policy.hard_limit)),
+        checkpoint_loaded=bool(checkpoint_loaded),
+        allow_history_search=bool(allow_history_search),
     )
     return _CURRENT_BUDGET.set(budget)
 
 
 def end_ivd_answer_turn(token: Token) -> None:
     _CURRENT_BUDGET.reset(token)
+
+
+def can_use_ivd_session_search() -> bool:
+    budget = _CURRENT_BUDGET.get()
+    if budget is None or budget.mode != "answer":
+        return True
+    return not budget.checkpoint_loaded or budget.allow_history_search
 
 
 def _search_signature(

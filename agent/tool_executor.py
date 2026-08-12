@@ -85,7 +85,13 @@ def _budget_for_agent(agent) -> BudgetConfig:
     when the context length isn't resolvable.
     """
     try:
-        ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
+        context_engine = getattr(agent, "context_compressor", None)
+        ivd_budget = getattr(context_engine, "tool_budget", None)
+        if callable(ivd_budget):
+            resolved = ivd_budget()
+            if isinstance(resolved, BudgetConfig):
+                return resolved
+        ctx = getattr(context_engine, "context_length", None)
         return budget_for_context_window(int(ctx)) if ctx else DEFAULT_BUDGET
     except Exception:
         return DEFAULT_BUDGET
@@ -1290,6 +1296,12 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
         elif function_name == "session_search":
             def _execute(next_args: dict) -> Any:
+                from gateway.ivd_runtime import can_use_ivd_session_search
+                if not can_use_ivd_session_search():
+                    return json.dumps({
+                        "success": False,
+                        "error": "当前任务检查点已提供续接状态；本轮不执行宽泛历史检索。",
+                    }, ensure_ascii=False)
                 session_db = agent._get_session_db_for_recall()
                 if not session_db:
                     from hermes_state import format_session_db_unavailable

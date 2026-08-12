@@ -5,11 +5,12 @@ Hermetic-test invariants enforced here (see AGENTS.md for rationale):
 1. **No credential env vars.** All provider/credential-shaped env vars
    (ending in _API_KEY, _TOKEN, _SECRET, _PASSWORD, _CREDENTIALS, etc.)
    are unset before every test. Local developer keys cannot leak in.
-2. **Isolated HERMES_HOME.** HERMES_HOME points to a per-test tempdir so
-   code reading ``~/.hermes/*`` via ``get_hermes_home()`` can't see the
-   real one. (We do NOT also redirect HOME — that broke subprocesses in
-   CI. Code using ``Path.home() / ".hermes"`` instead of the canonical
-   ``get_hermes_home()`` is a bug to fix at the callsite.)
+2. **Isolated process home.** ``scripts/run_tests.sh`` starts the test
+   process with session-scoped temporary HOME and HERMES_HOME values. This
+   file rejects direct pytest collection while a live Hermes home is visible,
+   then also assigns a per-test HERMES_HOME. Code using ``Path.home() /
+   ".hermes"`` is therefore isolated before collection rather than only after
+   fixtures begin.
 3. **Deterministic runtime.** TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0.
 4. **No HERMES_SESSION_* inheritance** — the agent's current gateway
    session must not leak into tests.
@@ -30,6 +31,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.test_environment_safety import assert_safe_test_environment
+
+
+# This executes before test collection and before per-test fixtures. Direct
+# pytest runs must never be able to see an operator's live ~/.hermes tree.
+assert_safe_test_environment()
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────
@@ -339,9 +347,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
 def _hermetic_environment(tmp_path, monkeypatch):
     """Blank out all credential/behavioral env vars so local and CI match.
 
-    Also redirects HOME and HERMES_HOME to per-test tempdirs so code that
-    reads ``~/.hermes/*`` can't touch the real one, and pins TZ/LANG so
-    datetime/locale-sensitive tests are deterministic.
+    Redirects HERMES_HOME to a per-test tempdir and pins TZ/LANG so
+    datetime/locale-sensitive tests are deterministic. HOME is isolated once
+    per process by scripts/run_tests.sh; unsafe direct pytest collection is
+    rejected at module import above.
     """
     # 1. Blank every credential-shaped env var that's currently set.
     for name in list(os.environ.keys()):
@@ -362,13 +371,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
     # 3. Redirect HERMES_HOME to a per-test tempdir. Code that reads
     #    ``~/.hermes/*`` via ``get_hermes_home()`` now gets the tempdir.
     #
-    #    NOTE: We do NOT also redirect HOME. Doing so broke CI because
-    #    some tests (and their transitive deps) spawn subprocesses that
-    #    inherit HOME and expect it to be stable. If a test genuinely
-    #    needs HOME isolated, it should set it explicitly in its own
-    #    fixture. Any code in the codebase reading ``~/.hermes/*`` via
-    #    ``Path.home() / ".hermes"`` instead of ``get_hermes_home()``
-    #    is a bug to fix at the callsite.
+    #    NOTE: We do not change HOME per test because subprocesses expect a
+    #    stable value. The canonical runner already supplies one isolated
+    #    session HOME before collection, and the import-time guard rejects a
+    #    live operator home when pytest is invoked directly.
     fake_hermes_home = tmp_path / "hermes_test"
     fake_hermes_home.mkdir()
     (fake_hermes_home / "sessions").mkdir()
