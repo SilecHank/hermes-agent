@@ -21890,6 +21890,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
+            # IVD context projection is an opt-in request view layered over the
+            # configured context engine. It never replaces transcript history
+            # and leaves the delegate's normal hard-limit compression intact.
+            _projection_config = user_config.get("after_sales_guard") or {}
+            _projection_platforms = _projection_config.get("platforms") or []
+            if isinstance(_projection_platforms, str):
+                _projection_platforms = [
+                    item.strip()
+                    for item in _projection_platforms.split(",")
+                    if item.strip()
+                ]
+            _projection_enabled = bool(
+                _after_sales_turn is not None
+                and isinstance(_projection_config, dict)
+                and _projection_config.get("enabled", False)
+                and _projection_config.get("context_projection_enabled", False)
+                and platform_key in _projection_platforms
+            )
+            if _projection_enabled:
+                try:
+                    from agent.ivd_context_engine import ensure_ivd_context_engine
+
+                    _projection_constraints = []
+                    if _after_sales_turn.product_scope:
+                        _projection_constraints.append(
+                            f"产品={_after_sales_turn.product_scope}"
+                        )
+                    if _after_sales_turn.product_variant:
+                        _projection_constraints.append(
+                            f"版本={_after_sales_turn.product_variant}"
+                        )
+                    agent.context_compressor = ensure_ivd_context_engine(
+                        agent.context_compressor,
+                        enabled=True,
+                        policy=_projection_config.get("context_projection_policy") or {},
+                        active_constraints=_projection_constraints,
+                        session_revision=int(_current_msg_count or 0),
+                    )
+                except Exception as _projection_exc:
+                    logger.warning(
+                        "IVD context projection attachment skipped: %s",
+                        _projection_exc,
+                    )
+
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             # Gate on needs_progress_queue (tool_progress OR thinking_progress)
@@ -22654,6 +22698,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 logger.warning(
                                     "IVD verified-fact activation skipped: %s",
                                     _fact_activation_exc,
+                                )
+                            try:
+                                _receipt_updates: dict[str, dict[str, object]] = {}
+                                for _claim in _validation.get("adopted_claims") or ():
+                                    _call_id = str(_claim.get("tool_call_id") or "")
+                                    _evidence_id = str(_claim.get("evidence_id") or "")
+                                    if not _call_id or not _evidence_id:
+                                        continue
+                                    _receipt = _receipt_updates.setdefault(
+                                        _call_id,
+                                        {
+                                            "evidence_ids": [],
+                                            "source": str(_claim.get("source_path") or ""),
+                                        },
+                                    )
+                                    _receipt["evidence_ids"].append(_evidence_id)
+                                _context_engine = getattr(agent, "context_compressor", None)
+                                _add_receipts = getattr(_context_engine, "add_receipts", None)
+                                if _receipt_updates and callable(_add_receipts):
+                                    _add_receipts(_receipt_updates)
+                            except Exception as _receipt_exc:
+                                logger.warning(
+                                    "IVD validated context receipt skipped: %s",
+                                    _receipt_exc,
                                 )
                     _event = build_runtime_event(
                         platform=platform_key,

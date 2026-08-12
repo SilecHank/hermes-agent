@@ -138,7 +138,7 @@ class AfterSalesTurn:
     def _runtime_adopted_claims(
         self,
         answer: str,
-        claim_sources: dict[str, str],
+        claim_sources: dict[str, dict[str, str]],
     ) -> list[dict[str, Any]]:
         if not self.evidence_sidecar_enabled or not self.fact_key:
             return []
@@ -147,7 +147,8 @@ class AfterSalesTurn:
         if len(claims) != 1:
             return []
         claim = claims[0]
-        source_path = claim_sources.get(_normalize_numeric_claim(claim), "")
+        source_details = claim_sources.get(_normalize_numeric_claim(claim), {})
+        source_path = source_details.get("source_path", "")
         relative_path = _relative_source_path(source_path, self.source_revisions)
         revision = self.source_revisions.get(relative_path, "")
         if not relative_path or not revision:
@@ -170,6 +171,7 @@ class AfterSalesTurn:
                 "source_path": relative_path,
                 "source_revision": revision,
                 "locator": "tool:read_file",
+                "tool_call_id": source_details.get("tool_call_id", ""),
             }
         ]
 
@@ -355,7 +357,7 @@ def _trusted_tool_numeric_evidence_details(
     messages: list[dict[str, Any]],
     source_paths: Any,
     validator: ModuleType,
-) -> tuple[tuple[str, ...], bool, dict[str, str]]:
+) -> tuple[tuple[str, ...], bool, dict[str, dict[str, str]]]:
     trusted_paths = {
         str(Path(str(path)).expanduser().resolve())
         for path in source_paths
@@ -387,7 +389,7 @@ def _trusted_tool_numeric_evidence_details(
                     trusted_call_ids[str(call_id)] = candidate
 
     claims: list[str] = []
-    claim_sources: dict[str, str] = {}
+    claim_sources: dict[str, dict[str, str]] = {}
     source_read = False
     for message in messages:
         if message.get("role") != "tool":
@@ -398,7 +400,13 @@ def _trusted_tool_numeric_evidence_details(
         source_read = True
         for claim in validator.extract_numeric_claims(str(message.get("content") or "")):
             claims.append(claim)
-            claim_sources.setdefault(_normalize_numeric_claim(claim), trusted_call_ids[call_id])
+            claim_sources.setdefault(
+                _normalize_numeric_claim(claim),
+                {
+                    "source_path": trusted_call_ids[call_id],
+                    "tool_call_id": call_id,
+                },
+            )
     return tuple(dict.fromkeys(claims)), source_read, claim_sources
 
 

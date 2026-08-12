@@ -487,6 +487,7 @@ def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
     assert len(result["adopted_claims"]) == 1
     assert result["adopted_claims"][0]["value"] == "100"
     assert result["adopted_claims"][0]["source_revision"] == "rev-a"
+    assert result["adopted_claims"][0]["tool_call_id"] == "source-read"
 
 
 def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path):
