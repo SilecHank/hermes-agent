@@ -757,6 +757,37 @@ class TestSearchFilesFallbackHiddenPaths:
         assert set(result.files) == {str(visible_file), str(visible_nested_file)}
 
 
+class TestCommandAvailability:
+    def test_path_entry_must_be_executable(self, tmp_path):
+        fake_rg = tmp_path / "rg"
+        fake_rg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_rg.chmod(0o644)
+
+        env = MagicMock()
+        env.cwd = "/"
+
+        def execute(command, **kwargs):
+            process_env = dict(os.environ)
+            process_env["PATH"] = str(tmp_path)
+            completed = subprocess.run(
+                command,
+                shell=True,
+                executable="/bin/bash",
+                text=True,
+                capture_output=True,
+                cwd=kwargs.get("cwd"),
+                env=process_env,
+            )
+            return {
+                "output": completed.stdout + completed.stderr,
+                "returncode": completed.returncode,
+            }
+
+        env.execute = execute
+
+        assert ShellFileOperations(env)._has_command("rg") is False
+
+
 class TestIVDKnowledgeSearchBoundary:
     @staticmethod
     def _ops(cwd="/"):
