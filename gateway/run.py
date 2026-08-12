@@ -22060,6 +22060,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         policy=_projection_config.get("context_projection_policy") or {},
                         active_constraints=_projection_constraints,
                         session_revision=int(_current_msg_count or 0),
+                        tool_schemas=agent.tools or (),
+                        answer_shape=_after_sales_turn.answer_shape,
+                        max_output_tokens=int(agent.max_tokens or 8_000),
                     )
                 except Exception as _projection_exc:
                     logger.warning(

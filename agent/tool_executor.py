@@ -85,7 +85,13 @@ def _budget_for_agent(agent) -> BudgetConfig:
     when the context length isn't resolvable.
     """
     try:
-        ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
+        context_engine = getattr(agent, "context_compressor", None)
+        ivd_budget = getattr(context_engine, "tool_budget", None)
+        if callable(ivd_budget):
+            resolved = ivd_budget()
+            if isinstance(resolved, BudgetConfig):
+                return resolved
+        ctx = getattr(context_engine, "context_length", None)
         return budget_for_context_window(int(ctx)) if ctx else DEFAULT_BUDGET
     except Exception:
         return DEFAULT_BUDGET
