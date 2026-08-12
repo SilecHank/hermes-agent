@@ -36,6 +36,7 @@ class AfterSalesTurn:
     preflight_decision: str = ""
     preflight_action: str = ""
     preflight_issues: tuple[str, ...] = ()
+    answer_shape: str = "diagnostic"
 
     @property
     def blocks_answer_generation(self) -> bool:
@@ -335,6 +336,7 @@ def prepare_after_sales_turn(
             preflight_decision=str(fast_result.get("preflight_decision") or ""),
             preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+            answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
         )
 
     context = module.render_fact_context(match)
@@ -383,6 +385,7 @@ def prepare_after_sales_turn(
         preflight_decision=str(fast_result.get("preflight_decision") or ""),
         preflight_action=str(fast_result.get("preflight_action") or ""),
         preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+        answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
     )
 
 
@@ -434,6 +437,7 @@ def _render_fast_response_context(
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
     lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
     fast_path = plan.get("fast_path") or {}
+    answer_shape = plan.get("answer_shape") or {}
     return {
         "context": "\n".join(lines),
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
@@ -448,6 +452,7 @@ def _render_fast_response_context(
         "preflight_decision": str(gate.get("decision") or ""),
         "preflight_action": _canonical_preflight_action(gate),
         "preflight_issues": tuple(str(item) for item in (gate.get("issues") or ())),
+        "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
     }
 
 
