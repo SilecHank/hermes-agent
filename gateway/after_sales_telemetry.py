@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, Mapping, TypeVar
 
 
 REDACTED_QUESTION = "[content redacted]"
@@ -23,6 +27,28 @@ _SAMPLE_RE = re.compile(
 )
 _MISS_STOP_REASONS = {"no_gain", "profile_limit", "hard_limit"}
 _PARTIAL_STOP_REASONS = {"duplicate", "duplicate_intent", "no_gain", "profile_limit", "hard_limit"}
+_METADATA_ENUM_KEY_RE = re.compile(
+    r"^(?:comparison_status|(?:served_|shadow_)?(?:route_id|route_version|"
+    r"validation_status|retrieval_outcome|retrieval_profile|stop_reason))$"
+)
+_METADATA_BOOL_KEY_RE = re.compile(
+    r"^(?:match|exact_match|(?:is|has)_[a-z0-9_]+|[a-z0-9_]+_changed)$"
+)
+_METADATA_NUMBER_KEY_RE = re.compile(
+    r"^[a-z][a-z0-9_]*(?:_count|_seconds|_milliseconds|_ms|_score|_ratio|_delta)$"
+)
+_METADATA_ENUM_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_METADATA_ITEMS_LIMIT = 16
+
+_AnswerT = TypeVar("_AnswerT")
+
+
+@dataclass(frozen=True)
+class ShadowReplayStats:
+    submitted: int
+    completed: int
+    failed: int
+    rejected: int
 
 
 def default_runtime_event_path() -> Path:
@@ -159,3 +185,202 @@ def append_runtime_event(path: str | Path, event: dict[str, object]) -> None:
         os.write(fd, payload)
     finally:
         os.close(fd)
+
+
+def sanitize_shadow_comparison_metadata(
+    metadata: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Return a fail-closed allowlist of low-risk comparison scalars."""
+    sanitized: dict[str, object] = {}
+    for raw_key, value in list((metadata or {}).items())[:_METADATA_ITEMS_LIMIT]:
+        key = str(raw_key)[:64]
+        if _METADATA_ENUM_KEY_RE.fullmatch(key) and isinstance(value, str):
+            clean_value = sanitize_question_preview(value, limit=64)
+            if _METADATA_ENUM_VALUE_RE.fullmatch(clean_value):
+                sanitized[key] = clean_value
+        elif _METADATA_BOOL_KEY_RE.fullmatch(key) and isinstance(value, bool):
+            sanitized[key] = value
+        elif (
+            _METADATA_NUMBER_KEY_RE.fullmatch(key)
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ):
+            sanitized[key] = value
+    return sanitized
+
+
+def build_shadow_replay_event(
+    *,
+    outcome: str,
+    comparison_metadata: Mapping[str, object] | None = None,
+    error_type: str = "",
+) -> dict[str, object]:
+    """Build a privacy-bounded shadow comparison or isolation event."""
+    completed = outcome == "completed"
+    event: dict[str, object] = {
+        "schema_version": 2,
+        "event_type": (
+            "ivd_shadow_replay_comparison"
+            if completed
+            else "ivd_shadow_replay_isolation"
+        ),
+        "outcome": str(outcome)[:32],
+    }
+    metadata = sanitize_shadow_comparison_metadata(comparison_metadata)
+    if metadata:
+        event["comparison_metadata"] = metadata
+    if error_type:
+        event["error_type"] = str(error_type)[:64]
+    return event
+
+
+class ShadowReplaySubmitter:
+    """Run bounded shadow replays without affecting the served answer path."""
+
+    def __init__(
+        self,
+        *,
+        recorder: Callable[[dict[str, object]], None],
+        max_workers: int = 1,
+        queue_capacity: int = 8,
+    ) -> None:
+        worker_count = int(max_workers)
+        queued_count = int(queue_capacity)
+        if worker_count < 1:
+            raise ValueError("max_workers must be at least 1")
+        if queued_count < 0:
+            raise ValueError("queue_capacity must not be negative")
+
+        self._recorder = recorder
+        self._executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="hermes-shadow-replay",
+        )
+        self._capacity = threading.BoundedSemaphore(worker_count + queued_count)
+        self._condition = threading.Condition()
+        self._active_tasks = 0
+        self._closed = False
+        self._submitted = 0
+        self._completed = 0
+        self._failed = 0
+        self._rejected = 0
+
+    @property
+    def stats(self) -> ShadowReplayStats:
+        with self._condition:
+            return ShadowReplayStats(
+                submitted=self._submitted,
+                completed=self._completed,
+                failed=self._failed,
+                rejected=self._rejected,
+            )
+
+    def submit(
+        self,
+        served_answer: _AnswerT,
+        replay: Callable[[], object],
+        *,
+        comparison_metadata: Mapping[str, object] | None = None,
+    ) -> _AnswerT:
+        """Submit replay work if capacity exists and return served_answer unchanged."""
+        with self._condition:
+            if self._closed:
+                self._rejected += 1
+                rejection = "closed"
+            elif not self._capacity.acquire(blocking=False):
+                self._rejected += 1
+                rejection = "queue_full"
+            else:
+                rejection = ""
+                self._active_tasks += 1
+                try:
+                    future = self._executor.submit(
+                        self._run_replay,
+                        replay,
+                        comparison_metadata,
+                    )
+                except Exception as exc:
+                    self._capacity.release()
+                    self._active_tasks -= 1
+                    self._failed += 1
+                    self._record_safely(
+                        build_shadow_replay_event(
+                            outcome="submission_failed",
+                            comparison_metadata=comparison_metadata,
+                            error_type=type(exc).__name__,
+                        )
+                    )
+                else:
+                    self._submitted += 1
+                    future.add_done_callback(self._finish_future)
+
+        if rejection:
+            self._record_safely(build_shadow_replay_event(outcome=rejection))
+        return served_answer
+
+    def _run_replay(
+        self,
+        replay: Callable[[], object],
+        comparison_metadata: Mapping[str, object] | None,
+    ) -> None:
+        try:
+            replay_result = replay()
+        except Exception as exc:
+            with self._condition:
+                self._failed += 1
+            self._record_safely(
+                build_shadow_replay_event(
+                    outcome="execution_failed",
+                    comparison_metadata=comparison_metadata,
+                    error_type=type(exc).__name__,
+                )
+            )
+        else:
+            with self._condition:
+                self._completed += 1
+            completed_metadata = dict(comparison_metadata or {})
+            if isinstance(replay_result, Mapping):
+                for key, value in replay_result.items():
+                    completed_metadata.setdefault(str(key), value)
+            self._record_safely(
+                build_shadow_replay_event(
+                    outcome="completed",
+                    comparison_metadata=completed_metadata,
+                )
+            )
+
+    def _finish_future(self, future: Future[None]) -> None:
+        del future
+        self._capacity.release()
+        with self._condition:
+            self._active_tasks -= 1
+            self._condition.notify_all()
+
+    def _record_safely(self, event: dict[str, object]) -> None:
+        try:
+            self._recorder(event)
+        except Exception:
+            pass
+
+    def wait_for_idle(self, timeout: float | None = None) -> bool:
+        """Wait until currently accepted replay work finishes."""
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self._active_tasks == 0,
+                timeout=timeout,
+            )
+
+    def close(self, *, wait_for_tasks: bool = True) -> None:
+        """Reject future submissions and shut down all executor threads."""
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+        self._executor.shutdown(wait=wait_for_tasks, cancel_futures=not wait_for_tasks)
+
+    def __enter__(self) -> ShadowReplaySubmitter:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()

@@ -1,7 +1,10 @@
 import json
+import threading
+import time
 
 import pytest
 
+import gateway.after_sales_telemetry as after_sales_telemetry
 from gateway.after_sales_telemetry import (
     append_runtime_event,
     build_runtime_event,
@@ -199,3 +202,181 @@ def test_runtime_event_fails_closed_when_question_redaction_breaks(monkeypatch):
 
     assert event["question_preview"] == "[content redacted]"
     assert event["question_fingerprint"] == ""
+
+
+def test_shadow_replay_returns_served_answer_without_waiting_or_replacing_it():
+    replay_started = threading.Event()
+    release_replay = threading.Event()
+    served_answer = {"text": "served answer", "citations": ["source-a"]}
+    recorded_events = []
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=recorded_events.append,
+        max_workers=1,
+        queue_capacity=1,
+    )
+
+    def replay():
+        replay_started.set()
+        release_replay.wait(timeout=2)
+        return {
+            "comparison_status": "different",
+            "exact_match": False,
+            "answer_text": "different shadow answer",
+        }
+
+    try:
+        started_at = time.monotonic()
+        returned_answer = submitter.submit(
+            served_answer,
+            replay,
+            comparison_metadata={"shadow_route_id": "unified:v2"},
+        )
+
+        assert returned_answer is served_answer
+        assert time.monotonic() - started_at < 0.25
+        assert replay_started.wait(timeout=1)
+        assert recorded_events == []
+
+        release_replay.set()
+        assert submitter.wait_for_idle(timeout=1)
+        assert recorded_events[0]["event_type"] == "ivd_shadow_replay_comparison"
+        assert recorded_events[0]["outcome"] == "completed"
+        assert recorded_events[0]["comparison_metadata"] == {
+            "shadow_route_id": "unified:v2",
+            "comparison_status": "different",
+            "exact_match": False,
+        }
+        assert "served answer" not in json.dumps(recorded_events)
+        assert "different shadow answer" not in json.dumps(recorded_events)
+    finally:
+        release_replay.set()
+        submitter.close()
+
+
+def test_shadow_replay_queue_is_bounded_and_rejection_does_not_change_turn():
+    release_replay = threading.Event()
+    recorded_events = []
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=recorded_events.append,
+        max_workers=1,
+        queue_capacity=0,
+    )
+    first_answer = object()
+    rejected_answer = object()
+
+    try:
+        assert submitter.submit(
+            first_answer,
+            lambda: release_replay.wait(timeout=2),
+        ) is first_answer
+        assert submitter.submit(rejected_answer, lambda: None) is rejected_answer
+
+        assert submitter.stats.submitted == 1
+        assert submitter.stats.rejected == 1
+        assert recorded_events == [
+            {
+                "schema_version": 2,
+                "event_type": "ivd_shadow_replay_isolation",
+                "outcome": "queue_full",
+            }
+        ]
+    finally:
+        release_replay.set()
+        submitter.close()
+
+
+def test_shadow_replay_failure_is_isolated_counted_and_sanitized():
+    recorded_events = []
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=recorded_events.append,
+        max_workers=1,
+        queue_capacity=1,
+    )
+    served_answer = "the served response must remain unchanged"
+
+    def failing_replay():
+        raise RuntimeError(
+            "患者姓名：张三 email user@example.com token=sk-abcdefghijklmnop"
+        )
+
+    try:
+        assert submitter.submit(
+            served_answer,
+            failing_replay,
+            comparison_metadata={
+                "comparison_status": "failed",
+                "note": "患者姓名：李四，手机13800138000",
+                "exact_match": False,
+                "score_delta": 0.25,
+                "shadow_route_id": "unified:v2",
+                "answer_text": "完整答案不得记录",
+                "session_key": "weixin:dm:secret-user",
+                "api_key": "sk-1234567890abcdef",
+            },
+        ) == served_answer
+        assert submitter.wait_for_idle(timeout=1)
+
+        assert submitter.stats.failed == 1
+        serialized = json.dumps(recorded_events, ensure_ascii=False)
+        assert recorded_events[0]["event_type"] == "ivd_shadow_replay_isolation"
+        assert recorded_events[0]["outcome"] == "execution_failed"
+        assert recorded_events[0]["error_type"] == "RuntimeError"
+        assert recorded_events[0]["comparison_metadata"] == {
+            "comparison_status": "failed",
+            "exact_match": False,
+            "score_delta": 0.25,
+            "shadow_route_id": "unified:v2",
+        }
+        for secret in (
+            "张三",
+            "李四",
+            "13800138000",
+            "user@example.com",
+            "sk-abcdefghijklmnop",
+            "完整答案不得记录",
+            "weixin:dm:secret-user",
+            "sk-1234567890abcdef",
+            served_answer,
+        ):
+            assert secret not in serialized
+    finally:
+        submitter.close()
+
+
+def test_shadow_replay_close_is_idempotent_and_rejects_later_work():
+    recorded_events = []
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=recorded_events.append,
+        max_workers=1,
+        queue_capacity=1,
+    )
+    submitter.close()
+    submitter.close()
+
+    served_answer = object()
+    assert submitter.submit(served_answer, lambda: None) is served_answer
+    assert submitter.stats.rejected == 1
+    assert recorded_events[-1]["outcome"] == "closed"
+
+
+def test_shadow_replay_recorder_failure_never_changes_served_turn():
+    def failing_recorder(_event):
+        raise OSError("telemetry unavailable")
+
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=failing_recorder,
+        max_workers=1,
+        queue_capacity=0,
+    )
+    served_answer = object()
+    try:
+        assert submitter.submit(served_answer, lambda: None) is served_answer
+        assert submitter.wait_for_idle(timeout=1)
+        assert submitter.stats.completed == 1
+    finally:
+        submitter.close()
+
+    assert not any(
+        thread.name.startswith("hermes-shadow-replay") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
