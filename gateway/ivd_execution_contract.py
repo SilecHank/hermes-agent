@@ -22,6 +22,17 @@ except ImportError:  # pragma: no cover - exercised by monkeypatch on POSIX CI
 
 
 _PACKAGE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "release_id",
+        "shared_identity",
+        "projections",
+        "projection_digests",
+        "authority_owners",
+        "manifest_digest",
+    }
+)
 _SERVING_FIELDS = frozenset(
     {
         "serving_package_path",
@@ -246,6 +257,26 @@ def load_serving_projection(
             ) from error
         if not isinstance(payload, dict):
             raise IVDRuntimeConfigurationError("IVD projection envelope must be an object")
+        if set(payload) != _MANIFEST_FIELDS:
+            raise IVDRuntimeConfigurationError("IVD release manifest fields are invalid")
+        declared_manifest_digest = payload.get("manifest_digest")
+        unsigned_manifest = dict(payload)
+        unsigned_manifest.pop("manifest_digest")
+        canonical_manifest = json.dumps(
+            unsigned_manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        calculated_manifest_digest = hashlib.sha256(
+            canonical_manifest.encode("utf-8")
+        ).hexdigest()
+        if (
+            not isinstance(declared_manifest_digest, str)
+            or not _PACKAGE_DIGEST_RE.fullmatch(declared_manifest_digest)
+            or declared_manifest_digest != calculated_manifest_digest
+        ):
+            raise IVDRuntimeConfigurationError("IVD release manifest digest mismatch")
         identity = payload.get("shared_identity")
         projections = payload.get("projections")
         digests = payload.get("projection_digests")

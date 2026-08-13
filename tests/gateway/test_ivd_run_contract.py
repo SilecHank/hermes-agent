@@ -8,6 +8,7 @@ from gateway.run import (
 )
 from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 from gateway.ivd_runtime import enqueue_ivd_receipt
+from tests.gateway.ivd_manifest_test_helpers import canonical_digest, release_manifest
 
 
 def test_final_validation_status_reuses_validator_state_without_second_validation():
@@ -58,19 +59,9 @@ def test_receipt_has_event_identity_and_no_answer_text(tmp_path):
         "skill_allowlist": [],
         "receipt_destination": str(tmp_path / "observability/receipt.jsonl"),
     }
-    serving_digest = hashlib.sha256(
-        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    serving_digest = canonical_digest(serving)
     projection.write_text(
-        json.dumps({
-            "shared_identity": {
-                "package_digest": digest,
-                "execution_contract_schema_version": "1",
-                "turn_receipt_schema_version": "1",
-            },
-            "projections": {"serving": serving},
-            "projection_digests": {"serving": serving_digest},
-        }),
+        json.dumps(release_manifest(serving, package_digest=digest)),
         encoding="utf-8",
     )
     prepared, turn = _prepare_gateway_ivd_boundary(

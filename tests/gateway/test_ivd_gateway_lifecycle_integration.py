@@ -16,6 +16,7 @@ from gateway.ivd_runtime import preload_enabled_ivd_contracts
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from tests.gateway.restart_test_helpers import make_restart_runner
+from tests.gateway.ivd_manifest_test_helpers import release_manifest
 
 
 def _runner(runtime_config=None):
@@ -79,22 +80,9 @@ def _write_projection(tmp_path):
         "skill_allowlist": [],
         "receipt_destination": str(tmp_path / "observability/receipt.jsonl"),
     }
-    digest = hashlib.sha256(
-        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
     path = tmp_path / "release.json"
     path.write_text(
-        json.dumps(
-            {
-                "shared_identity": {
-                    "package_digest": "a" * 64,
-                    "execution_contract_schema_version": "1",
-                    "turn_receipt_schema_version": "1",
-                },
-                "projections": {"serving": serving},
-                "projection_digests": {"serving": digest},
-            }
-        ),
+        json.dumps(release_manifest(serving, package_digest="a" * 64)),
         encoding="utf-8",
     )
     return path

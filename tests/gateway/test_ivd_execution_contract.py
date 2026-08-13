@@ -27,6 +27,13 @@ def _canonical_digest(value):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _set_manifest_digest(payload):
+    unsigned = dict(payload)
+    unsigned.pop("manifest_digest", None)
+    payload["manifest_digest"] = _canonical_digest(unsigned)
+    return payload
+
+
 def _serving_projection(tmp_path):
     root = str(tmp_path)
     return {
@@ -45,32 +52,29 @@ def _serving_projection(tmp_path):
 def _write_release(tmp_path, *, package_digest=PACKAGE_DIGEST, serving=None):
     projection = serving or _serving_projection(tmp_path)
     manifest = tmp_path / "release-manifest.json"
+    payload = {
+        "schema_version": 1,
+        "release_id": "f" * 64,
+        "shared_identity": {
+            "package_digest": package_digest,
+            "execution_contract_schema_version": "1",
+            "turn_receipt_schema_version": "1",
+        },
+        "projections": {
+            "serving": projection,
+            "build": {"ignored": "build-only"},
+            "control": {"ignored": "control-only"},
+            "observability": {"ignored": "observability-only"},
+        },
+        "projection_digests": {},
+        "authority_owners": [{"field": "x", "owner": "y", "source": "z"}],
+    }
+    payload["projection_digests"] = {
+        name: _canonical_digest(value)
+        for name, value in payload["projections"].items()
+    }
     manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "release_id": "f" * 64,
-                "shared_identity": {
-                    "package_digest": package_digest,
-                    "execution_contract_schema_version": "1",
-                    "turn_receipt_schema_version": "1",
-                },
-                "projections": {
-                    "serving": projection,
-                    "build": {"ignored": "build-only"},
-                    "control": {"ignored": "control-only"},
-                    "observability": {"ignored": "observability-only"},
-                },
-                "projection_digests": {
-                    "serving": _canonical_digest(projection),
-                    "build": "b" * 64,
-                    "control": "c" * 64,
-                    "observability": "d" * 64,
-                },
-                "authority_owners": [{"field": "x", "owner": "y", "source": "z"}],
-                "manifest_digest": "e" * 64,
-            }
-        ),
+        json.dumps(_set_manifest_digest(payload)),
         encoding="utf-8",
     )
     return manifest
@@ -94,6 +98,47 @@ def test_loader_accepts_release_schema_and_keeps_only_serving_identity(tmp_path)
     assert not hasattr(prepared, "user_text")
     with pytest.raises(FrozenInstanceError):
         prepared.execution_contract = None
+
+
+def test_loader_rejects_serving_tamper_even_with_updated_projection_digest(tmp_path):
+    manifest = _write_release(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["projections"]["serving"]["context_budget"] = 9
+    payload["projection_digests"]["serving"] = _canonical_digest(
+        payload["projections"]["serving"]
+    )
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IVDRuntimeConfigurationError, match="manifest digest"):
+        load_serving_projection(manifest)
+
+
+def test_loader_rejects_shared_identity_tamper(tmp_path):
+    manifest = _write_release(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["shared_identity"]["turn_receipt_schema_version"] = "2"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IVDRuntimeConfigurationError, match="manifest digest"):
+        load_serving_projection(manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.pop("release_id"),
+        lambda payload: payload.__setitem__("unexpected", True),
+    ],
+)
+def test_loader_rejects_noncanonical_top_level_field_set(tmp_path, mutation):
+    manifest = _write_release(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    mutation(payload)
+    _set_manifest_digest(payload)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IVDRuntimeConfigurationError, match="fields"):
+        load_serving_projection(manifest)
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.gateway.ivd_manifest_test_helpers import canonical_digest, release_manifest
+
 from gateway.ivd_runtime import (
     COMPLEX_DIAGNOSIS_POLICY,
     DIRECT_POLICY,
@@ -393,19 +395,9 @@ def test_trusted_ivd_path_prepares_one_contract_from_serving_manifest(tmp_path):
         "skill_allowlist": [],
         "receipt_destination": str(tmp_path / "observability/receipts.jsonl"),
     }
-    projection_digest = hashlib.sha256(
-        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    projection_digest = canonical_digest(serving)
     manifest.write_text(
-        json.dumps({
-            "shared_identity": {
-                "package_digest": "b" * 64,
-                "execution_contract_schema_version": "1",
-                "turn_receipt_schema_version": "1",
-            },
-            "projections": {"serving": serving},
-            "projection_digests": {"serving": projection_digest},
-        }),
+        json.dumps(release_manifest(serving, package_digest="b" * 64)),
         encoding="utf-8",
     )
     config = {
@@ -475,18 +467,11 @@ def test_preload_freezes_platform_mapping_and_reuses_one_prepared_turn(tmp_path)
         "skill_allowlist": [],
         "receipt_destination": str(tmp_path / "observability/receipts.jsonl"),
     }
-    digest = hashlib.sha256(
-        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    manifest.write_text(json.dumps({
-        "shared_identity": {
-            "package_digest": "d" * 64,
-            "execution_contract_schema_version": "1",
-            "turn_receipt_schema_version": "1",
-        },
-        "projections": {"serving": serving},
-        "projection_digests": {"serving": digest},
-    }), encoding="utf-8")
+    digest = canonical_digest(serving)
+    manifest.write_text(
+        json.dumps(release_manifest(serving, package_digest="d" * 64)),
+        encoding="utf-8",
+    )
 
     prepared = preload_enabled_ivd_contracts({
         "after_sales_guard": {
