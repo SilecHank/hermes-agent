@@ -4,7 +4,7 @@ import sys
 import threading
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from gateway.config import GatewayConfig
 from gateway.ivd_runtime import preload_enabled_ivd_contracts
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
+from tests.gateway.restart_test_helpers import make_restart_runner
 
 
 def _runner(runtime_config=None):
@@ -296,13 +297,15 @@ async def test_real_run_sync_telemetry_failure_keeps_pass_receipt_and_answer(
     )
 
     result = await _runner(config)._run_agent(
-        "问题", "", [], _source(), "session", session_key="qqbot:123"
+        "问题", "", [], _source(), "session", session_key="qqbot:123",
+        run_generation=41,
     )
 
     assert result["final_response"] == "最终答案"
     assert len(validations) == 1
     assert len(receipts) == 1
     assert receipts[0]["validation_status"] == "pass"
+    assert receipts[0]["event_id"] == "session:41"
 
 
 @pytest.mark.parametrize("enqueue_result", [True, False])
@@ -362,6 +365,58 @@ async def test_real_run_sync_records_preflight_blocked_receipt_before_early_retu
     assert len(receipts) == 1
     assert receipts[0]["validation_status"] == "preflight_blocked"
     assert receipts[0]["event_id"] == "message-9"
+
+
+@pytest.mark.asyncio
+async def test_preflight_blocked_receipt_uses_run_unique_event_fallback(
+    monkeypatch, tmp_path
+):
+    receipts = []
+
+    class Agent:
+        def __init__(self, **kwargs):
+            raise AssertionError("agent constructed")
+
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            "serving_projection_path": str(_write_projection(tmp_path)),
+        }
+    }
+    _install_runtime(monkeypatch, config, Agent)
+    turn = SimpleNamespace(
+        context="",
+        facts={},
+        blocks_answer_generation=True,
+        has_validator=True,
+        product_scope="",
+        product_variant="",
+        route_id="blocked",
+        route_version="1",
+        fast_path=False,
+        source_paths=(),
+        preflight_decision="block",
+        preflight_action="stop_before_answer_generation",
+        preflight_issues=("pending_source",),
+    )
+    monkeypatch.setattr(
+        "gateway.after_sales_guard.prepare_after_sales_turn",
+        lambda *args, **kwargs: turn,
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.enqueue_ivd_receipt",
+        lambda destination, receipt: receipts.append(receipt) or True,
+    )
+
+    result = await _runner(config)._run_agent(
+        "问题", "", [], _source(), "session", session_key="qqbot:123",
+        run_generation=42,
+    )
+
+    assert result["preflight_blocked"] is True
+    assert len(receipts) == 1
+    assert receipts[0]["event_id"] == "session:42"
 
 
 @pytest.mark.asyncio
@@ -454,4 +509,26 @@ def test_runner_init_skips_projection_when_ivd_disabled(
 
     runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / "sessions"))
 
+    assert not runner._ivd_prepared_contracts
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_closes_unique_preloaded_contract_once():
+    closes = []
+    prepared = SimpleNamespace(close=lambda: closes.append(1))
+    runner, _adapter = make_restart_runner()
+    runner._ivd_prepared_contracts = {
+        "qqbot": prepared,
+        "telegram": prepared,
+    }
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch("agent.auxiliary_client.shutdown_cached_clients"),
+    ):
+        await runner.stop()
+        await runner.stop()
+
+    assert closes == [1]
     assert not runner._ivd_prepared_contracts

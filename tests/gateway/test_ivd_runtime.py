@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -521,39 +522,125 @@ def test_oversized_receipt_is_dropped_before_writer_queue():
     assert submitted is False
 
 
-def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch, tmp_path):
+def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch):
     import gateway.ivd_runtime as runtime
 
     attempts = []
+    sink = type(
+        "Sink",
+        (),
+        {"append": lambda self, payload: attempts.append(payload) and False},
+    )()
     monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
     monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", runtime.queue.Queue(maxsize=1))
-    monkeypatch.setattr(
-        runtime,
-        "_append_ivd_receipt",
-        lambda *_args: (attempts.append(1), (_ for _ in ()).throw(OSError("fail"))),
-    )
 
-    assert enqueue_ivd_receipt(str(tmp_path / "receipt"), {"turn_id": "one"})
+    assert enqueue_ivd_receipt(sink, {"turn_id": "one"})
     runtime._RECEIPT_QUEUE.join()
 
-    assert attempts == [1]
+    assert len(attempts) == 1
 
 
-def test_append_receipt_retries_partial_os_write(monkeypatch, tmp_path):
+def test_append_receipt_does_not_retry_partial_os_write(monkeypatch):
     import gateway.ivd_runtime as runtime
 
-    written = bytearray()
-    monkeypatch.setattr(runtime.os, "open", lambda *_args: 17)
-    monkeypatch.setattr(runtime.os, "close", lambda _fd: None)
-
-    def partial_write(_fd, payload):
-        count = min(3, len(payload))
-        written.extend(payload[:count])
-        return count
-
-    monkeypatch.setattr(runtime.os, "write", partial_write)
+    calls = []
+    sink = type(
+        "Sink",
+        (),
+        {"append": lambda self, payload: calls.append(payload) or False},
+    )()
     payload = b'{"turn_id":"one"}\n'
 
-    runtime._append_ivd_receipt(str(tmp_path / "receipt.jsonl"), payload)
+    assert runtime._append_ivd_receipt(sink, payload) is False
+    assert calls == [payload]
 
-    assert bytes(written) == payload
+
+def test_receipt_sink_uses_one_os_write_on_short_write(monkeypatch, tmp_path):
+    import gateway.ivd_execution_contract as contracts
+
+    destination = tmp_path / "observability/turn-receipts.jsonl"
+    calls = []
+    real_write = contracts.os.write
+
+    def short_write(fd, payload):
+        calls.append((fd, bytes(payload)))
+        return real_write(fd, payload[:3])
+
+    monkeypatch.setattr(
+        contracts.os,
+        "write",
+        short_write,
+    )
+    sink = contracts.AppendOnlyReceiptSink.open(
+        destination,
+        release_root=tmp_path,
+    )
+    payload = b'{"turn_id":"one"}\n'
+
+    try:
+        assert sink.append(payload) is False
+        assert len(calls) == 1
+        assert calls[0][1] == payload
+    finally:
+        sink.close()
+
+    assert destination.read_bytes() == b""
+
+
+def test_two_receipt_sinks_append_complete_records_without_interleaving(tmp_path):
+    import gateway.ivd_execution_contract as contracts
+
+    destination = tmp_path / "observability/turn-receipts.jsonl"
+    first = contracts.AppendOnlyReceiptSink.open(destination, release_root=tmp_path)
+    second = contracts.AppendOnlyReceiptSink.open(destination, release_root=tmp_path)
+    payloads = [f'{{"turn_id":"{index}"}}\n'.encode() for index in range(100)]
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(
+                pool.map(
+                    lambda item: (first if item[0] % 2 else second).append(item[1]),
+                    enumerate(payloads),
+                )
+            )
+        assert all(results)
+    finally:
+        first.close()
+        second.close()
+
+    assert sorted(destination.read_bytes().splitlines(keepends=True)) == sorted(payloads)
+
+
+def test_receipt_sink_fails_closed_without_fcntl(monkeypatch, tmp_path):
+    import gateway.ivd_execution_contract as contracts
+
+    monkeypatch.setattr(contracts, "fcntl", None)
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        contracts.AppendOnlyReceiptSink.open(
+            tmp_path / "observability/turn-receipts.jsonl",
+            release_root=tmp_path,
+        )
+
+
+def test_receipt_sink_survives_destination_symlink_swap(monkeypatch, tmp_path):
+    import gateway.ivd_execution_contract as contracts
+
+    destination = tmp_path / "observability/turn-receipts.jsonl"
+    outside = tmp_path / "outside.jsonl"
+    sink = contracts.AppendOnlyReceiptSink.open(
+        destination,
+        release_root=tmp_path,
+    )
+    destination.rename(destination.with_suffix(".pinned"))
+    outside.write_bytes(b"")
+    destination.symlink_to(outside)
+    payload = b'{"turn_id":"one"}\n'
+
+    try:
+        assert sink.append(payload) is True
+    finally:
+        sink.close()
+
+    assert destination.with_suffix(".pinned").read_bytes() == payload
+    assert outside.read_bytes() == b""

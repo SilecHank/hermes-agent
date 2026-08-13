@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from gateway.ivd_execution_contract import (
+    AppendOnlyReceiptSink,
     PreparedIVDTurn,
     load_serving_projection,
     prepare_ivd_turn,
@@ -92,24 +93,15 @@ def preload_enabled_ivd_contracts(
 
 
 _MAX_RECEIPT_BYTES = 4096
-_RECEIPT_QUEUE: queue.Queue[tuple[str, bytes]] | None = queue.Queue(maxsize=256)
+_RECEIPT_QUEUE: queue.Queue[tuple[AppendOnlyReceiptSink, bytes]] | None = queue.Queue(
+    maxsize=256
+)
 _RECEIPT_WORKER_STARTED = False
 _RECEIPT_WORKER_LOCK = threading.Lock()
 
 
-def _append_ivd_receipt(path: str, payload: bytes) -> None:
-    target = Path(path).expanduser()
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        remaining = memoryview(payload)
-        while remaining:
-            written = os.write(fd, remaining)
-            if written <= 0:
-                raise OSError("IVD receipt write made no progress")
-            remaining = remaining[written:]
-    finally:
-        os.close(fd)
+def _append_ivd_receipt(sink: AppendOnlyReceiptSink, payload: bytes) -> bool:
+    return sink.append(payload)
 
 
 def _receipt_worker() -> None:
@@ -138,7 +130,9 @@ def _ensure_receipt_worker() -> None:
             _RECEIPT_WORKER_STARTED = True
 
 
-def enqueue_ivd_receipt(destination: str, receipt: dict[str, Any]) -> bool:
+def enqueue_ivd_receipt(
+    destination: AppendOnlyReceiptSink, receipt: dict[str, Any]
+) -> bool:
     """Enqueue one bounded receipt; full/unavailable queues drop without retry."""
     if _RECEIPT_QUEUE is None:
         return False

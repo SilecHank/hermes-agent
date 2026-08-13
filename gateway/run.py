@@ -34,13 +34,14 @@ import logging
 import os
 import re
 import shlex
-import site
-import sys
 import signal
+import site
+import sqlite3
+import sys
 import tempfile
 import threading
 import time
-import sqlite3
+import uuid
 from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
@@ -3565,6 +3566,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             prepared_ivd_turn=prepared,
         )
         return prepared, turn
+
+    def _close_ivd_prepared_contracts(self) -> None:
+        prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
+        self._ivd_prepared_contracts = {}
+        seen: set[int] = set()
+        for prepared in prepared_contracts.values():
+            identity = id(prepared)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            try:
+                prepared.close()
+            except Exception as error:
+                logger.warning("IVD receipt sink close skipped: %s", error)
 
     def _finalize_ivd_lifecycle(
         self,
@@ -9864,6 +9879,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _stop_started_at_box,
                 )
             finally:
+                self._close_ivd_prepared_contracts()
                 _watchdog_done.set()
 
         async def _stop_impl_body(_kill_tool_subprocesses, _stop_started_at_box) -> None:
@@ -20456,6 +20472,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        if event_message_id:
+            _ivd_event_id = str(event_message_id)
+        elif run_generation is not None:
+            _ivd_event_id = f"{session_id}:{run_generation}"
+        else:
+            _ivd_event_id = f"{session_id}:call:{uuid.uuid4().hex}"
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
@@ -21593,7 +21615,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     _prepared_ivd_turn,
                                     platform=platform_key,
                                     session_key=session_key or session_id or "",
-                                    event_id=str(event_message_id or session_id or ""),
+                                    event_id=_ivd_event_id,
                                     validation_status="preflight_blocked",
                                 )
                             except Exception as _blocked_receipt_exc:
@@ -22798,7 +22820,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     agent=_agent,
                     platform=platform_key,
                     session_key=session_key or session_id or "",
-                    event_id=str(event_message_id or session_id or ""),
+                    event_id=_ivd_event_id,
                     telemetry_action=_telemetry_action,
                 )
 

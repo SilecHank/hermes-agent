@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
+import os
 import re
+import stat
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by monkeypatch on POSIX CI
+    fcntl = None  # type: ignore[assignment]
 
 
 _PACKAGE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -38,11 +46,122 @@ class IVDRuntimeConfigurationError(RuntimeError):
     """The managed IVD runtime cannot establish a serving contract."""
 
 
+class AppendOnlyReceiptSink:
+    """A startup-opened append target that never re-resolves its path."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._lock = threading.Lock()
+        self._closed = False
+        atexit.register(self.close)
+
+    @classmethod
+    def open(
+        cls,
+        destination: str | Path,
+        *,
+        release_root: str | Path,
+    ) -> "AppendOnlyReceiptSink":
+        if fcntl is None:
+            raise IVDRuntimeConfigurationError(
+                "managed IVD receipts require process-safe file locking"
+            )
+        target = Path(destination)
+        if not target.is_absolute() or target.suffix.lower() != ".jsonl":
+            raise IVDRuntimeConfigurationError(
+                "receipt destination must be an absolute .jsonl file"
+            )
+        try:
+            canonical_release_root = Path(release_root).resolve(strict=False)
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            canonical_parent = target.parent.resolve(strict=True)
+            observability_root = (
+                canonical_release_root / "observability"
+            ).resolve(strict=True)
+        except OSError as error:
+            raise IVDRuntimeConfigurationError(
+                "cannot prepare IVD receipt destination"
+            ) from error
+        if (
+            not observability_root.is_relative_to(canonical_release_root)
+            or not canonical_parent.is_relative_to(observability_root)
+        ):
+            raise IVDRuntimeConfigurationError(
+                "receipt destination must be inside release observability"
+            )
+
+        directory_fd = None
+        try:
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(canonical_parent, directory_flags)
+            flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            if os.open in os.supports_dir_fd:
+                fd = os.open(target.name, flags, 0o600, dir_fd=directory_fd)
+            else:
+                fd = os.open(canonical_parent / target.name, flags, 0o600)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise IVDRuntimeConfigurationError(
+                    "receipt destination must be a regular file"
+                )
+            os.set_inheritable(fd, False)
+        except IVDRuntimeConfigurationError:
+            raise
+        except OSError as error:
+            raise IVDRuntimeConfigurationError(
+                "cannot open IVD receipt destination"
+            ) from error
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        return cls(fd)
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def append(self, payload: bytes) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            assert fcntl is not None
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_EX)
+                original_size = os.lseek(self._fd, 0, os.SEEK_END)
+                try:
+                    written = os.write(self._fd, payload)
+                except OSError:
+                    os.ftruncate(self._fd, original_size)
+                    return False
+                if written != len(payload):
+                    os.ftruncate(self._fd, original_size)
+                    return False
+                return True
+            except OSError:
+                return False
+            finally:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            os.close(self._fd)
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, dict):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
+    if isinstance(value, AppendOnlyReceiptSink):
+        return value
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise IVDRuntimeConfigurationError("serving projection is not valid JSON data")
@@ -52,7 +171,7 @@ def _freeze(value: Any) -> Any:
 class ServingProjection:
     package_digest: str
     serving_projection_digest: str
-    receipt_destination: str
+    receipt_destination: AppendOnlyReceiptSink
     serving_projection: Mapping[str, Any]
 
 
@@ -61,7 +180,7 @@ class CompatibilityExecutionContract:
     contract_id: str
     package_digest: str
     serving_projection_digest: str
-    receipt_destination: str
+    receipt_destination: AppendOnlyReceiptSink
     serving_projection: Mapping[str, Any]
     trusted_legacy_answer_enabled: bool = True
 
@@ -75,6 +194,9 @@ class PreparedIVDTurn:
     def __post_init__(self) -> None:
         if self.execution_contract_count != 1:
             raise IVDRuntimeConfigurationError("an IVD turn requires exactly one contract")
+
+    def close(self) -> None:
+        self.execution_contract.receipt_destination.close()
 
 
 def _stat_key(path: Path) -> tuple[str, int, int, int, int]:
@@ -105,10 +227,16 @@ def load_serving_projection(
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
         if cached is not None:
-            _CACHE.move_to_end(key)
-            if expected_package_digest and cached.package_digest != expected_package_digest:
-                raise IVDRuntimeConfigurationError("IVD package digest mismatch")
-            return cached
+            if cached.receipt_destination.closed:
+                del _CACHE[key]
+            else:
+                _CACHE.move_to_end(key)
+                if (
+                    expected_package_digest
+                    and cached.package_digest != expected_package_digest
+                ):
+                    raise IVDRuntimeConfigurationError("IVD package digest mismatch")
+                return cached
 
         try:
             payload = json.loads(Path(key[0]).read_text(encoding="utf-8"))
@@ -156,24 +284,28 @@ def load_serving_projection(
             value = serving.get(field)
             if not isinstance(value, str) or not Path(value).is_absolute():
                 raise IVDRuntimeConfigurationError(f"serving {field} must be absolute")
-        if not serving["serving_package_path"].endswith("/serving-package"):
+        canonical_serving = dict(serving)
+        for field in (
+            "serving_package_path",
+            "serving_agent_path",
+            "source_vault_path",
+            "dispatch_policy_path",
+            "render_policy_path",
+            "receipt_destination",
+        ):
+            canonical_serving[field] = str(Path(serving[field]).resolve(strict=False))
+        package_path = Path(canonical_serving["serving_package_path"])
+        if package_path.name != "serving-package":
             raise IVDRuntimeConfigurationError("invalid serving package path")
-        if not serving["serving_agent_path"].endswith("/serving-agent"):
+        if Path(canonical_serving["serving_agent_path"]).name != "serving-agent":
             raise IVDRuntimeConfigurationError("invalid serving agent path")
-        if not serving["source_vault_path"].endswith("/source-vault"):
+        if Path(canonical_serving["source_vault_path"]).name != "source-vault":
             raise IVDRuntimeConfigurationError("invalid source vault path")
-        package_prefix = serving["serving_package_path"] + "/"
-        if not serving["dispatch_policy_path"].startswith(package_prefix) or not serving[
-            "render_policy_path"
-        ].startswith(package_prefix):
+        if any(
+            not Path(canonical_serving[field]).is_relative_to(package_path)
+            for field in ("dispatch_policy_path", "render_policy_path")
+        ):
             raise IVDRuntimeConfigurationError("serving policy path escapes package")
-        release_root = Path(serving["serving_package_path"]).parent.resolve()
-        observability_root = (release_root / "observability").resolve()
-        receipt_destination = Path(serving["receipt_destination"]).resolve()
-        if not receipt_destination.is_relative_to(observability_root):
-            raise IVDRuntimeConfigurationError(
-                "receipt destination must be inside release observability"
-            )
         for field in ("context_budget", "retrieval_budget"):
             value = serving.get(field)
             if type(value) is not int or value < 1:
@@ -192,11 +324,17 @@ def load_serving_projection(
         ):
             raise IVDRuntimeConfigurationError("serving projection digest mismatch")
 
+        receipt_sink = AppendOnlyReceiptSink.open(
+            canonical_serving["receipt_destination"],
+            release_root=package_path.parent,
+        )
+        canonical_serving["receipt_destination"] = receipt_sink
+
         result = ServingProjection(
             package_digest=digest,
             serving_projection_digest=projection_digest,
-            receipt_destination=serving["receipt_destination"],
-            serving_projection=_freeze(serving),
+            receipt_destination=receipt_sink,
+            serving_projection=_freeze(canonical_serving),
         )
         for stale_key in tuple(_CACHE):
             if stale_key[0] == key[0] and stale_key != key:

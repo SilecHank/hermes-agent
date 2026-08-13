@@ -134,6 +134,59 @@ def test_loader_rejects_receipt_destination_outside_release_observability(tmp_pa
         load_serving_projection(_write_release(tmp_path, serving=serving))
 
 
+def test_loader_rejects_policy_dotdot_escape_after_normalization(tmp_path):
+    serving = _serving_projection(tmp_path)
+    serving["dispatch_policy_path"] = str(
+        tmp_path / "serving-package/../outside/dispatch.json"
+    )
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        load_serving_projection(_write_release(tmp_path, serving=serving))
+
+
+def test_loader_freezes_normalized_policy_paths(tmp_path):
+    serving = _serving_projection(tmp_path)
+    serving["dispatch_policy_path"] = str(
+        tmp_path / "serving-package/policies/../dispatch.json"
+    )
+
+    projection = load_serving_projection(_write_release(tmp_path, serving=serving))
+
+    assert projection.serving_projection["dispatch_policy_path"] == str(
+        (tmp_path / "serving-package/dispatch.json").resolve()
+    )
+
+
+def test_loader_rejects_directory_style_receipt_destination(tmp_path):
+    serving = _serving_projection(tmp_path)
+    serving["receipt_destination"] = str(tmp_path / "observability/receipts")
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        load_serving_projection(_write_release(tmp_path, serving=serving))
+
+
+def test_loader_rejects_final_receipt_symlink(tmp_path):
+    observability = tmp_path / "observability"
+    observability.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("", encoding="utf-8")
+    (observability / "receipts.jsonl").symlink_to(outside)
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        load_serving_projection(_write_release(tmp_path))
+
+
+def test_projection_exposes_controlled_receipt_sink_with_explicit_close(tmp_path):
+    projection = load_serving_projection(_write_release(tmp_path))
+
+    assert not isinstance(projection.receipt_destination, str)
+    assert projection.receipt_destination.closed is False
+    projection.receipt_destination.close()
+    projection.receipt_destination.close()
+
+    assert projection.receipt_destination.closed is True
+
+
 def test_loader_reuses_cached_projection_without_reopening_same_file(tmp_path):
     manifest = _write_release(tmp_path)
     first = load_serving_projection(manifest)
@@ -142,6 +195,18 @@ def test_loader_reuses_cached_projection_without_reopening_same_file(tmp_path):
         second = load_serving_projection(manifest)
 
     assert second is first
+
+
+def test_loader_reopens_sink_closed_by_previous_gateway_owner(tmp_path):
+    manifest = _write_release(tmp_path)
+    first = load_serving_projection(manifest)
+    first.receipt_destination.close()
+
+    second = load_serving_projection(manifest)
+
+    assert second is not first
+    assert second.receipt_destination.closed is False
+    second.receipt_destination.close()
 
 
 def test_concurrent_cache_miss_reads_projection_once(tmp_path):
@@ -179,6 +244,19 @@ def test_loader_replaces_stale_cache_entry_for_same_path(tmp_path):
     assert len(keys) == 1
 
 
+def test_cache_reload_does_not_close_previously_returned_sink(tmp_path):
+    manifest = _write_release(tmp_path)
+    first = prepare_ivd_turn(load_serving_projection(manifest))
+    _write_release(tmp_path, package_digest="d" * 64)
+
+    second = prepare_ivd_turn(load_serving_projection(manifest))
+
+    assert second is not first
+    assert first.execution_contract.receipt_destination.closed is False
+    first.close()
+    second.close()
+
+
 def test_projection_cache_is_global_lru_bounded_and_keeps_recent_entry(tmp_path):
     execution_contracts._CACHE.clear()
     manifests = []
@@ -196,3 +274,19 @@ def test_projection_cache_is_global_lru_bounded_and_keeps_recent_entry(tmp_path)
         for key in execution_contracts._CACHE
     )
     assert recent.package_digest == f"{execution_contracts._CACHE_LIMIT:064x}"
+
+
+def test_cache_eviction_does_not_close_previously_returned_sink(tmp_path):
+    execution_contracts._CACHE.clear()
+    first_root = tmp_path / "first"
+    first_root.mkdir()
+    first = prepare_ivd_turn(load_serving_projection(_write_release(first_root)))
+    for index in range(execution_contracts._CACHE_LIMIT + 1):
+        root = tmp_path / f"evict-{index}"
+        root.mkdir()
+        load_serving_projection(
+            _write_release(root, package_digest=f"{index + 1:064x}")
+        )
+
+    assert first.execution_contract.receipt_destination.closed is False
+    first.close()
