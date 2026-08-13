@@ -427,7 +427,6 @@ def test_shadow_replay_rejections_never_wait_for_blocking_recorder(monkeypatch):
         assert time.monotonic() - started_at < 0.25
         assert recorder_started.wait(timeout=1)
 
-        recorder_release.set()
         submitter.close(wait_for_tasks=False)
         started_at = time.monotonic()
         served_answer = object()

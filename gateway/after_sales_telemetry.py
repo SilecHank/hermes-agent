@@ -272,6 +272,7 @@ class ShadowReplaySubmitter:
         self._rejected = 0
         self._recording_dropped = 0
         self._record_pending = 0
+        self._record_accepting = True
         self._record_queue: queue.Queue[
             tuple[str, Mapping[str, object] | None, str]
         ] = queue.Queue(maxsize=max(1, worker_count + queued_count))
@@ -327,6 +328,7 @@ class ShadowReplaySubmitter:
                         comparison_metadata,
                         type(exc).__name__,
                     )
+                    self._condition.notify_all()
                 else:
                     self._submitted += 1
                     future.add_done_callback(self._finish_future)
@@ -370,7 +372,7 @@ class ShadowReplaySubmitter:
         if future.cancelled():
             self._enqueue_record("cancelled")
         if should_stop_recorder:
-            self._record_stop.set()
+            self._stop_recorder()
 
     def _enqueue_record(
         self,
@@ -379,7 +381,7 @@ class ShadowReplaySubmitter:
         error_type: str = "",
     ) -> None:
         with self._condition:
-            if not self._record_thread.is_alive():
+            if not self._record_accepting:
                 self._recording_dropped += 1
                 return
             self._record_pending += 1
@@ -416,6 +418,11 @@ class ShadowReplaySubmitter:
                     self._record_pending -= 1
                     self._condition.notify_all()
 
+    def _stop_recorder(self) -> None:
+        with self._condition:
+            self._record_accepting = False
+            self._record_stop.set()
+
     def wait_for_idle(self, timeout: float | None = None) -> bool:
         """Wait until accepted replay and recording work finishes."""
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -436,9 +443,9 @@ class ShadowReplaySubmitter:
             should_stop_recorder = self._active_tasks == 0
         self._executor.shutdown(wait=wait_for_tasks, cancel_futures=not wait_for_tasks)
         if should_stop_recorder:
-            self._record_stop.set()
+            self._stop_recorder()
         if wait_for_tasks:
-            self._record_stop.set()
+            self._stop_recorder()
             self._record_thread.join()
 
     def __enter__(self) -> ShadowReplaySubmitter:
