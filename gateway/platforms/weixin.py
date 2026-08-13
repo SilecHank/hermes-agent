@@ -1420,8 +1420,13 @@ class WeixinAdapter(BasePlatformAdapter):
         item_list = message.get("item_list") or []
         text = _extract_text(item_list)
         if text and not message_id:
+            from gateway.review_approval_commands import is_review_interaction_text
+
             content_key = f"content:{sender_id}:{hashlib.md5(text.encode()).hexdigest()}"
-            if self._content_dedup.is_duplicate(content_key):
+            if (
+                not is_review_interaction_text(text)
+                and self._content_dedup.is_duplicate(content_key)
+            ):
                 logger.debug("[%s] Content-dedup: skipping duplicate message from %s", self.name, sender_id)
                 return
 

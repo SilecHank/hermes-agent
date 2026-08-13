@@ -928,6 +928,41 @@ class QQAdapter(BasePlatformAdapter):
         """Cache the last message ID per chat, then delegate to base."""
         if event.message_id and event.source.chat_id:
             self._last_msg_id[event.source.chat_id] = event.message_id
+        if not event.get_command() and self._message_handler is not None:
+            try:
+                from gateway.session_context import (
+                    EffectNamespace,
+                    build_effect_session_key,
+                )
+                from tools import clarify_gateway
+
+                source = event.source
+                clarify_key = build_effect_session_key(
+                    platform=source.platform.value,
+                    chat=str(source.chat_id or ""),
+                    thread=str(source.thread_id or ""),
+                    participant=str(source.user_id_alt or source.user_id or ""),
+                    task_epoch=0,
+                    effect=EffectNamespace.CLARIFICATION,
+                )
+                if clarify_gateway.get_pending_for_session(
+                    clarify_key, include_choice_prompts=True
+                ) is not None:
+                    response = await self._message_handler(event)
+                    text, _ttl = self._unwrap_ephemeral(response)
+                    if text:
+                        await self._send_with_retry(
+                            chat_id=source.chat_id,
+                            content=text,
+                            reply_to=event.message_id,
+                        )
+                    return
+            except Exception:
+                logger.debug(
+                    "[%s] participant clarify routing check failed",
+                    self._log_tag,
+                    exc_info=True,
+                )
         await super().handle_message(event)
 
     async def _on_message(self, event_type: str, d: Any) -> None:

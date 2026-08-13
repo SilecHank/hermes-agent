@@ -46,7 +46,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Awaitable, Callable, Dict, Optional, Any, List, Union, cast
+from typing import Awaitable, Callable, Dict, Mapping, Optional, Any, List, Union, cast
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -2319,19 +2319,24 @@ def _build_ivd_receipt(
     session_key: str,
     event_id: str,
     validation_status: str,
-) -> dict[str, str]:
+    child_spans: Mapping[str, int | float] | None = None,
+    counters: Mapping[str, int | float] | None = None,
+) -> "TurnReceipt":
     import hashlib
+    from gateway.ivd_receipt_sink import TurnReceipt
 
     contract = prepared.execution_contract
     event_identity = f"{platform}\0{session_key}\0{event_id}"
-    return {
-        "contract_id": contract.contract_id,
-        "turn_id": "ivd-turn-" + hashlib.sha256(event_identity.encode()).hexdigest(),
-        "event_id": str(event_id),
-        "package_digest": contract.package_digest,
-        "serving_projection_digest": contract.serving_projection_digest,
-        "validation_status": str(validation_status),
-    }
+    return TurnReceipt(
+        contract_id=contract.contract_id,
+        turn_id="ivd-turn-" + hashlib.sha256(event_identity.encode()).hexdigest(),
+        event_id=str(event_id),
+        package_digest=contract.package_digest,
+        serving_projection_digest=contract.serving_projection_digest,
+        validation_status=str(validation_status),
+        child_spans=child_spans or {},
+        counters=counters or {},
+    )
 
 
 def _enqueue_gateway_ivd_receipt(
@@ -2342,8 +2347,11 @@ def _enqueue_gateway_ivd_receipt(
     session_key: str,
     event_id: str,
     validation_status: str,
+    child_spans: Mapping[str, int | float] | None = None,
+    counters: Mapping[str, int | float] | None = None,
 ) -> str | None:
     """Enqueue one metadata-only receipt and preserve the selected answer."""
+    from gateway.ivd_receipt_sink import sink_for_destination
     from gateway.ivd_runtime import enqueue_ivd_receipt
 
     receipt = _build_ivd_receipt(
@@ -2352,10 +2360,15 @@ def _enqueue_gateway_ivd_receipt(
         session_key=session_key,
         event_id=event_id,
         validation_status=validation_status,
+        child_spans=child_spans,
+        counters=counters,
     )
-    if not enqueue_ivd_receipt(
-        prepared.execution_contract.receipt_destination, receipt
-    ):
+    destination = prepared.execution_contract.receipt_destination
+    sink = sink_for_destination(
+        destination,
+        submitter=lambda event: enqueue_ivd_receipt(destination, event),
+    )
+    if not sink.submit(receipt):
         logger.warning("IVD turn receipt dropped")
     return final_response
 
@@ -4483,6 +4496,61 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
             profile=_profile,
         )
+
+    def _effect_session_key_for_source(
+        self,
+        source: SessionSource,
+        *,
+        effect: str,
+    ) -> str:
+        """Return participant-isolated mutable state without splitting chat history."""
+        from gateway.session_context import TaskEpochRegistry, build_effect_session_key
+
+        registry = self.__dict__.get("_ivd_task_epochs")
+        if registry is None:
+            registry = TaskEpochRegistry()
+            self._ivd_task_epochs = registry
+        participant = str(source.user_id_alt or source.user_id or "")
+        identity = (
+            source.platform.value,
+            str(source.chat_id or ""),
+            str(source.thread_id or ""),
+            participant,
+        )
+        conversation_key = self._session_key_for_source(source)
+        identities = self.__dict__.setdefault("_ivd_effect_identities", {})
+        identities.setdefault(conversation_key, set()).add(identity)
+        return build_effect_session_key(
+            platform=identity[0],
+            chat=identity[1],
+            thread=identity[2],
+            participant=identity[3],
+            task_epoch=registry.current(*identity),
+            effect=effect,
+        )
+
+    def _advance_effect_epochs_for_session(
+        self, session_key: str, *, reason: str
+    ) -> None:
+        from gateway.session_context import TaskEpochRegistry
+
+        registry = self.__dict__.get("_ivd_task_epochs")
+        if registry is None:
+            registry = TaskEpochRegistry()
+            self._ivd_task_epochs = registry
+        identities = self.__dict__.get("_ivd_effect_identities", {}).get(
+            session_key, set()
+        )
+        normalized_reason = {
+            "new_command": "reset",
+            "reset": "reset",
+            "resume": "resume",
+            "auto_reset": "auto_reset",
+            "compression_exhausted_reset": "compression_exhausted_reset",
+        }.get(reason)
+        if normalized_reason:
+            for identity in tuple(identities):
+                registry.advance(*identity, reason=normalized_reason)
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
@@ -11245,6 +11313,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        _clarify_effect_key = self._effect_session_key_for_source(
+            source, effect="clarification"
+        )
         if not is_internal:
             try:
                 from gateway.review_approval_commands import (
@@ -11336,7 +11407,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from tools import clarify_gateway as _clarify_mod
             _pending_clarify = _clarify_mod.get_pending_for_session(
-                _quick_key, include_choice_prompts=True,
+                _clarify_effect_key, include_choice_prompts=True,
             )
         except Exception:
             _pending_clarify = None
@@ -11348,7 +11419,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
                 _resolved = _clarify_mod.resolve_text_response_for_session(
-                    _quick_key, _raw_clarify_reply,
+                    _clarify_effect_key, _raw_clarify_reply,
                 )
                 if _resolved:
                     logger.info(
@@ -19215,6 +19286,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         if not session_key:
             return
+        self._advance_effect_epochs_for_session(session_key, reason=reason)
         for attr in _CONVERSATION_SCOPED_STATE:
             store = getattr(self, attr, None)
             if isinstance(store, dict):
@@ -22271,7 +22343,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 clarify_id = _uuid.uuid4().hex[:10]
                 _clarify_mod.register(
                     clarify_id=clarify_id,
-                    session_key=session_key or "",
+                    session_key=_clarify_session_key,
                     question=question,
                     choices=list(choices) if choices else None,
                 )
@@ -22311,7 +22383,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         question=question,
                         choices=list(choices) if choices else None,
                         clarify_id=clarify_id,
-                        session_key=session_key or "",
+                        session_key=_clarify_session_key,
                         metadata=_status_thread_metadata,
                     ),
                     _loop_for_step,
@@ -22332,7 +22404,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Couldn't deliver the prompt — clean up and return
                     # sentinel so the agent can fall back to a sensible
                     # default rather than hanging.
-                    _clarify_mod.clear_session(session_key or "")
+                    _clarify_mod.clear_session(_clarify_session_key)
                     return "[clarify prompt could not be delivered]"
 
                 # Enter the user-visible waiting state as part of clarify
@@ -22694,7 +22766,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     ),
                 )
 
+            # The approval primitive still uses the durable conversation key;
+            # ownership is enforced separately by the participant effect key.
             _approval_session_key = session_key or ""
+            _approval_effect_key = self._effect_session_key_for_source(
+                source, effect="approval"
+            )
+            self.__dict__.setdefault("_ivd_approval_owners", {})[
+                _approval_session_key
+            ] = _approval_effect_key
+            _clarify_session_key = self._effect_session_key_for_source(
+                source, effect="clarification"
+            )
             _ivd_started_at = time.monotonic()
             _approval_session_token = set_current_session_key(_approval_session_key)
             _ivd_runtime_token = None
@@ -22804,7 +22887,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # completion, gateway shutdown).  Idempotent.
                 try:
                     from tools.clarify_gateway import clear_session as _clear_clarify_session
-                    _clear_clarify_session(_approval_session_key)
+                    _clear_clarify_session(_clarify_session_key)
                 except Exception:
                     pass
                 reset_current_session_key(_approval_session_token)

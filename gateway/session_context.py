@@ -37,7 +37,118 @@ needs to replace the import + call site:
 """
 
 from contextvars import ContextVar
+from enum import Enum
+import threading
 from typing import Any
+from urllib.parse import quote
+
+
+class EffectNamespace(str, Enum):
+    """Side-effect state that must never inherit conversation sharing."""
+
+    CLARIFICATION = "clarification"
+    REVIEW_NAVIGATION = "review_navigation"
+    APPROVAL = "approval"
+    ANSWER_MESSAGE = "answer_message"
+    ADMIN_COMMAND = "admin_command"
+
+
+def _key_component(value: object) -> str:
+    text = str(value or "-").strip() or "-"
+    return quote(text, safe="._-")
+
+
+def build_effect_session_key(
+    *,
+    platform: str,
+    chat: str,
+    thread: str,
+    participant: str,
+    task_epoch: int,
+    effect: EffectNamespace | str,
+) -> str:
+    """Build a canonical, participant-isolated key for mutable turn effects."""
+    effect_value = effect.value if isinstance(effect, EffectNamespace) else str(effect)
+    if effect_value not in {item.value for item in EffectNamespace}:
+        raise ValueError(f"unsupported effect namespace: {effect_value}")
+    epoch = int(task_epoch)
+    if epoch < 0:
+        raise ValueError("task_epoch must not be negative")
+    return ":".join(
+        (
+            "ivd-effect",
+            "v1",
+            _key_component(effect_value),
+            _key_component(platform),
+            _key_component(chat),
+            _key_component(thread),
+            _key_component(participant),
+            str(epoch),
+        )
+    )
+
+
+class TaskEpochRegistry:
+    """Monotonic task epochs advanced only by explicit lifecycle boundaries."""
+
+    _ALLOWED_REASONS = {
+        "reset",
+        "auto_new_session",
+        "explicit_topic_switch",
+        "terminal_task_completion",
+        "resume",
+        "auto_reset",
+        "compression_exhausted_reset",
+    }
+
+    def __init__(self) -> None:
+        self._epochs: dict[tuple[str, str, str, str], int] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _identity(
+        platform: str, chat: str, thread: str, participant: str
+    ) -> tuple[str, str, str, str]:
+        return tuple(
+            str(value or "").strip()
+            for value in (platform, chat, thread, participant)
+        )  # type: ignore[return-value]
+
+    def current(
+        self, platform: str, chat: str, thread: str, participant: str
+    ) -> int:
+        identity = self._identity(platform, chat, thread, participant)
+        with self._lock:
+            return self._epochs.get(identity, 0)
+
+    def observe_text(
+        self,
+        platform: str,
+        chat: str,
+        thread: str,
+        participant: str,
+        *,
+        text: str,
+    ) -> int:
+        del text
+        return self.current(platform, chat, thread, participant)
+
+    def advance(
+        self,
+        platform: str,
+        chat: str,
+        thread: str,
+        participant: str,
+        *,
+        reason: str,
+    ) -> int:
+        if reason not in self._ALLOWED_REASONS:
+            raise ValueError(f"task epoch requires an explicit boundary: {reason}")
+        identity = self._identity(platform, chat, thread, participant)
+        with self._lock:
+            next_epoch = self._epochs.get(identity, 0) + 1
+            self._epochs[identity] = next_epoch
+            return next_epoch
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).

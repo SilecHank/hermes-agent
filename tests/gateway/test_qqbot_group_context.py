@@ -118,7 +118,7 @@ def test_qq_group_members_share_one_session_without_losing_sender_identity():
     "platform",
     [Platform.QQBOT, Platform.WECOM, Platform.WEIXIN],
 )
-def test_ivd_group_member_can_resolve_clarify_started_by_another_member(platform):
+def test_ivd_group_members_do_not_share_clarification_state(platform):
     runner = _runner(group_sessions_per_user=True)
     first_member = SessionSource(
         platform=platform,
@@ -132,8 +132,12 @@ def test_ivd_group_member_can_resolve_clarify_started_by_another_member(platform
         chat_type="group",
         user_id="member-b",
     )
-    key_a = runner._session_key_for_source(first_member)
-    key_b = runner._session_key_for_source(second_member)
+    key_a = runner._effect_session_key_for_source(
+        first_member, effect="clarification"
+    )
+    key_b = runner._effect_session_key_for_source(
+        second_member, effect="clarification"
+    )
     entry = clarify_gateway.register(
         clarify_id="clarify-qq-group",
         session_key=key_a,
@@ -142,8 +146,9 @@ def test_ivd_group_member_can_resolve_clarify_started_by_another_member(platform
     )
     clarify_gateway.mark_awaiting_text(entry.clarify_id)
     try:
-        assert clarify_gateway.resolve_text_response_for_session(key_b, "2") is True
-        assert entry.response == "数据导入"
+        assert key_a != key_b
+        assert clarify_gateway.resolve_text_response_for_session(key_b, "2") is False
+        assert entry.response is None
     finally:
         clarify_gateway.clear_session(key_a)
 
@@ -181,7 +186,7 @@ async def test_qq_message_dedup_keeps_new_group_messages(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_qq_active_group_routes_other_member_reply_to_clarify_not_busy_handler():
+async def test_qq_active_group_routes_same_member_reply_to_clarify_not_busy_handler():
     from gateway.platforms.base import MessageEvent, MessageType
     from gateway.platforms.qqbot.adapter import QQAdapter
     from tests.gateway.test_qqbot import _make_config
@@ -190,7 +195,11 @@ async def test_qq_active_group_routes_other_member_reply_to_clarify_not_busy_han
     adapter.config.extra["group_sessions_per_user"] = True
     adapter._message_handler = AsyncMock(return_value="")
     adapter._busy_session_handler = AsyncMock(return_value=True)
-    session_key = "agent:main:qqbot:group:group-1"
+    session_key = GatewayRunner._effect_session_key_for_source(
+        _runner(group_sessions_per_user=True),
+        _qq_group_source("group-1", "member-a"),
+        effect="clarification",
+    )
     adapter._active_sessions[session_key] = asyncio.Event()
     entry = clarify_gateway.register(
         clarify_id="clarify-active-qq-group",
@@ -202,7 +211,7 @@ async def test_qq_active_group_routes_other_member_reply_to_clarify_not_busy_han
     event = MessageEvent(
         text="2",
         message_type=MessageType.TEXT,
-        source=_qq_group_source("group-1", "member-b"),
+        source=_qq_group_source("group-1", "member-a"),
         message_id="msg-clarify-answer",
     )
     try:
@@ -371,6 +380,7 @@ async def test_qq_clarify_wait_state_is_immediate_and_independent_of_heartbeat(
     runner._session_db = None
     runner._running_agents = {}
     runner._session_run_generation = {}
+    runner._ivd_prepared_contracts = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config.stt_enabled = False
 
