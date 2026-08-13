@@ -36,6 +36,7 @@ class AfterSalesTurn:
     preflight_decision: str = ""
     preflight_action: str = ""
     preflight_issues: tuple[str, ...] = ()
+    prepared_ivd_turn: Any | None = None
 
     @property
     def blocks_answer_generation(self) -> bool:
@@ -156,9 +157,18 @@ class CriticalAfterSalesValidator:
         "当前正式知识校验暂时不可用，已停止发送未经校验的结论。请稍后重试；"
         "如问题紧急，请提供产品、流程阶段和异常指标后转人工确认。"
     )
+    validation_status: str = "not_applicable"
 
     def __call__(self, answer: str) -> dict[str, Any]:
-        return self.turn.validate(answer, messages=self.messages_provider())
+        try:
+            result = self.turn.validate(answer, messages=self.messages_provider())
+        except Exception:
+            object.__setattr__(self, "validation_status", "error")
+            raise
+        object.__setattr__(
+            self, "validation_status", "pass" if result.get("ok") else "fallback"
+        )
+        return result
 
 
 def _normalize_numeric_claim(value: str) -> str:
@@ -268,6 +278,7 @@ def prepare_after_sales_turn(
     platform: str,
     message: str,
     history: list[dict[str, Any]],
+    prepared_ivd_turn: Any | None = None,
 ) -> AfterSalesTurn | None:
     """Return verified per-turn facts when an enabled workflow card matches."""
 
@@ -335,6 +346,7 @@ def prepare_after_sales_turn(
             preflight_decision=str(fast_result.get("preflight_decision") or ""),
             preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+            prepared_ivd_turn=prepared_ivd_turn,
         )
 
     context = module.render_fact_context(match)
@@ -383,6 +395,7 @@ def prepare_after_sales_turn(
         preflight_decision=str(fast_result.get("preflight_decision") or ""),
         preflight_action=str(fast_result.get("preflight_action") or ""),
         preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+        prepared_ivd_turn=prepared_ivd_turn,
     )
 
 

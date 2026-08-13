@@ -2272,6 +2272,60 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _final_validation_status(agent: Any, turn: Any) -> str:
+    """Read the status recorded by the one final validator invocation."""
+    if turn is None or not getattr(turn, "has_validator", False):
+        return "not_applicable"
+    validator = getattr(agent, "_final_response_validator", None)
+    return str(getattr(validator, "validation_status", "not_applicable"))
+
+
+async def _submit_ivd_receipt_preserving_answer(
+    answer: str | None,
+    receipt: dict[str, Any],
+    *,
+    submitter: Any,
+    timeout_seconds: float,
+) -> str | None:
+    """Attempt one bounded receipt submission without changing the answer."""
+    from gateway.ivd_runtime import submit_bounded_ivd_receipt
+
+    submitted = await submit_bounded_ivd_receipt(
+        receipt,
+        submitter=submitter,
+        timeout_seconds=timeout_seconds,
+    )
+    if not submitted:
+        logger.warning("IVD turn receipt submission failed")
+    return answer
+
+
+def _start_ivd_receipt_submission(
+    answer: str | None,
+    receipt: dict[str, Any],
+    *,
+    submitter: Any,
+    timeout_seconds: float,
+) -> None:
+    """Dispatch receipt I/O away from the synchronous agent worker."""
+    import threading
+
+    def _run() -> None:
+        try:
+            asyncio.run(
+                _submit_ivd_receipt_preserving_answer(
+                    answer,
+                    receipt,
+                    submitter=submitter,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+        except Exception as error:
+            logger.warning("IVD turn receipt submission skipped: %s", error)
+
+    threading.Thread(target=_run, name="ivd-turn-receipt", daemon=True).start()
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -21339,6 +21393,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # platform message.
             _ivd_question_text = str(message or "")
             _after_sales_turn = None
+            from gateway.ivd_runtime import prepare_enabled_ivd_turn
+
+            # A trusted IVD turn establishes its serving contract before any
+            # legacy routing, retrieval, or visible-answer work. Configuration
+            # failures deliberately escape this fail-closed boundary.
+            _prepared_ivd_turn = prepare_enabled_ivd_turn(
+                user_config,
+                platform=platform_key,
+            )
             try:
                 from gateway.after_sales_guard import prepare_after_sales_turn
 
@@ -21347,6 +21410,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     platform=platform_key,
                     message=message,
                     history=history,
+                    prepared_ivd_turn=_prepared_ivd_turn,
                 )
                 if _after_sales_turn is not None:
                     combined_ephemeral = (
@@ -22591,13 +22655,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _tool_names.append(
                                 str((_tool_call.get("function") or {}).get("name") or "")
                             )
-                    _validation_status = "not_applicable"
-                    if _after_sales_turn is not None and _after_sales_turn.has_validator:
-                        _validation = _after_sales_turn.validate(
-                            str(final_response or ""),
-                            messages=_turn_messages,
-                        )
-                        _validation_status = "pass" if _validation.get("ok") else "fallback"
+                    _validation_status = _final_validation_status(
+                        _agent, _after_sales_turn
+                    )
                     _event = build_runtime_event(
                         platform=platform_key,
                         session_key=session_key or session_id or "",
@@ -22655,6 +22715,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     append_runtime_event(_telemetry_path, _event)
                 except Exception as _telemetry_exc:
                     logger.warning("IVD runtime telemetry skipped: %s", _telemetry_exc)
+
+            if _prepared_ivd_turn is not None:
+                try:
+                    from functools import partial
+                    from gateway.ivd_runtime import (
+                        append_ivd_receipt,
+                        submit_bounded_ivd_receipt,
+                    )
+
+                    _trusted_config = _after_sales_config.get("trusted_path") or {}
+                    _receipt_path = _trusted_config.get("receipt_path")
+                    if _receipt_path:
+                        _receipt = {
+                            "package_digest": (
+                                _prepared_ivd_turn.contract.package_digest
+                            ),
+                            "contract_count": _prepared_ivd_turn.contract_count,
+                            "validation_status": _validation_status,
+                            "answer_delivered": bool(final_response),
+                        }
+                        _start_ivd_receipt_submission(
+                            final_response,
+                            _receipt,
+                            submitter=partial(append_ivd_receipt, _receipt_path),
+                            timeout_seconds=float(
+                                _trusted_config.get("receipt_timeout_seconds", 0.5)
+                            ),
+                        )
+                except Exception as _receipt_exc:
+                    logger.warning(
+                        "IVD turn receipt submission skipped: %s", _receipt_exc
+                    )
 
             # Sync session_id immediately after run_conversation(). Compression
             # can rotate before a follow-up model call fails; the failure return

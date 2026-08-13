@@ -2,12 +2,88 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 import os
 import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from gateway.ivd_execution_contract import (
+    PreparedIVDTurn,
+    load_serving_projection,
+    prepare_ivd_turn,
+)
+
+
+def _enabled_ivd_guard(config: dict[str, Any], platform: str) -> dict[str, Any] | None:
+    guard = config.get("after_sales_guard") or {}
+    if not isinstance(guard, dict) or not guard.get("enabled", False):
+        return None
+    platforms = guard.get("platforms") or []
+    if isinstance(platforms, str):
+        platforms = [item.strip() for item in platforms.split(",") if item.strip()]
+    if str(platform or "").strip().lower() not in {
+        str(item or "").strip().lower() for item in platforms
+    }:
+        return None
+    return guard
+
+
+def prepare_enabled_ivd_turn(
+    config: dict[str, Any], *, platform: str
+) -> PreparedIVDTurn | None:
+    """Prepare the trusted serving contract before legacy after-sales work."""
+    guard = _enabled_ivd_guard(config, platform)
+    if guard is None:
+        return None
+    trusted = guard.get("trusted_path") or {}
+    if not isinstance(trusted, dict) or not trusted.get("enabled", False):
+        return None
+    projection = load_serving_projection(
+        trusted.get("manifest_path") or "",
+        expected_package_digest=trusted.get("package_digest"),
+    )
+    return prepare_ivd_turn(projection)
+
+
+async def submit_bounded_ivd_receipt(
+    receipt: dict[str, Any],
+    *,
+    submitter: Any,
+    timeout_seconds: float = 0.5,
+    max_bytes: int = 64 * 1024,
+) -> bool:
+    """Submit one bounded receipt attempt without retrying."""
+    payload = json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > max(1, int(max_bytes)):
+        return False
+
+    async def _submit_once() -> None:
+        if inspect.iscoroutinefunction(submitter):
+            await submitter(receipt)
+        else:
+            result = await asyncio.to_thread(submitter, receipt)
+            if inspect.isawaitable(result):
+                await result
+
+    try:
+        await asyncio.wait_for(_submit_once(), timeout=max(0.01, timeout_seconds))
+        return True
+    except Exception:
+        return False
+
+
+def append_ivd_receipt(path: str | Path, receipt: dict[str, Any]) -> None:
+    """Append a local receipt; callers provide async bounds and error isolation."""
+    target = Path(path).expanduser()
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
+        handle.write("\n")
 
 
 @dataclass(frozen=True)

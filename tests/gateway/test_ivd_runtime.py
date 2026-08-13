@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from gateway.ivd_runtime import (
     COMPLEX_DIAGNOSIS_POLICY,
     DIRECT_POLICY,
@@ -14,7 +16,10 @@ from gateway.ivd_runtime import (
     record_ivd_search_result,
     resolve_enabled_ivd_retrieval,
     resolve_ivd_retrieval_policy,
+    prepare_enabled_ivd_turn,
+    submit_bounded_ivd_receipt,
 )
+from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 
 
 def test_verified_routed_sources_use_direct_profile(tmp_path):
@@ -368,3 +373,62 @@ def test_snapshot_is_inactive_outside_answer_turn():
     assert snapshot["active"] is False
     assert snapshot["profile"] == "inactive"
     assert snapshot["signature_count"] == 0
+
+
+def test_trusted_ivd_path_prepares_one_contract_from_serving_manifest(tmp_path):
+    manifest = tmp_path / "release.json"
+    manifest.write_text(
+        '{"shared_identity":{"package_digest":"' + "b" * 64
+        + '"},"projections":{"serving":{"records":[]}}}',
+        encoding="utf-8",
+    )
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            "trusted_path": {"enabled": True, "manifest_path": str(manifest)},
+        }
+    }
+
+    prepared = prepare_enabled_ivd_turn(config, platform="qqbot")
+
+    assert prepared is not None
+    assert prepared.contract.package_digest == "b" * 64
+    assert prepare_enabled_ivd_turn(config, platform="cli") is None
+
+
+def test_trusted_ivd_path_fails_closed_without_serving_projection(tmp_path):
+    manifest = tmp_path / "release.json"
+    manifest.write_text(
+        '{"shared_identity":{"package_digest":"' + "b" * 64
+        + '"},"projections":{"control":{}}}',
+        encoding="utf-8",
+    )
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            "trusted_path": {"enabled": True, "manifest_path": str(manifest)},
+        }
+    }
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        prepare_enabled_ivd_turn(config, platform="qqbot")
+
+
+@pytest.mark.asyncio
+async def test_bounded_receipt_failure_is_single_attempt_and_keeps_answer():
+    attempts = []
+
+    def fail(_receipt):
+        attempts.append(1)
+        raise OSError("receipt unavailable")
+
+    answer = "原始答案"
+    submitted = await submit_bounded_ivd_receipt(
+        {"answer": answer}, submitter=fail, timeout_seconds=0.2
+    )
+
+    assert submitted is False
+    assert attempts == [1]
+    assert answer == "原始答案"

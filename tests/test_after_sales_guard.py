@@ -418,6 +418,26 @@ def test_facts_matched_turn_uses_critical_validator_policy():
     assert validator.fail_closed is True
     assert "未经校验" in validator.error_fallback
     assert validator("48例和96例均出现文库浓度走低。")
+    assert validator.validation_status == "pass"
+
+
+def test_critical_validator_records_the_existing_final_validation_once():
+    calls = []
+
+    class Turn:
+        def validate(self, answer, *, messages=None):
+            calls.append((answer, messages))
+            return {"ok": True, "reasons": [], "fallback": ""}
+
+    validator = CriticalAfterSalesValidator(
+        turn=Turn(), messages_provider=lambda: [{"role": "assistant"}]
+    )
+
+    result = validator("答案")
+
+    assert result["ok"] is True
+    assert validator.validation_status == "pass"
+    assert len(calls) == 1
 
 
 def test_prepare_after_sales_turn_infers_unit_for_user_supplied_range():
