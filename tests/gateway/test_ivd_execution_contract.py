@@ -169,3 +169,22 @@ def test_loader_replaces_stale_cache_entry_for_same_path(tmp_path):
     assert second is not first
     assert second.package_digest == replacement_digest
     assert len(keys) == 1
+
+
+def test_projection_cache_is_global_lru_bounded_and_keeps_recent_entry(tmp_path):
+    execution_contracts._CACHE.clear()
+    manifests = []
+    for index in range(execution_contracts._CACHE_LIMIT + 2):
+        root = tmp_path / str(index)
+        root.mkdir()
+        manifest = _write_release(root, package_digest=f"{index:064x}")
+        manifests.append(manifest)
+        load_serving_projection(manifest)
+    recent = load_serving_projection(manifests[-2])
+
+    assert len(execution_contracts._CACHE) <= execution_contracts._CACHE_LIMIT
+    assert any(
+        key[0] == str(manifests[-2].resolve())
+        for key in execution_contracts._CACHE
+    )
+    assert recent.package_digest == f"{execution_contracts._CACHE_LIMIT:064x}"

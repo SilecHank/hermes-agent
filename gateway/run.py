@@ -2350,6 +2350,57 @@ def _enqueue_gateway_ivd_receipt(
     return final_response
 
 
+def _append_ivd_turn_telemetry(
+    validation_status: str,
+    *,
+    config: dict[str, Any],
+    platform: str,
+    session_key: str,
+    turn: Any,
+    result: dict[str, Any],
+    question_text: str,
+    retrieval_snapshot: dict[str, object],
+    started_at: float,
+) -> None:
+    from gateway.after_sales_telemetry import (
+        append_runtime_event,
+        build_runtime_event,
+        default_runtime_event_path,
+    )
+
+    turn_messages = result.get("messages") or []
+    recent_turn_messages = []
+    for message_item in reversed(turn_messages):
+        recent_turn_messages.append(message_item)
+        if message_item.get("role") == "user":
+            break
+    tool_names = []
+    for message_item in reversed(recent_turn_messages):
+        for tool_call in message_item.get("tool_calls") or []:
+            tool_names.append(str((tool_call.get("function") or {}).get("name") or ""))
+    event = build_runtime_event(
+        platform=platform,
+        session_key=session_key,
+        product_scope=turn.product_scope if turn is not None else "",
+        product_variant=turn.product_variant if turn is not None else "",
+        route_id=turn.route_id if turn is not None else "standard",
+        route_version=turn.route_version if turn is not None else "",
+        fast_path=bool(turn and turn.fast_path),
+        elapsed_seconds=time.monotonic() - started_at,
+        api_calls=int(result.get("api_calls") or 0),
+        tool_names=tool_names,
+        source_paths=turn.source_paths if turn is not None else (),
+        validation_status=validation_status,
+        question_text=question_text,
+        retrieval_snapshot=retrieval_snapshot,
+        preflight_decision=turn.preflight_decision if turn is not None else "",
+        preflight_action=turn.preflight_action if turn is not None else "",
+        preflight_issues=turn.preflight_issues if turn is not None else (),
+    )
+    path = config.get("runtime_events_path") or default_runtime_event_path()
+    append_runtime_event(path, event)
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -3493,6 +3544,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _gateway_started_at: float = 0.0
     _shutdown_watchdog_done: Optional["threading.Event"] = None
     _platform_lock_takeover_on_start: bool = False
+
+    def _prepare_ivd_lifecycle(
+        self,
+        config: dict[str, Any],
+        *,
+        platform: str,
+        message: str,
+        history: list[dict[str, Any]],
+    ) -> tuple[Any, Any]:
+        return _prepare_gateway_ivd_boundary(
+            config, platform=platform, message=message, history=history
+        )
+
+    def _finalize_ivd_lifecycle(
+        self,
+        *,
+        final_response: str | None,
+        prepared: Any,
+        turn: Any,
+        agent: Any,
+        platform: str,
+        session_key: str,
+        event_id: str,
+        telemetry_action: Callable[[str], None] | None = None,
+    ) -> str | None:
+        validation_status = _final_validation_status(agent, turn)
+        if telemetry_action is not None:
+            try:
+                telemetry_action(validation_status)
+            except Exception as error:
+                logger.warning("IVD runtime telemetry skipped: %s", error)
+        if prepared is None:
+            return final_response
+        try:
+            return _enqueue_gateway_ivd_receipt(
+                final_response,
+                prepared,
+                platform=platform,
+                session_key=session_key,
+                event_id=event_id,
+                validation_status=validation_status,
+            )
+        except Exception as error:
+            logger.warning("IVD turn receipt submission skipped: %s", error)
+            return final_response
     _reconnect_watcher_task: Optional["asyncio.Task"] = None
 
     def __init__(self, config: Optional[GatewayConfig] = None):
@@ -21419,7 +21515,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _after_sales_turn = None
             # Managed IVD establishes its serving contract before legacy
             # routing, retrieval, or visible-answer work. Failures escape.
-            _prepared_ivd_turn, _after_sales_turn = _prepare_gateway_ivd_boundary(
+            _prepared_ivd_turn, _after_sales_turn = self._prepare_ivd_lifecycle(
                 user_config,
                 platform=platform_key,
                 message=message,
@@ -22645,106 +22741,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
-
+            _telemetry_action = None
             if (
                 isinstance(_after_sales_config, dict)
                 and _after_sales_config.get("enabled", False)
                 and platform_key in _after_sales_platforms
             ):
-                try:
-                    from gateway.after_sales_telemetry import (
-                        append_runtime_event,
-                        build_runtime_event,
-                        default_runtime_event_path,
-                    )
+                from functools import partial
 
-                    _turn_messages = result.get("messages") or []
-                    _recent_turn_messages = []
-                    for _message_item in reversed(_turn_messages):
-                        _recent_turn_messages.append(_message_item)
-                        if _message_item.get("role") == "user":
-                            break
-                    _tool_names = []
-                    for _message_item in reversed(_recent_turn_messages):
-                        for _tool_call in _message_item.get("tool_calls") or []:
-                            _tool_names.append(
-                                str((_tool_call.get("function") or {}).get("name") or "")
-                            )
-                    _validation_status = _final_validation_status(
-                        _agent, _after_sales_turn
-                    )
-                    _event = build_runtime_event(
-                        platform=platform_key,
-                        session_key=session_key or session_id or "",
-                        product_scope=(
-                            _after_sales_turn.product_scope
-                            if _after_sales_turn is not None
-                            else ""
-                        ),
-                        product_variant=(
-                            _after_sales_turn.product_variant
-                            if _after_sales_turn is not None
-                            else ""
-                        ),
-                        route_id=(
-                            _after_sales_turn.route_id
-                            if _after_sales_turn is not None
-                            else "standard"
-                        ),
-                        route_version=(
-                            _after_sales_turn.route_version
-                            if _after_sales_turn is not None
-                            else ""
-                        ),
-                        fast_path=bool(_after_sales_turn and _after_sales_turn.fast_path),
-                        elapsed_seconds=time.monotonic() - _ivd_started_at,
-                        api_calls=int(result.get("api_calls") or 0),
-                        tool_names=_tool_names,
-                        source_paths=(
-                            _after_sales_turn.source_paths
-                            if _after_sales_turn is not None
-                            else ()
-                        ),
-                        validation_status=_validation_status,
-                        question_text=_ivd_question_text,
-                        retrieval_snapshot=_ivd_retrieval_snapshot,
-                        preflight_decision=(
-                            _after_sales_turn.preflight_decision
-                            if _after_sales_turn is not None
-                            else ""
-                        ),
-                        preflight_action=(
-                            _after_sales_turn.preflight_action
-                            if _after_sales_turn is not None
-                            else ""
-                        ),
-                        preflight_issues=(
-                            _after_sales_turn.preflight_issues
-                            if _after_sales_turn is not None
-                            else ()
-                        ),
-                    )
-                    _telemetry_path = _after_sales_config.get("runtime_events_path") or (
-                        default_runtime_event_path()
-                    )
-                    append_runtime_event(_telemetry_path, _event)
-                except Exception as _telemetry_exc:
-                    logger.warning("IVD runtime telemetry skipped: %s", _telemetry_exc)
+                _telemetry_action = partial(
+                    _append_ivd_turn_telemetry,
+                    config=_after_sales_config,
+                    platform=platform_key,
+                    session_key=session_key or session_id or "",
+                    turn=_after_sales_turn,
+                    result=result,
+                    question_text=_ivd_question_text,
+                    retrieval_snapshot=_ivd_retrieval_snapshot,
+                    started_at=_ivd_started_at,
+                )
 
             if _prepared_ivd_turn is not None:
-                try:
-                    final_response = _enqueue_gateway_ivd_receipt(
-                        final_response,
-                        _prepared_ivd_turn,
-                        platform=platform_key,
-                        session_key=session_key or session_id or "",
-                        event_id=str(getattr(event, "message_id", None) or session_id or ""),
-                        validation_status=_validation_status,
-                    )
-                except Exception as _receipt_exc:
-                    logger.warning(
-                        "IVD turn receipt submission skipped: %s", _receipt_exc
-                    )
+                final_response = self._finalize_ivd_lifecycle(
+                    final_response=final_response,
+                    prepared=_prepared_ivd_turn,
+                    turn=_after_sales_turn,
+                    agent=_agent,
+                    platform=platform_key,
+                    session_key=session_key or session_id or "",
+                    event_id=str(event_message_id or session_id or ""),
+                    telemetry_action=_telemetry_action,
+                )
 
             # Sync session_id immediately after run_conversation(). Compression
             # can rotate before a follow-up model call fails; the failure return

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -26,7 +27,10 @@ _SERVING_FIELDS = frozenset(
         "receipt_destination",
     }
 )
-_CACHE: dict[tuple[str, int, int, int, int], "ServingProjection"] = {}
+_CACHE_LIMIT = 16
+_CACHE: OrderedDict[
+    tuple[str, int, int, int, int], "ServingProjection"
+] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 
 
@@ -101,6 +105,7 @@ def load_serving_projection(
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
         if cached is not None:
+            _CACHE.move_to_end(key)
             if expected_package_digest and cached.package_digest != expected_package_digest:
                 raise IVDRuntimeConfigurationError("IVD package digest mismatch")
             return cached
@@ -190,6 +195,9 @@ def load_serving_projection(
             if stale_key[0] == key[0] and stale_key != key:
                 del _CACHE[stale_key]
         _CACHE[key] = result
+        _CACHE.move_to_end(key)
+        while len(_CACHE) > _CACHE_LIMIT:
+            _CACHE.popitem(last=False)
         return result
 
 
