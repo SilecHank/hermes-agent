@@ -11,12 +11,17 @@ import pytest
 from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 import gateway.run as gateway_run
 from gateway.config import Platform
+from gateway.config import GatewayConfig
+from gateway.ivd_runtime import preload_enabled_ivd_contracts
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
 
-def _runner():
+def _runner(runtime_config=None):
     runner = GatewayRunner.__new__(GatewayRunner)
+    runner._ivd_prepared_contracts = preload_enabled_ivd_contracts(
+        runtime_config or {}
+    )
     runner.adapters = {}
     runner._ephemeral_system_prompt = ""
     runner._prefill_messages = []
@@ -130,6 +135,7 @@ def test_runner_lifecycle_uses_validation_state_when_telemetry_fails(monkeypatch
 
 def test_runner_boundary_bypasses_non_managed_platform():
     runner = GatewayRunner.__new__(GatewayRunner)
+    runner._ivd_prepared_contracts = {}
 
     prepared, turn = runner._prepare_ivd_lifecycle(
         {"after_sales_guard": {"enabled": True, "platforms": ["qqbot"]}},
@@ -142,25 +148,29 @@ def test_runner_boundary_bypasses_non_managed_platform():
     assert turn is None
 
 
-def test_runner_managed_missing_projection_blocks_before_after_sales_and_agent(
-    monkeypatch,
-):
+def test_runner_lifecycle_uses_only_explicitly_preloaded_contract(monkeypatch):
     runner = GatewayRunner.__new__(GatewayRunner)
+    prepared = object()
+    runner._ivd_prepared_contracts = {"qqbot": prepared}
     calls = []
     monkeypatch.setattr(
         "gateway.after_sales_guard.prepare_after_sales_turn",
-        lambda *args, **kwargs: calls.append("after_sales"),
+        lambda *args, **kwargs: calls.append(kwargs["prepared_ivd_turn"]),
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.load_serving_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("loaded")),
     )
 
-    with pytest.raises(IVDRuntimeConfigurationError):
-        runner._prepare_ivd_lifecycle(
-            {"after_sales_guard": {"enabled": True, "platforms": ["qqbot"]}},
-            platform="qqbot",
-            message="问题",
-            history=[],
-        )
+    selected, _turn = runner._prepare_ivd_lifecycle(
+        {"after_sales_guard": {"enabled": True, "platforms": ["qqbot"]}},
+        platform="qqbot",
+        message="问题",
+        history=[],
+    )
 
-    assert calls == []
+    assert selected is prepared
+    assert calls == [prepared]
 
 
 def test_runner_valid_turn_validator_and_receipt_each_run_once(monkeypatch):
@@ -218,10 +228,17 @@ async def test_real_run_sync_blocks_missing_projection_before_agent(monkeypatch)
     config = {"after_sales_guard": {"enabled": True, "platforms": ["qqbot"]}}
     _install_runtime(monkeypatch, config, Agent)
 
+    adapter_starts = []
+    monkeypatch.setattr(
+        GatewayRunner,
+        "_create_adapter",
+        lambda *_args, **_kwargs: adapter_starts.append(1),
+    )
+
     with pytest.raises(IVDRuntimeConfigurationError):
-        await _runner()._run_agent(
-            "问题", "", [], _source(), "session", session_key="qqbot:123"
-        )
+        GatewayRunner(GatewayConfig())
+
+    assert adapter_starts == []
 
 
 @pytest.mark.asyncio
@@ -278,7 +295,7 @@ async def test_real_run_sync_telemetry_failure_keeps_pass_receipt_and_answer(
         lambda destination, receipt: receipts.append(receipt) or True,
     )
 
-    result = await _runner()._run_agent(
+    result = await _runner(config)._run_agent(
         "问题", "", [], _source(), "session", session_key="qqbot:123"
     )
 
@@ -334,7 +351,7 @@ async def test_real_run_sync_records_preflight_blocked_receipt_before_early_retu
         lambda destination, receipt: receipts.append(receipt) or enqueue_result,
     )
 
-    result = await _runner()._run_agent(
+    result = await _runner(config)._run_agent(
         "候选结论可以回复吗", "", [], _source(), "session",
         session_key="qqbot:123", event_message_id="message-9",
     )
@@ -345,3 +362,96 @@ async def test_real_run_sync_records_preflight_blocked_receipt_before_early_retu
     assert len(receipts) == 1
     assert receipts[0]["validation_status"] == "preflight_blocked"
     assert receipts[0]["event_id"] == "message-9"
+
+
+@pytest.mark.asyncio
+async def test_valid_init_reads_once_and_two_real_turns_reuse_contract_without_io(
+    monkeypatch, tmp_path
+):
+    projection_path = _write_projection(tmp_path)
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            "serving_projection_path": str(projection_path),
+        }
+    }
+    _install_runtime(monkeypatch, config, object)
+    real_read_text = gateway_run.Path.read_text
+    reads = []
+
+    def counted_read(path, *args, **kwargs):
+        if path == projection_path:
+            reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(gateway_run.Path, "read_text", counted_read)
+    runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / "sessions"))
+    assert len(reads) == 1
+
+    identities = []
+    turn = SimpleNamespace(
+        context="",
+        facts={},
+        blocks_answer_generation=True,
+        has_validator=True,
+        product_scope="",
+        product_variant="",
+        route_id="blocked",
+        route_version="1",
+        fast_path=False,
+        source_paths=(),
+        preflight_decision="block",
+        preflight_action="stop_before_answer_generation",
+        preflight_issues=("pending_source",),
+    )
+
+    def prepare_turn(*_args, prepared_ivd_turn=None, **_kwargs):
+        identities.append(prepared_ivd_turn)
+        return turn
+
+    monkeypatch.setattr(
+        "gateway.after_sales_guard.prepare_after_sales_turn", prepare_turn
+    )
+    real_stat = gateway_run.Path.stat
+
+    def reject_projection_stat(path, *args, **kwargs):
+        if path == projection_path:
+            raise AssertionError("projection stat")
+        return real_stat(path, *args, **kwargs)
+
+    def reject_projection_read(path, *args, **kwargs):
+        if path == projection_path:
+            raise AssertionError("projection read")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr("pathlib.Path.stat", reject_projection_stat)
+    monkeypatch.setattr("pathlib.Path.read_text", reject_projection_read)
+
+    for event_id in ("message-1", "message-2"):
+        result = await runner._run_agent(
+            "问题", "", [], _source(), "session",
+            session_key="qqbot:123", event_message_id=event_id,
+        )
+        assert result["preflight_blocked"] is True
+
+    assert len(identities) == 2
+    assert identities[0] is identities[1]
+
+
+@pytest.mark.parametrize(
+    "runtime_config",
+    [{}, {"after_sales_guard": {"enabled": False, "platforms": ["qqbot"]}}],
+)
+def test_runner_init_skips_projection_when_ivd_disabled(
+    monkeypatch, tmp_path, runtime_config
+):
+    monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: runtime_config)
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.load_serving_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("loaded")),
+    )
+
+    runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / "sessions"))
+
+    assert not runner._ivd_prepared_contracts

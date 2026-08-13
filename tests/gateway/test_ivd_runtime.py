@@ -18,6 +18,7 @@ from gateway.ivd_runtime import (
     resolve_ivd_retrieval_policy,
     prepare_enabled_ivd_turn,
     enqueue_ivd_receipt,
+    preload_enabled_ivd_contracts,
 )
 from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 
@@ -457,6 +458,61 @@ def test_managed_ivd_platform_requires_serving_projection_configuration(guard):
     assert prepare_enabled_ivd_turn(config, platform="cli") is None
 
 
+def test_preload_freezes_platform_mapping_and_reuses_one_prepared_turn(tmp_path):
+    import hashlib
+    import json
+
+    manifest = tmp_path / "release.json"
+    serving = {
+        "serving_package_path": str(tmp_path / "serving-package"),
+        "serving_agent_path": str(tmp_path / "serving-agent"),
+        "source_vault_path": str(tmp_path / "source-vault"),
+        "dispatch_policy_path": str(tmp_path / "serving-package/dispatch.json"),
+        "render_policy_path": str(tmp_path / "serving-package/render.json"),
+        "context_budget": 8,
+        "retrieval_budget": 2,
+        "skill_allowlist": [],
+        "receipt_destination": str(tmp_path / "observability/receipts.jsonl"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest.write_text(json.dumps({
+        "shared_identity": {
+            "package_digest": "d" * 64,
+            "execution_contract_schema_version": "1",
+            "turn_receipt_schema_version": "1",
+        },
+        "projections": {"serving": serving},
+        "projection_digests": {"serving": digest},
+    }), encoding="utf-8")
+
+    prepared = preload_enabled_ivd_contracts({
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot", "telegram"],
+            "serving_projection_path": str(manifest),
+        }
+    })
+
+    assert prepared["qqbot"] is prepared["telegram"]
+    with pytest.raises(TypeError):
+        prepared["cli"] = prepared["qqbot"]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{}, {"after_sales_guard": {"enabled": False, "platforms": ["qqbot"]}}],
+)
+def test_preload_skips_disabled_or_unmanaged_guard(monkeypatch, config):
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.load_serving_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("loaded")),
+    )
+
+    assert not preload_enabled_ivd_contracts(config)
+
+
 def test_oversized_receipt_is_dropped_before_writer_queue():
     submitted = enqueue_ivd_receipt(
         "/tmp/unused-receipt", {"turn_id": "x", "extra": "z" * 5000}
@@ -481,3 +537,23 @@ def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch, tmp_pa
     runtime._RECEIPT_QUEUE.join()
 
     assert attempts == [1]
+
+
+def test_append_receipt_retries_partial_os_write(monkeypatch, tmp_path):
+    import gateway.ivd_runtime as runtime
+
+    written = bytearray()
+    monkeypatch.setattr(runtime.os, "open", lambda *_args: 17)
+    monkeypatch.setattr(runtime.os, "close", lambda _fd: None)
+
+    def partial_write(_fd, payload):
+        count = min(3, len(payload))
+        written.extend(payload[:count])
+        return count
+
+    monkeypatch.setattr(runtime.os, "write", partial_write)
+    payload = b'{"turn_id":"one"}\n'
+
+    runtime._append_ivd_receipt(str(tmp_path / "receipt.jsonl"), payload)
+
+    assert bytes(written) == payload

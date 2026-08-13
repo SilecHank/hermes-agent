@@ -10,7 +10,8 @@ import threading
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from gateway.ivd_execution_contract import (
     PreparedIVDTurn,
@@ -54,6 +55,42 @@ def prepare_enabled_ivd_turn(
     return prepare_ivd_turn(projection)
 
 
+def preload_enabled_ivd_contracts(
+    config: dict[str, Any],
+) -> Mapping[str, PreparedIVDTurn]:
+    """Load the release-pinned IVD contract once during gateway startup."""
+    guard = config.get("after_sales_guard") or {}
+    if not isinstance(guard, dict) or not guard.get("enabled", False):
+        return MappingProxyType({})
+    platforms = guard.get("platforms") or []
+    if isinstance(platforms, str):
+        platforms = [item.strip() for item in platforms.split(",") if item.strip()]
+    normalized_platforms = tuple(
+        dict.fromkeys(
+            str(item or "").strip().lower()
+            for item in platforms
+            if str(item or "").strip()
+        )
+    )
+    if not normalized_platforms:
+        return MappingProxyType({})
+    path = guard.get("serving_projection_path")
+    if not isinstance(path, str) or not path.strip():
+        from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+        raise IVDRuntimeConfigurationError(
+            "managed IVD platform requires serving_projection_path"
+        )
+    projection = load_serving_projection(
+        path,
+        expected_package_digest=guard.get("package_digest"),
+    )
+    prepared = prepare_ivd_turn(projection)
+    return MappingProxyType(
+        {platform: prepared for platform in normalized_platforms}
+    )
+
+
 _MAX_RECEIPT_BYTES = 4096
 _RECEIPT_QUEUE: queue.Queue[tuple[str, bytes]] | None = queue.Queue(maxsize=256)
 _RECEIPT_WORKER_STARTED = False
@@ -65,7 +102,12 @@ def _append_ivd_receipt(path: str, payload: bytes) -> None:
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
-        os.write(fd, payload)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("IVD receipt write made no progress")
+            remaining = remaining[written:]
     finally:
         os.close(fd)
 

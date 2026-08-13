@@ -3553,9 +3553,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         message: str,
         history: list[dict[str, Any]],
     ) -> tuple[Any, Any]:
-        return _prepare_gateway_ivd_boundary(
-            config, platform=platform, message=message, history=history
+        from gateway.after_sales_guard import prepare_after_sales_turn
+
+        normalized_platform = str(platform or "").strip().lower()
+        prepared = self._ivd_prepared_contracts.get(normalized_platform)
+        turn = prepare_after_sales_turn(
+            config,
+            platform=normalized_platform,
+            message=message,
+            history=history,
+            prepared_ivd_turn=prepared,
         )
+        return prepared, turn
 
     def _finalize_ivd_lifecycle(
         self,
@@ -3598,6 +3607,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # secondary profiles do (#64674). Explicit config= injection (tests)
         # is left untouched.
         self.config = config if config is not None else load_gateway_config_for_runner()
+        from gateway.ivd_runtime import preload_enabled_ivd_contracts
+
+        self._ivd_prepared_contracts = preload_enabled_ivd_contracts(
+            _load_gateway_runtime_config()
+        )
         # Mark the process as a profile multiplexer when configured. This flips
         # agent.secret_scope.get_secret() to fail-closed on any unscoped
         # credential read, so a missed migration crashes loudly instead of

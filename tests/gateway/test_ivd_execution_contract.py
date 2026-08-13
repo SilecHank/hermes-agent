@@ -126,6 +126,14 @@ def test_loader_rejects_projection_outside_release_schema(tmp_path, mutation):
         load_serving_projection(manifest)
 
 
+def test_loader_rejects_receipt_destination_outside_release_observability(tmp_path):
+    serving = _serving_projection(tmp_path)
+    serving["receipt_destination"] = str(tmp_path / "elsewhere/receipts.jsonl")
+
+    with pytest.raises(IVDRuntimeConfigurationError):
+        load_serving_projection(_write_release(tmp_path, serving=serving))
+
+
 def test_loader_reuses_cached_projection_without_reopening_same_file(tmp_path):
     manifest = _write_release(tmp_path)
     first = load_serving_projection(manifest)

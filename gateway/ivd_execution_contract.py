@@ -167,6 +167,13 @@ def load_serving_projection(
             "render_policy_path"
         ].startswith(package_prefix):
             raise IVDRuntimeConfigurationError("serving policy path escapes package")
+        release_root = Path(serving["serving_package_path"]).parent.resolve()
+        observability_root = (release_root / "observability").resolve()
+        receipt_destination = Path(serving["receipt_destination"]).resolve()
+        if not receipt_destination.is_relative_to(observability_root):
+            raise IVDRuntimeConfigurationError(
+                "receipt destination must be inside release observability"
+            )
         for field in ("context_budget", "retrieval_budget"):
             value = serving.get(field)
             if type(value) is not int or value < 1:
