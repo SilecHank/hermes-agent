@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -127,9 +129,7 @@ class IVDDispatcherTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "serving-package"
         vocabulary = self.root / "indexes" / "dispatch-vocabulary-v1.json"
         vocabulary.parent.mkdir(parents=True)
-        vocabulary.write_text(
-            json.dumps(_policy(), ensure_ascii=False), encoding="utf-8"
-        )
+        self._write_vocabulary(_policy())
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -248,6 +248,62 @@ class IVDDispatcherTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "dispatch vocabulary"):
             IVDDispatcher(self.root)
+
+    def test_missing_package_manifest_fails_closed(self):
+        (self.root / "package-manifest.json").unlink()
+
+        with self.assertRaisesRegex(ValueError, "package manifest"):
+            IVDDispatcher(self.root)
+
+    def test_tampered_vocabulary_digest_fails_closed(self):
+        vocabulary = self.root / "indexes" / "dispatch-vocabulary-v1.json"
+        vocabulary.write_text(vocabulary.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "digest"):
+            IVDDispatcher(self.root)
+
+    def test_manifest_symlink_fails_closed(self):
+        manifest = self.root / "package-manifest.json"
+        target = self.root / "outside-manifest.json"
+        target.write_bytes(manifest.read_bytes())
+        manifest.unlink()
+        os.symlink(target, manifest)
+
+        with self.assertRaisesRegex(ValueError, "package manifest"):
+            IVDDispatcher(self.root)
+
+    def test_vocabulary_must_be_declared_in_manifest_members(self):
+        manifest = self.root / "package-manifest.json"
+        manifest.write_text(
+            json.dumps({"schema_version": 1, "members": {}}), encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ValueError, "member"):
+            IVDDispatcher(self.root)
+
+    def test_non_chinese_product_clarification_fails_closed(self):
+        policy = _policy()
+        policy["clarifications"] = {"product_line": "Confirm product name."}
+        self._write_vocabulary(policy)
+
+        with self.assertRaisesRegex(ValueError, "Chinese"):
+            IVDDispatcher(self.root)
+
+    def _write_vocabulary(self, policy: dict[str, object]) -> None:
+        vocabulary = self.root / "indexes" / "dispatch-vocabulary-v1.json"
+        vocabulary.write_text(
+            json.dumps(policy, ensure_ascii=False), encoding="utf-8"
+        )
+        digest = hashlib.sha256(vocabulary.read_bytes()).hexdigest()
+        (self.root / "package-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "members": {"indexes/dispatch-vocabulary-v1.json": digest},
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 class _RecordingEngine:

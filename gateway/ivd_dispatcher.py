@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -11,6 +14,9 @@ from typing import Any, Mapping, Protocol
 
 
 _VOCABULARY_MEMBER = "indexes/dispatch-vocabulary-v1.json"
+_MANIFEST_MEMBER = "package-manifest.json"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _RESOLUTION_ORDER = (
     "operation_intent",
     "product_identity",
@@ -112,14 +118,31 @@ class IVDDispatcher:
         root = Path(serving_package)
         if not root.is_dir() or root.is_symlink():
             raise ValueError("dispatch vocabulary package invalid")
-        pure = PurePosixPath(_VOCABULARY_MEMBER)
-        member = root.joinpath(*pure.parts)
-        ancestors = [root.joinpath(*pure.parts[:index]) for index in range(1, len(pure.parts))]
-        if member.is_symlink() or any(path.is_symlink() for path in ancestors) or not member.is_file():
-            raise ValueError("dispatch vocabulary member invalid")
+
+        manifest_bytes = self._read_regular_member(
+            root, _MANIFEST_MEMBER, "package manifest"
+        )
         try:
-            policy = json.loads(member.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("package manifest invalid") from error
+        if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
+            raise ValueError("package manifest invalid")
+        members = manifest.get("members")
+        if not isinstance(members, Mapping) or _VOCABULARY_MEMBER not in members:
+            raise ValueError("dispatch vocabulary member not declared")
+        expected_digest = members[_VOCABULARY_MEMBER]
+        if not isinstance(expected_digest, str) or not _SHA256_RE.fullmatch(expected_digest):
+            raise ValueError("dispatch vocabulary digest invalid")
+
+        vocabulary_bytes = self._read_regular_member(
+            root, _VOCABULARY_MEMBER, "dispatch vocabulary member"
+        )
+        if hashlib.sha256(vocabulary_bytes).hexdigest() != expected_digest:
+            raise ValueError("dispatch vocabulary digest mismatch")
+        try:
+            policy = json.loads(vocabulary_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
             raise ValueError("dispatch vocabulary invalid") from error
         if not isinstance(policy, Mapping):
             raise ValueError("dispatch vocabulary invalid")
@@ -139,10 +162,43 @@ class IVDDispatcher:
         if not isinstance(clarifications, Mapping):
             raise ValueError("dispatch vocabulary clarifications invalid")
         self._product_question = str(clarifications.get("product_line") or "").strip()
-        if not self._product_question:
-            raise ValueError("dispatch vocabulary product clarification missing")
+        if not self._product_question or not _CJK_RE.search(self._product_question):
+            raise ValueError("dispatch vocabulary product clarification must be Chinese")
         self._products = self._validate_products(policy.get("product_aliases"))
         self._stages = self._validate_stages(policy.get("workflow_stages"))
+
+    @staticmethod
+    def _read_regular_member(root: Path, relative: str, label: str) -> bytes:
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ValueError(f"{label} path invalid")
+        target = root.joinpath(*pure.parts)
+        ancestors = [
+            root.joinpath(*pure.parts[:index])
+            for index in range(1, len(pure.parts))
+        ]
+        if any(path.is_symlink() for path in ancestors):
+            raise ValueError(f"{label} path invalid")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(target, flags)
+        except OSError as error:
+            raise ValueError(f"{label} invalid") from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"{label} invalid")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        except OSError as error:
+            raise ValueError(f"{label} invalid") from error
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _validate_products(value: object) -> tuple[dict[str, object], ...]:
