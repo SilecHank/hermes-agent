@@ -153,18 +153,57 @@ class IVDKnowledgeEngine:
     def _hit(row: sqlite3.Row) -> SimpleNamespace:
         return SimpleNamespace(**dict(row))
 
-    def _exact_registry(self, question: str, product_line: str) -> SimpleNamespace | None:
+    @staticmethod
+    def _registry_kinds(knowledge_type: str) -> tuple[str, ...]:
+        return {
+            "parameter": ("parameter",),
+            "process": ("process_fact",),
+            "operation": ("process_fact",),
+            "file": ("file",),
+            "report_rule": ("report_rule",),
+            "principle": ("evidence",),
+            "evidence": ("evidence",),
+        }.get(knowledge_type, ())
+
+    def _exact_registry(
+        self,
+        question: str,
+        product_line: str,
+        product_variant: str | None,
+        workflow_stage: str,
+        knowledge_type: str,
+    ) -> SimpleNamespace | None:
         clauses = ["x.alias=?", "a.effective_status='active'"]
         values: list[object] = [question]
         if product_line:
             clauses.append("p.product_line=?")
             values.append(product_line)
+        if product_variant is not None:
+            clauses.append("p.product_variant=?")
+            values.append(product_variant)
+        if workflow_stage:
+            clauses.append("e.workflow_stage=?")
+            values.append(workflow_stage)
+        if knowledge_type:
+            kinds = self._registry_kinds(knowledge_type)
+            if not kinds:
+                return None
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"e.knowledge_kind IN ({placeholders})")
+            values.extend(kinds)
         rows = self._database.execute(
             self._projection() + " WHERE " + " AND ".join(clauses) + " LIMIT 2", values
         ).fetchall()
         return self._hit(rows[0]) if len(rows) == 1 else None
 
-    def _fts_registry(self, question: str, product_line: str) -> SimpleNamespace | None:
+    def _fts_registry(
+        self,
+        question: str,
+        product_line: str,
+        product_variant: str | None,
+        workflow_stage: str,
+        knowledge_type: str,
+    ) -> SimpleNamespace | None:
         tokens = re.findall(r"[^\W_]+", question, flags=re.UNICODE)
         if not tokens or len(tokens) > 16 or len(question) > 256:
             return None
@@ -174,6 +213,19 @@ class IVDKnowledgeEngine:
         if product_line:
             clauses.append("p.product_line=?")
             values.append(product_line)
+        if product_variant is not None:
+            clauses.append("p.product_variant=?")
+            values.append(product_variant)
+        if workflow_stage:
+            clauses.append("e.workflow_stage=?")
+            values.append(workflow_stage)
+        if knowledge_type:
+            kinds = self._registry_kinds(knowledge_type)
+            if not kinds:
+                return None
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"e.knowledge_kind IN ({placeholders})")
+            values.extend(kinds)
         rows = self._database.execute(
             """
             SELECT DISTINCT x.alias, x.assertion_id
@@ -186,9 +238,22 @@ class IVDKnowledgeEngine:
         ).fetchall()
         if len(rows) != 1:
             return None
-        return self._exact_registry(str(rows[0]["alias"]), product_line)
+        return self._exact_registry(
+            str(rows[0]["alias"]),
+            product_line,
+            product_variant,
+            workflow_stage,
+            knowledge_type,
+        )
 
-    def _diagnostic(self, question: str, product_line: str, evidence: Mapping[str, object]) -> dict[str, object] | None:
+    def _diagnostic(
+        self,
+        question: str,
+        product_line: str,
+        product_variant: str | None,
+        workflow_stage: str,
+        evidence: Mapping[str, object],
+    ) -> dict[str, object] | None:
         service = self._graph.get("service_graph")
         patterns = service.get("patterns") if isinstance(service, Mapping) else None
         if not isinstance(patterns, list):
@@ -201,6 +266,14 @@ class IVDKnowledgeEngine:
             if _normalize(question).casefold() not in aliases:
                 continue
             if product_line and str(pattern.get("product_line") or "") != product_line:
+                continue
+            if (
+                product_variant is not None
+                and str(pattern.get("product_variant") or "") != product_variant
+            ):
+                continue
+            pattern_stage = str(pattern.get("workflow_stage") or "")
+            if workflow_stage and pattern_stage and pattern_stage != workflow_stage:
                 continue
             matches.append(pattern)
         if len(matches) != 1:
@@ -232,14 +305,26 @@ class IVDKnowledgeEngine:
         *,
         question: str,
         product_line: str = "",
+        product_variant: str | None = None,
+        workflow_stage: str = "",
+        knowledge_type: str = "",
+        answer_shape: str = "",
         evidence: Mapping[str, object] | None = None,
         allow_index_transaction: bool = False,
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
-        hit = self._exact_registry(normalized, product_line)
+        hit = self._exact_registry(
+            normalized,
+            product_line,
+            product_variant,
+            workflow_stage,
+            knowledge_type,
+        )
         if hit is not None:
             rendered = self._renderer.render_registry_hit(hit)
+            if answer_shape and rendered.answer_shape != answer_shape:
+                raise PackageIntegrityError("answer_shape_mismatch")
             receipt = {
                 "hit": hit, "model_calls": 0, "index_transactions": 0,
                 "filesystem_scans": 0,
@@ -261,9 +346,21 @@ class IVDKnowledgeEngine:
                 rendered.source, (rendered.source,) if rendered.source else (),
             )
 
-        diagnostic = self._diagnostic(normalized, product_line, evidence)
+        diagnostic = (
+            self._diagnostic(
+                normalized,
+                product_line,
+                product_variant,
+                workflow_stage,
+                evidence,
+            )
+            if not knowledge_type or knowledge_type == "diagnostic_pattern"
+            else None
+        )
         if diagnostic is not None:
             rendered = self._renderer.render_diagnostic(diagnostic)
+            if answer_shape and rendered.answer_shape != answer_shape:
+                raise PackageIntegrityError("answer_shape_mismatch")
             decision = validate_final_response(
                 text=rendered.text,
                 contract={
@@ -293,12 +390,20 @@ class IVDKnowledgeEngine:
             )
 
         fuzzy = (
-            self._fts_registry(normalized, product_line)
+            self._fts_registry(
+                normalized,
+                product_line,
+                product_variant,
+                workflow_stage,
+                knowledge_type,
+            )
             if allow_index_transaction
             else None
         )
         if fuzzy is not None:
             rendered = self._renderer.render_registry_hit(fuzzy)
+            if answer_shape and rendered.answer_shape != answer_shape:
+                raise PackageIntegrityError("answer_shape_mismatch")
             decision = validate_final_response(
                 text=rendered.text,
                 contract={

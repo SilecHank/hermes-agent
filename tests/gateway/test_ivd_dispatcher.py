@@ -10,6 +10,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from gateway.ivd_dispatcher import DecisionEnvelope, IVDDispatcher
 
@@ -239,6 +240,10 @@ class IVDDispatcherTests(unittest.TestCase):
         self.assertEqual("answer", outcome.result.text)
         self.assertEqual(1, engine.calls)
         self.assertEqual("NIFTY", engine.arguments["product_line"])
+        self.assertEqual("标准版", engine.arguments["product_variant"])
+        self.assertEqual("extraction", engine.arguments["workflow_stage"])
+        self.assertEqual("parameter", engine.arguments["knowledge_type"])
+        self.assertEqual("scalar", engine.arguments["answer_shape"])
         self.assertEqual({"same_batch": True}, engine.arguments["evidence"])
         self.assertFalse(engine.arguments["allow_index_transaction"])
 
@@ -281,6 +286,70 @@ class IVDDispatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "member"):
             IVDDispatcher(self.root)
 
+    def test_manifest_package_digest_must_bind_canonical_members(self):
+        manifest_path = self.root / "package-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["package_digest"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "package digest"):
+            IVDDispatcher(self.root)
+
+    def test_indexes_replacement_after_path_check_fails_closed(self):
+        indexes = self.root / "indexes"
+        retained = self.root / "retained-indexes"
+        outside = self.root.parent / "outside-indexes"
+        outside.mkdir()
+        vocabulary = indexes / "dispatch-vocabulary-v1.json"
+        (outside / vocabulary.name).write_bytes(vocabulary.read_bytes())
+        original_open = os.open
+        swapped = False
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            value = os.fspath(path)
+            if not swapped and (
+                value == "indexes" or value.endswith("dispatch-vocabulary-v1.json")
+            ):
+                indexes.rename(retained)
+                indexes.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        with patch("gateway.ivd_dispatcher.os.open", side_effect=racing_open):
+            with self.assertRaisesRegex(ValueError, "dispatch vocabulary"):
+                IVDDispatcher(self.root)
+        self.assertTrue(swapped)
+
+    def test_indexes_replacement_after_directory_open_cannot_redirect_member(self):
+        indexes = self.root / "indexes"
+        retained = self.root / "retained-indexes"
+        outside = self.root.parent / "outside-indexes"
+        outside.mkdir()
+        hostile = _policy()
+        hostile["clarifications"] = {"product_line": "Confirm product name."}
+        (outside / "dispatch-vocabulary-v1.json").write_text(
+            json.dumps(hostile), encoding="utf-8"
+        )
+        original_open = os.open
+        swapped = False
+
+        def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            value = os.fspath(path)
+            if not swapped and value == "dispatch-vocabulary-v1.json":
+                indexes.rename(retained)
+                indexes.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        with patch("gateway.ivd_dispatcher.os.open", side_effect=racing_open):
+            envelope = IVDDispatcher(self.root).dispatch("无创提取需要多少血浆？")
+
+        self.assertTrue(swapped)
+        self.assertEqual("NIFTY", envelope.product_line)
+        self.assertEqual("scalar", envelope.answer_shape)
+
     def test_non_chinese_product_clarification_fails_closed(self):
         policy = _policy()
         policy["clarifications"] = {"product_line": "Confirm product name."}
@@ -295,11 +364,25 @@ class IVDDispatcherTests(unittest.TestCase):
             json.dumps(policy, ensure_ascii=False), encoding="utf-8"
         )
         digest = hashlib.sha256(vocabulary.read_bytes()).hexdigest()
+        members = {"indexes/dispatch-vocabulary-v1.json": digest}
+        package_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "algorithm": "sha256-canonical-members-v1",
+                    "members": members,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         (self.root / "package-manifest.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
-                    "members": {"indexes/dispatch-vocabulary-v1.json": digest},
+                    "package_digest": package_digest,
+                    "member_digest_algorithm": "sha256-canonical-members-v1",
+                    "members": members,
                 }
             ),
             encoding="utf-8",

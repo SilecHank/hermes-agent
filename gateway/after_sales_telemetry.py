@@ -6,8 +6,10 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,7 +50,9 @@ class ShadowReplayStats:
     submitted: int
     completed: int
     failed: int
+    cancelled: int
     rejected: int
+    recording_dropped: int
 
 
 def default_runtime_event_path() -> Path:
@@ -264,7 +268,19 @@ class ShadowReplaySubmitter:
         self._submitted = 0
         self._completed = 0
         self._failed = 0
+        self._cancelled = 0
         self._rejected = 0
+        self._recording_dropped = 0
+        self._record_pending = 0
+        self._record_queue: queue.Queue[
+            tuple[str, Mapping[str, object] | None, str]
+        ] = queue.Queue(maxsize=max(1, worker_count + queued_count))
+        self._record_stop = threading.Event()
+        self._record_thread = threading.Thread(
+            target=self._record_events,
+            name="hermes-shadow-replay-recorder",
+        )
+        self._record_thread.start()
 
     @property
     def stats(self) -> ShadowReplayStats:
@@ -273,7 +289,9 @@ class ShadowReplaySubmitter:
                 submitted=self._submitted,
                 completed=self._completed,
                 failed=self._failed,
+                cancelled=self._cancelled,
                 rejected=self._rejected,
+                recording_dropped=self._recording_dropped,
             )
 
     def submit(
@@ -303,20 +321,18 @@ class ShadowReplaySubmitter:
                 except Exception as exc:
                     self._capacity.release()
                     self._active_tasks -= 1
-                    self._failed += 1
-                    self._record_safely(
-                        build_shadow_replay_event(
-                            outcome="submission_failed",
-                            comparison_metadata=comparison_metadata,
-                            error_type=type(exc).__name__,
-                        )
+                    self._rejected += 1
+                    self._enqueue_record(
+                        "submission_failed",
+                        comparison_metadata,
+                        type(exc).__name__,
                     )
                 else:
                     self._submitted += 1
                     future.add_done_callback(self._finish_future)
 
         if rejection:
-            self._record_safely(build_shadow_replay_event(outcome=rejection))
+            self._enqueue_record(rejection)
         return served_answer
 
     def _run_replay(
@@ -329,12 +345,10 @@ class ShadowReplaySubmitter:
         except Exception as exc:
             with self._condition:
                 self._failed += 1
-            self._record_safely(
-                build_shadow_replay_event(
-                    outcome="execution_failed",
-                    comparison_metadata=comparison_metadata,
-                    error_type=type(exc).__name__,
-                )
+            self._enqueue_record(
+                "execution_failed",
+                comparison_metadata,
+                type(exc).__name__,
             )
         else:
             with self._condition:
@@ -342,42 +356,90 @@ class ShadowReplaySubmitter:
             completed_metadata = dict(comparison_metadata or {})
             if isinstance(replay_result, Mapping):
                 for key, value in replay_result.items():
-                    completed_metadata.setdefault(str(key), value)
-            self._record_safely(
-                build_shadow_replay_event(
-                    outcome="completed",
-                    comparison_metadata=completed_metadata,
-                )
-            )
+                    completed_metadata[str(key)] = value
+            self._enqueue_record("completed", completed_metadata)
 
     def _finish_future(self, future: Future[None]) -> None:
-        del future
         self._capacity.release()
         with self._condition:
+            if future.cancelled():
+                self._cancelled += 1
             self._active_tasks -= 1
+            should_stop_recorder = self._closed and self._active_tasks == 0
             self._condition.notify_all()
+        if future.cancelled():
+            self._enqueue_record("cancelled")
+        if should_stop_recorder:
+            self._record_stop.set()
 
-    def _record_safely(self, event: dict[str, object]) -> None:
+    def _enqueue_record(
+        self,
+        outcome: str,
+        comparison_metadata: Mapping[str, object] | None = None,
+        error_type: str = "",
+    ) -> None:
+        with self._condition:
+            if not self._record_thread.is_alive():
+                self._recording_dropped += 1
+                return
+            self._record_pending += 1
         try:
-            self._recorder(event)
-        except Exception:
-            pass
+            self._record_queue.put_nowait(
+                (outcome, comparison_metadata, error_type)
+            )
+        except queue.Full:
+            with self._condition:
+                self._record_pending -= 1
+                self._recording_dropped += 1
+                self._condition.notify_all()
+
+    def _record_events(self) -> None:
+        while not self._record_stop.is_set() or self._record_pending:
+            try:
+                outcome, comparison_metadata, error_type = self._record_queue.get(
+                    timeout=0.05
+                )
+            except queue.Empty:
+                continue
+            try:
+                event = build_shadow_replay_event(
+                    outcome=outcome,
+                    comparison_metadata=comparison_metadata,
+                    error_type=error_type,
+                )
+                self._recorder(event)
+            except Exception:
+                pass
+            finally:
+                self._record_queue.task_done()
+                with self._condition:
+                    self._record_pending -= 1
+                    self._condition.notify_all()
 
     def wait_for_idle(self, timeout: float | None = None) -> bool:
-        """Wait until currently accepted replay work finishes."""
+        """Wait until accepted replay and recording work finishes."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             return self._condition.wait_for(
-                lambda: self._active_tasks == 0,
-                timeout=timeout,
+                lambda: self._active_tasks == 0 and self._record_pending == 0,
+                timeout=(
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                ),
             )
 
     def close(self, *, wait_for_tasks: bool = True) -> None:
         """Reject future submissions and shut down all executor threads."""
         with self._condition:
-            if self._closed:
-                return
             self._closed = True
+            should_stop_recorder = self._active_tasks == 0
         self._executor.shutdown(wait=wait_for_tasks, cancel_futures=not wait_for_tasks)
+        if should_stop_recorder:
+            self._record_stop.set()
+        if wait_for_tasks:
+            self._record_stop.set()
+            self._record_thread.join()
 
     def __enter__(self) -> ShadowReplaySubmitter:
         return self

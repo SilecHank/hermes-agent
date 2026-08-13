@@ -116,12 +116,24 @@ class IVDDispatcher:
 
     def __init__(self, serving_package: str | Path) -> None:
         root = Path(serving_package)
-        if not root.is_dir() or root.is_symlink():
-            raise ValueError("dispatch vocabulary package invalid")
-
-        manifest_bytes = self._read_regular_member(
-            root, _MANIFEST_MEMBER, "package manifest"
-        )
+        root_fd = self._open_directory_tree(root, "dispatch vocabulary package")
+        try:
+            manifest_bytes = self._read_regular_at(
+                root_fd, _MANIFEST_MEMBER, "package manifest"
+            )
+            indexes_fd = self._open_directory_at(
+                root_fd, "indexes", "dispatch vocabulary indexes"
+            )
+            try:
+                vocabulary_bytes = self._read_regular_at(
+                    indexes_fd,
+                    "dispatch-vocabulary-v1.json",
+                    "dispatch vocabulary member",
+                )
+            finally:
+                os.close(indexes_fd)
+        finally:
+            os.close(root_fd)
         try:
             manifest = json.loads(manifest_bytes.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as error:
@@ -134,10 +146,24 @@ class IVDDispatcher:
         expected_digest = members[_VOCABULARY_MEMBER]
         if not isinstance(expected_digest, str) or not _SHA256_RE.fullmatch(expected_digest):
             raise ValueError("dispatch vocabulary digest invalid")
-
-        vocabulary_bytes = self._read_regular_member(
-            root, _VOCABULARY_MEMBER, "dispatch vocabulary member"
-        )
+        if manifest.get("member_digest_algorithm") != "sha256-canonical-members-v1":
+            raise ValueError("package digest algorithm invalid")
+        package_digest = manifest.get("package_digest")
+        canonical_members = json.dumps(
+            {
+                "algorithm": "sha256-canonical-members-v1",
+                "members": dict(members),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if (
+            not isinstance(package_digest, str)
+            or not _SHA256_RE.fullmatch(package_digest)
+            or hashlib.sha256(canonical_members).hexdigest() != package_digest
+        ):
+            raise ValueError("package digest mismatch")
         if hashlib.sha256(vocabulary_bytes).hexdigest() != expected_digest:
             raise ValueError("dispatch vocabulary digest mismatch")
         try:
@@ -168,20 +194,38 @@ class IVDDispatcher:
         self._stages = self._validate_stages(policy.get("workflow_stages"))
 
     @staticmethod
-    def _read_regular_member(root: Path, relative: str, label: str) -> bytes:
-        pure = PurePosixPath(relative)
-        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
-            raise ValueError(f"{label} path invalid")
-        target = root.joinpath(*pure.parts)
-        ancestors = [
-            root.joinpath(*pure.parts[:index])
-            for index in range(1, len(pure.parts))
-        ]
-        if any(path.is_symlink() for path in ancestors):
+    def _open_directory_tree(path: Path, label: str) -> int:
+        absolute = Path(os.path.abspath(path))
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = None
+        try:
+            descriptor = os.open(absolute.anchor or os.sep, flags)
+            for part in absolute.parts[1:]:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = next_descriptor
+        except OSError as error:
+            raise ValueError(f"{label} invalid") from error
+        assert descriptor is not None
+        return descriptor
+
+    @staticmethod
+    def _open_directory_at(parent_fd: int, name: str, label: str) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise ValueError(f"{label} invalid") from error
+
+    @staticmethod
+    def _read_regular_at(parent_fd: int, name: str, label: str) -> bytes:
+        if not name or name in {".", ".."} or "/" in name:
             raise ValueError(f"{label} path invalid")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(target, flags)
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
         except OSError as error:
             raise ValueError(f"{label} invalid") from error
         try:
@@ -327,6 +371,10 @@ class IVDDispatcher:
         result = engine.execute(
             question=question,
             product_line=envelope.product_line or "",
+            product_variant=envelope.product_variant or "",
+            workflow_stage=envelope.workflow_stage or "",
+            knowledge_type=envelope.knowledge_type,
+            answer_shape=envelope.answer_shape,
             evidence=dict(evidence or {}),
             allow_index_transaction=False,
         )

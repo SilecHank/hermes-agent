@@ -229,7 +229,11 @@ def test_shadow_replay_returns_served_answer_without_waiting_or_replacing_it():
         returned_answer = submitter.submit(
             served_answer,
             replay,
-            comparison_metadata={"shadow_route_id": "unified:v2"},
+            comparison_metadata={
+                "shadow_route_id": "unified:v2",
+                "comparison_status": "prefilled",
+                "exact_match": True,
+            },
         )
 
         assert returned_answer is served_answer
@@ -273,13 +277,13 @@ def test_shadow_replay_queue_is_bounded_and_rejection_does_not_change_turn():
 
         assert submitter.stats.submitted == 1
         assert submitter.stats.rejected == 1
-        assert recorded_events == [
-            {
-                "schema_version": 2,
-                "event_type": "ivd_shadow_replay_isolation",
-                "outcome": "queue_full",
-            }
-        ]
+        release_replay.set()
+        assert submitter.wait_for_idle(timeout=1)
+        assert {
+            "schema_version": 2,
+            "event_type": "ivd_shadow_replay_isolation",
+            "outcome": "queue_full",
+        } in recorded_events
     finally:
         release_replay.set()
         submitter.close()
@@ -356,7 +360,7 @@ def test_shadow_replay_close_is_idempotent_and_rejects_later_work():
     served_answer = object()
     assert submitter.submit(served_answer, lambda: None) is served_answer
     assert submitter.stats.rejected == 1
-    assert recorded_events[-1]["outcome"] == "closed"
+    assert submitter.wait_for_idle(timeout=0.1)
 
 
 def test_shadow_replay_recorder_failure_never_changes_served_turn():
@@ -376,6 +380,123 @@ def test_shadow_replay_recorder_failure_never_changes_served_turn():
     finally:
         submitter.close()
 
+    assert not any(
+        thread.name.startswith("hermes-shadow-replay") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_shadow_replay_rejections_never_wait_for_blocking_recorder(monkeypatch):
+    replay_release = threading.Event()
+    recorder_started = threading.Event()
+    recorder_release = threading.Event()
+
+    def blocking_recorder(_event):
+        recorder_started.set()
+        recorder_release.wait(timeout=2)
+
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=blocking_recorder,
+        max_workers=1,
+        queue_capacity=0,
+    )
+    try:
+        submitter.submit(object(), lambda: replay_release.wait(timeout=2))
+        started_at = time.monotonic()
+        served_answer = object()
+        assert submitter.submit(served_answer, lambda: None) is served_answer
+        assert time.monotonic() - started_at < 0.25
+        assert recorder_started.wait(timeout=1)
+
+        recorder_release.set()
+        replay_release.set()
+        assert submitter.wait_for_idle(timeout=1)
+
+        recorder_started.clear()
+        recorder_release.clear()
+        monkeypatch.setattr(
+            submitter._executor,
+            "submit",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("executor unavailable")
+            ),
+        )
+        started_at = time.monotonic()
+        served_answer = object()
+        assert submitter.submit(served_answer, lambda: None) is served_answer
+        assert time.monotonic() - started_at < 0.25
+        assert recorder_started.wait(timeout=1)
+
+        recorder_release.set()
+        submitter.close(wait_for_tasks=False)
+        started_at = time.monotonic()
+        served_answer = object()
+        assert submitter.submit(served_answer, lambda: None) is served_answer
+        assert time.monotonic() - started_at < 0.25
+    finally:
+        recorder_release.set()
+        replay_release.set()
+        submitter.close(wait_for_tasks=True)
+
+
+def test_blocking_recorder_does_not_hold_shadow_worker_capacity():
+    recorder_started = threading.Event()
+    recorder_release = threading.Event()
+    second_replay_started = threading.Event()
+
+    def blocking_recorder(_event):
+        recorder_started.set()
+        recorder_release.wait(timeout=2)
+
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=blocking_recorder,
+        max_workers=1,
+        queue_capacity=0,
+    )
+    try:
+        submitter.submit(object(), lambda: {"comparison_status": "first"})
+        assert recorder_started.wait(timeout=1)
+
+        served_answer = object()
+        assert submitter.submit(
+            served_answer,
+            lambda: second_replay_started.set(),
+        ) is served_answer
+        assert second_replay_started.wait(timeout=1)
+        assert submitter.stats.submitted == 2
+    finally:
+        recorder_release.set()
+        submitter.close(wait_for_tasks=True)
+
+
+def test_non_waiting_close_cancels_queued_replays_and_later_waits_for_shutdown():
+    replay_started = threading.Event()
+    replay_release = threading.Event()
+    submitter = after_sales_telemetry.ShadowReplaySubmitter(
+        recorder=lambda _event: None,
+        max_workers=1,
+        queue_capacity=2,
+    )
+
+    def blocking_replay():
+        replay_started.set()
+        replay_release.wait(timeout=2)
+
+    submitter.submit(object(), blocking_replay)
+    assert replay_started.wait(timeout=1)
+    submitter.submit(object(), lambda: None)
+    submitter.submit(object(), lambda: None)
+
+    started_at = time.monotonic()
+    submitter.close(wait_for_tasks=False)
+    assert time.monotonic() - started_at < 0.25
+    assert submitter.stats.submitted == 3
+    assert submitter.stats.cancelled == 2
+
+    replay_release.set()
+    submitter.close(wait_for_tasks=True)
+    stats = submitter.stats
+    assert stats.submitted == stats.completed + stats.failed + stats.cancelled
     assert not any(
         thread.name.startswith("hermes-shadow-replay") and thread.is_alive()
         for thread in threading.enumerate()

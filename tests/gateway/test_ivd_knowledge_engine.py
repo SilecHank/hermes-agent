@@ -86,7 +86,7 @@ def _create_registry(path: Path) -> None:
             UNION ALL SELECT assertion_id, value, NULL FROM evidence;
         """
     )
-    connection.execute("INSERT INTO products VALUES ('nifty', 'NIFTY', '')")
+    connection.execute("INSERT INTO products VALUES ('nifty', 'NIFTY', '标准版')")
     connection.execute("INSERT INTO products VALUES ('cnv', 'CNV-seq', '')")
     connection.execute("INSERT INTO sources VALUES ('sop-nifty', 'SOP-JL-001')")
     connection.execute(
@@ -293,6 +293,67 @@ def test_ambiguous_or_wrong_product_does_not_cross_product_boundaries(package: P
     assert result.outcome == "fallback_request"
     assert result.model_calls == 0
     assert result.index_transactions == 0
+
+
+def test_product_variant_does_not_fall_back_to_another_variant(package: Path):
+    result = IVDKnowledgeEngine(package).execute(
+        question="无创提取需要多少血浆？",
+        product_line="NIFTY",
+        product_variant="PRO",
+        workflow_stage="extraction",
+        knowledge_type="parameter",
+        answer_shape="scalar",
+    )
+
+    assert result.outcome == "fallback_request"
+    assert result.model_calls == 0
+    assert result.index_transactions == 0
+
+
+def test_dispatch_bound_empty_variant_does_not_match_specific_variant(package: Path):
+    result = IVDKnowledgeEngine(package).execute(
+        question="无创提取需要多少血浆？",
+        product_line="NIFTY",
+        product_variant="",
+        workflow_stage="extraction",
+        knowledge_type="parameter",
+        answer_shape="scalar",
+    )
+
+    assert result.outcome == "fallback_request"
+
+
+def test_decision_axes_filter_lookup_and_validate_shape(package: Path):
+    engine = IVDKnowledgeEngine(package)
+
+    wrong_stage = engine.execute(
+        question="无创提取需要多少血浆？",
+        product_line="NIFTY",
+        product_variant="标准版",
+        workflow_stage="report",
+        knowledge_type="parameter",
+        answer_shape="scalar",
+    )
+    wrong_kind = engine.execute(
+        question="无创提取需要多少血浆？",
+        product_line="NIFTY",
+        product_variant="标准版",
+        workflow_stage="extraction",
+        knowledge_type="process",
+        answer_shape="process",
+    )
+
+    assert wrong_stage.outcome == "fallback_request"
+    assert wrong_kind.outcome == "fallback_request"
+    with pytest.raises(PackageIntegrityError, match="answer_shape_mismatch"):
+        engine.execute(
+            question="无创提取需要多少血浆？",
+            product_line="NIFTY",
+            product_variant="标准版",
+            workflow_stage="extraction",
+            knowledge_type="parameter",
+            answer_shape="report",
+        )
 
 
 def test_package_member_tampering_fails_closed(package: Path):
