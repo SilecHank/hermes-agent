@@ -376,12 +376,34 @@ def test_snapshot_is_inactive_outside_answer_turn():
 
 
 def test_trusted_ivd_path_prepares_one_contract_from_serving_manifest(tmp_path):
+    import hashlib
+    import json
+
     manifest = tmp_path / "release.json"
+    serving = {
+        "serving_package_path": str(tmp_path / "serving-package"),
+        "serving_agent_path": str(tmp_path / "serving-agent"),
+        "source_vault_path": str(tmp_path / "source-vault"),
+        "dispatch_policy_path": str(tmp_path / "serving-package/dispatch.json"),
+        "render_policy_path": str(tmp_path / "serving-package/render.json"),
+        "context_budget": 8,
+        "retrieval_budget": 2,
+        "skill_allowlist": [],
+        "receipt_destination": str(tmp_path / "observability/receipts.jsonl"),
+    }
+    projection_digest = hashlib.sha256(
+        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     manifest.write_text(
-        '{"shared_identity":{"package_digest":"' + "b" * 64
-        + '"},"projections":{"serving":{"package_digest":"' + "b" * 64
-        + '","receipt_destination":"' + str(tmp_path / "receipts.jsonl")
-        + '","records":[]}}}',
+        json.dumps({
+            "shared_identity": {
+                "package_digest": "b" * 64,
+                "execution_contract_schema_version": "1",
+                "turn_receipt_schema_version": "1",
+            },
+            "projections": {"serving": serving},
+            "projection_digests": {"serving": projection_digest},
+        }),
         encoding="utf-8",
     )
     config = {
@@ -396,6 +418,7 @@ def test_trusted_ivd_path_prepares_one_contract_from_serving_manifest(tmp_path):
 
     assert prepared is not None
     assert prepared.execution_contract.package_digest == "b" * 64
+    assert prepared.execution_contract.serving_projection_digest == projection_digest
     assert prepare_enabled_ivd_turn(config, platform="cli") is None
 
 

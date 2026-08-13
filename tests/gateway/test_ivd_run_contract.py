@@ -42,13 +42,35 @@ def test_gateway_boundary_blocks_before_after_sales_prepare(monkeypatch):
 
 
 def test_receipt_has_event_identity_and_no_answer_text(tmp_path):
+    import hashlib
+    import json
+
     digest = "c" * 64
     projection = tmp_path / "projection.json"
+    serving = {
+        "serving_package_path": str(tmp_path / "serving-package"),
+        "serving_agent_path": str(tmp_path / "serving-agent"),
+        "source_vault_path": str(tmp_path / "source-vault"),
+        "dispatch_policy_path": str(tmp_path / "serving-package/dispatch.json"),
+        "render_policy_path": str(tmp_path / "serving-package/render.json"),
+        "context_budget": 8,
+        "retrieval_budget": 2,
+        "skill_allowlist": [],
+        "receipt_destination": str(tmp_path / "observability/receipt.jsonl"),
+    }
+    serving_digest = hashlib.sha256(
+        json.dumps(serving, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     projection.write_text(
-        '{"shared_identity":{"package_digest":"' + digest
-        + '"},"projections":{"serving":{"package_digest":"' + digest
-        + '","receipt_destination":"' + str(tmp_path / "receipt.jsonl")
-        + '","records":[]}}}',
+        json.dumps({
+            "shared_identity": {
+                "package_digest": digest,
+                "execution_contract_schema_version": "1",
+                "turn_receipt_schema_version": "1",
+            },
+            "projections": {"serving": serving},
+            "projection_digests": {"serving": serving_digest},
+        }),
         encoding="utf-8",
     )
     prepared, turn = _prepare_gateway_ivd_boundary(
@@ -65,6 +87,7 @@ def test_receipt_has_event_identity_and_no_answer_text(tmp_path):
     assert receipt["turn_id"].startswith("ivd-turn-")
     assert receipt["event_id"] == "message-7"
     assert receipt["package_digest"] == digest
+    assert receipt["serving_projection_digest"] == serving_digest
     assert receipt["validation_status"] == "pass"
     assert "answer" not in receipt
     assert "answer_delivered" not in receipt
@@ -84,6 +107,7 @@ def test_gateway_enqueues_receipt_once_and_preserves_final_response(monkeypatch)
         {
             "contract_id": "ivd-contract-1",
             "package_digest": "e" * 64,
+            "serving_projection_digest": "f" * 64,
             "receipt_destination": "/tmp/receipt",
         },
     )()
@@ -104,3 +128,4 @@ def test_gateway_enqueues_receipt_once_and_preserves_final_response(monkeypatch)
 
     assert answer == "最终答案"
     assert len(calls) == 1
+    assert calls[0][1]["serving_projection_digest"] == "f" * 64

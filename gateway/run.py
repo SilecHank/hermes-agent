@@ -2319,6 +2319,7 @@ def _build_ivd_receipt(
         "turn_id": "ivd-turn-" + hashlib.sha256(event_identity.encode()).hexdigest(),
         "event_id": str(event_id),
         "package_digest": contract.package_digest,
+        "serving_projection_digest": contract.serving_projection_digest,
         "validation_status": str(validation_status),
     }
 
