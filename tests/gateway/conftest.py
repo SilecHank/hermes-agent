@@ -32,11 +32,17 @@ incident.
 """
 
 import ast
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+
+def _gateway_guard_cache_dir() -> Path:
+    override = os.environ.get("HERMES_GATEWAY_GUARD_CACHE_DIR", "").strip()
+    return Path(override) if override else Path.cwd() / ".pytest-cache"
 
 
 def make_async_session_db(sync_mock=None):
@@ -410,7 +416,7 @@ def pytest_configure(config):
         return
 
     fp = _fingerprint_gateway_tests()
-    cache_dir = Path.cwd() / ".pytest-cache"
+    cache_dir = _gateway_guard_cache_dir()
     cache_file = cache_dir / f"gw-adapter-guard-{fp}"
     lock_file = cache_dir / f".gw-adapter-guard-{fp}.lock"
 
@@ -464,4 +470,3 @@ def pytest_configure(config):
             raise pytest.UsageError(msg)
         else:
             cache_file.write_text("clean", encoding="utf-8")
-
