@@ -2280,50 +2280,73 @@ def _final_validation_status(agent: Any, turn: Any) -> str:
     return str(getattr(validator, "validation_status", "not_applicable"))
 
 
-async def _submit_ivd_receipt_preserving_answer(
-    answer: str | None,
-    receipt: dict[str, Any],
+def _prepare_gateway_ivd_boundary(
+    config: dict[str, Any],
     *,
-    submitter: Any,
-    timeout_seconds: float,
-) -> str | None:
-    """Attempt one bounded receipt submission without changing the answer."""
-    from gateway.ivd_runtime import submit_bounded_ivd_receipt
+    platform: str,
+    message: str,
+    history: list[dict[str, Any]],
+) -> tuple[Any, Any]:
+    """Establish the IVD contract before invoking legacy after-sales code."""
+    from gateway.after_sales_guard import prepare_after_sales_turn
+    from gateway.ivd_runtime import prepare_enabled_ivd_turn
 
-    submitted = await submit_bounded_ivd_receipt(
-        receipt,
-        submitter=submitter,
-        timeout_seconds=timeout_seconds,
+    prepared = prepare_enabled_ivd_turn(config, platform=platform)
+    turn = prepare_after_sales_turn(
+        config,
+        platform=platform,
+        message=message,
+        history=history,
+        prepared_ivd_turn=prepared,
     )
-    if not submitted:
-        logger.warning("IVD turn receipt submission failed")
-    return answer
+    return prepared, turn
 
 
-def _start_ivd_receipt_submission(
-    answer: str | None,
-    receipt: dict[str, Any],
+def _build_ivd_receipt(
+    prepared: Any,
     *,
-    submitter: Any,
-    timeout_seconds: float,
-) -> None:
-    """Dispatch receipt I/O away from the synchronous agent worker."""
-    import threading
+    platform: str,
+    session_key: str,
+    event_id: str,
+    validation_status: str,
+) -> dict[str, str]:
+    import hashlib
 
-    def _run() -> None:
-        try:
-            asyncio.run(
-                _submit_ivd_receipt_preserving_answer(
-                    answer,
-                    receipt,
-                    submitter=submitter,
-                    timeout_seconds=timeout_seconds,
-                )
-            )
-        except Exception as error:
-            logger.warning("IVD turn receipt submission skipped: %s", error)
+    contract = prepared.execution_contract
+    event_identity = f"{platform}\0{session_key}\0{event_id}"
+    return {
+        "contract_id": contract.contract_id,
+        "turn_id": "ivd-turn-" + hashlib.sha256(event_identity.encode()).hexdigest(),
+        "event_id": str(event_id),
+        "package_digest": contract.package_digest,
+        "validation_status": str(validation_status),
+    }
 
-    threading.Thread(target=_run, name="ivd-turn-receipt", daemon=True).start()
+
+def _enqueue_gateway_ivd_receipt(
+    final_response: str | None,
+    prepared: Any,
+    *,
+    platform: str,
+    session_key: str,
+    event_id: str,
+    validation_status: str,
+) -> str | None:
+    """Enqueue one metadata-only receipt and preserve the selected answer."""
+    from gateway.ivd_runtime import enqueue_ivd_receipt
+
+    receipt = _build_ivd_receipt(
+        prepared,
+        platform=platform,
+        session_key=session_key,
+        event_id=event_id,
+        validation_status=validation_status,
+    )
+    if not enqueue_ivd_receipt(
+        prepared.execution_contract.receipt_destination, receipt
+    ):
+        logger.warning("IVD turn receipt dropped")
+    return final_response
 
 
 _OWN_POLICY_OPEN_ENV = {
@@ -21393,25 +21416,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # platform message.
             _ivd_question_text = str(message or "")
             _after_sales_turn = None
-            from gateway.ivd_runtime import prepare_enabled_ivd_turn
-
-            # A trusted IVD turn establishes its serving contract before any
-            # legacy routing, retrieval, or visible-answer work. Configuration
-            # failures deliberately escape this fail-closed boundary.
-            _prepared_ivd_turn = prepare_enabled_ivd_turn(
+            # Managed IVD establishes its serving contract before legacy
+            # routing, retrieval, or visible-answer work. Failures escape.
+            _prepared_ivd_turn, _after_sales_turn = _prepare_gateway_ivd_boundary(
                 user_config,
                 platform=platform_key,
+                message=message,
+                history=history,
             )
             try:
-                from gateway.after_sales_guard import prepare_after_sales_turn
-
-                _after_sales_turn = prepare_after_sales_turn(
-                    user_config,
-                    platform=platform_key,
-                    message=message,
-                    history=history,
-                    prepared_ivd_turn=_prepared_ivd_turn,
-                )
                 if _after_sales_turn is not None:
                     combined_ephemeral = (
                         combined_ephemeral + "\n\n" + _after_sales_turn.context
@@ -22617,6 +22630,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            _validation_status = "not_applicable"
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
@@ -22718,31 +22732,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if _prepared_ivd_turn is not None:
                 try:
-                    from functools import partial
-                    from gateway.ivd_runtime import (
-                        append_ivd_receipt,
-                        submit_bounded_ivd_receipt,
+                    final_response = _enqueue_gateway_ivd_receipt(
+                        final_response,
+                        _prepared_ivd_turn,
+                        platform=platform_key,
+                        session_key=session_key or session_id or "",
+                        event_id=str(getattr(event, "message_id", None) or session_id or ""),
+                        validation_status=_validation_status,
                     )
-
-                    _trusted_config = _after_sales_config.get("trusted_path") or {}
-                    _receipt_path = _trusted_config.get("receipt_path")
-                    if _receipt_path:
-                        _receipt = {
-                            "package_digest": (
-                                _prepared_ivd_turn.contract.package_digest
-                            ),
-                            "contract_count": _prepared_ivd_turn.contract_count,
-                            "validation_status": _validation_status,
-                            "answer_delivered": bool(final_response),
-                        }
-                        _start_ivd_receipt_submission(
-                            final_response,
-                            _receipt,
-                            submitter=partial(append_ivd_receipt, _receipt_path),
-                            timeout_seconds=float(
-                                _trusted_config.get("receipt_timeout_seconds", 0.5)
-                            ),
-                        )
                 except Exception as _receipt_exc:
                     logger.warning(
                         "IVD turn receipt submission skipped: %s", _receipt_exc

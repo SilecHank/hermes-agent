@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -438,6 +439,26 @@ def test_critical_validator_records_the_existing_final_validation_once():
     assert result["ok"] is True
     assert validator.validation_status == "pass"
     assert len(calls) == 1
+
+
+def test_after_sales_turn_delegates_compatibility_contract_fields():
+    contract = object()
+    prepared = SimpleNamespace(
+        execution_contract=contract,
+        trusted_legacy_answer_enabled=True,
+        execution_contract_count=1,
+    )
+    turn = prepare_after_sales_turn(
+        _config(),
+        platform="qqbot",
+        message="NIFTY文库浓度低，48例和96例都出现。",
+        history=[],
+        prepared_ivd_turn=prepared,
+    )
+
+    assert turn.execution_contract is contract
+    assert turn.trusted_legacy_answer_enabled is True
+    assert turn.execution_contract_count == 1
 
 
 def test_prepare_after_sales_turn_infers_unit_for_user_supplied_range():

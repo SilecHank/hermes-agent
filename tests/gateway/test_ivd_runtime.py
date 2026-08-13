@@ -17,7 +17,7 @@ from gateway.ivd_runtime import (
     resolve_enabled_ivd_retrieval,
     resolve_ivd_retrieval_policy,
     prepare_enabled_ivd_turn,
-    submit_bounded_ivd_receipt,
+    enqueue_ivd_receipt,
 )
 from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 
@@ -379,21 +379,23 @@ def test_trusted_ivd_path_prepares_one_contract_from_serving_manifest(tmp_path):
     manifest = tmp_path / "release.json"
     manifest.write_text(
         '{"shared_identity":{"package_digest":"' + "b" * 64
-        + '"},"projections":{"serving":{"records":[]}}}',
+        + '"},"projections":{"serving":{"package_digest":"' + "b" * 64
+        + '","receipt_destination":"' + str(tmp_path / "receipts.jsonl")
+        + '","records":[]}}}',
         encoding="utf-8",
     )
     config = {
         "after_sales_guard": {
             "enabled": True,
             "platforms": ["qqbot"],
-            "trusted_path": {"enabled": True, "manifest_path": str(manifest)},
+            "serving_projection_path": str(manifest),
         }
     }
 
     prepared = prepare_enabled_ivd_turn(config, platform="qqbot")
 
     assert prepared is not None
-    assert prepared.contract.package_digest == "b" * 64
+    assert prepared.execution_contract.package_digest == "b" * 64
     assert prepare_enabled_ivd_turn(config, platform="cli") is None
 
 
@@ -408,7 +410,7 @@ def test_trusted_ivd_path_fails_closed_without_serving_projection(tmp_path):
         "after_sales_guard": {
             "enabled": True,
             "platforms": ["qqbot"],
-            "trusted_path": {"enabled": True, "manifest_path": str(manifest)},
+            "serving_projection_path": str(manifest),
         }
     }
 
@@ -416,19 +418,43 @@ def test_trusted_ivd_path_fails_closed_without_serving_projection(tmp_path):
         prepare_enabled_ivd_turn(config, platform="qqbot")
 
 
-@pytest.mark.asyncio
-async def test_bounded_receipt_failure_is_single_attempt_and_keeps_answer():
-    attempts = []
+@pytest.mark.parametrize("guard", [{}, {"serving_projection_path": ""}])
+def test_managed_ivd_platform_requires_serving_projection_configuration(guard):
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            **guard,
+        }
+    }
 
-    def fail(_receipt):
-        attempts.append(1)
-        raise OSError("receipt unavailable")
+    with pytest.raises(IVDRuntimeConfigurationError):
+        prepare_enabled_ivd_turn(config, platform="qqbot")
 
-    answer = "原始答案"
-    submitted = await submit_bounded_ivd_receipt(
-        {"answer": answer}, submitter=fail, timeout_seconds=0.2
+    assert prepare_enabled_ivd_turn(config, platform="cli") is None
+
+
+def test_oversized_receipt_is_dropped_before_writer_queue():
+    submitted = enqueue_ivd_receipt(
+        "/tmp/unused-receipt", {"turn_id": "x", "extra": "z" * 5000}
     )
 
     assert submitted is False
+
+
+def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch, tmp_path):
+    import gateway.ivd_runtime as runtime
+
+    attempts = []
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
+    monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", runtime.queue.Queue(maxsize=1))
+    monkeypatch.setattr(
+        runtime,
+        "_append_ivd_receipt",
+        lambda *_args: (attempts.append(1), (_ for _ in ()).throw(OSError("fail"))),
+    )
+
+    assert enqueue_ivd_receipt(str(tmp_path / "receipt"), {"turn_id": "one"})
+    runtime._RECEIPT_QUEUE.join()
+
     assert attempts == [1]
-    assert answer == "原始答案"

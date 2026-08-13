@@ -39,6 +39,20 @@ class AfterSalesTurn:
     prepared_ivd_turn: Any | None = None
 
     @property
+    def execution_contract(self) -> Any | None:
+        return getattr(self.prepared_ivd_turn, "execution_contract", None)
+
+    @property
+    def trusted_legacy_answer_enabled(self) -> bool:
+        return bool(
+            getattr(self.prepared_ivd_turn, "trusted_legacy_answer_enabled", False)
+        )
+
+    @property
+    def execution_contract_count(self) -> int:
+        return int(getattr(self.prepared_ivd_turn, "execution_contract_count", 0))
+
+    @property
     def blocks_answer_generation(self) -> bool:
         return self.preflight_decision == "block" or self.preflight_action in {
             "stop_before_answer_generation",

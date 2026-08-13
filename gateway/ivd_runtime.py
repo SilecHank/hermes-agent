@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import json
 import os
+import queue
 import re
+import threading
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,50 +40,77 @@ def prepare_enabled_ivd_turn(
     guard = _enabled_ivd_guard(config, platform)
     if guard is None:
         return None
-    trusted = guard.get("trusted_path") or {}
-    if not isinstance(trusted, dict) or not trusted.get("enabled", False):
-        return None
+    path = guard.get("serving_projection_path")
+    if not isinstance(path, str) or not path.strip():
+        from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+        raise IVDRuntimeConfigurationError(
+            "managed IVD platform requires serving_projection_path"
+        )
     projection = load_serving_projection(
-        trusted.get("manifest_path") or "",
-        expected_package_digest=trusted.get("package_digest"),
+        path,
+        expected_package_digest=guard.get("package_digest"),
     )
     return prepare_ivd_turn(projection)
 
 
-async def submit_bounded_ivd_receipt(
-    receipt: dict[str, Any],
-    *,
-    submitter: Any,
-    timeout_seconds: float = 0.5,
-    max_bytes: int = 64 * 1024,
-) -> bool:
-    """Submit one bounded receipt attempt without retrying."""
-    payload = json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
-    if len(payload.encode("utf-8")) > max(1, int(max_bytes)):
-        return False
-
-    async def _submit_once() -> None:
-        if inspect.iscoroutinefunction(submitter):
-            await submitter(receipt)
-        else:
-            result = await asyncio.to_thread(submitter, receipt)
-            if inspect.isawaitable(result):
-                await result
-
-    try:
-        await asyncio.wait_for(_submit_once(), timeout=max(0.01, timeout_seconds))
-        return True
-    except Exception:
-        return False
+_MAX_RECEIPT_BYTES = 4096
+_RECEIPT_QUEUE: queue.Queue[tuple[str, bytes]] | None = queue.Queue(maxsize=256)
+_RECEIPT_WORKER_STARTED = False
+_RECEIPT_WORKER_LOCK = threading.Lock()
 
 
-def append_ivd_receipt(path: str | Path, receipt: dict[str, Any]) -> None:
-    """Append a local receipt; callers provide async bounds and error isolation."""
+def _append_ivd_receipt(path: str, payload: bytes) -> None:
     target = Path(path).expanduser()
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
-        handle.write("\n")
+    fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+
+
+def _receipt_worker() -> None:
+    assert _RECEIPT_QUEUE is not None
+    while True:
+        destination, payload = _RECEIPT_QUEUE.get()
+        try:
+            _append_ivd_receipt(destination, payload)
+        except Exception:
+            pass
+        finally:
+            _RECEIPT_QUEUE.task_done()
+
+
+def _ensure_receipt_worker() -> None:
+    global _RECEIPT_WORKER_STARTED
+    if _RECEIPT_WORKER_STARTED:
+        return
+    with _RECEIPT_WORKER_LOCK:
+        if not _RECEIPT_WORKER_STARTED:
+            threading.Thread(
+                target=_receipt_worker,
+                name="ivd-receipt-writer",
+                daemon=True,
+            ).start()
+            _RECEIPT_WORKER_STARTED = True
+
+
+def enqueue_ivd_receipt(destination: str, receipt: dict[str, Any]) -> bool:
+    """Enqueue one bounded receipt; full/unavailable queues drop without retry."""
+    if _RECEIPT_QUEUE is None:
+        return False
+    payload = (
+        json.dumps(receipt, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    if len(payload) > _MAX_RECEIPT_BYTES:
+        return False
+    _ensure_receipt_worker()
+    try:
+        _RECEIPT_QUEUE.put_nowait((destination, payload))
+        return True
+    except queue.Full:
+        return False
 
 
 @dataclass(frozen=True)

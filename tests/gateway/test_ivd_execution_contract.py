@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -22,7 +23,11 @@ def _write_release(tmp_path, *, digest=PACKAGE_DIGEST, serving=None, **projectio
                 "projections": {
                     "serving": serving
                     if serving is not None
-                    else {"records": [{"record_id": "record-1"}]},
+                    else {
+                        "package_digest": digest,
+                        "receipt_destination": str(tmp_path / "receipts.jsonl"),
+                        "records": [{"record_id": "record-1"}],
+                    },
                     **projections,
                 },
             }
@@ -44,16 +49,17 @@ def test_loader_returns_only_immutable_serving_projection_bound_to_package(tmp_p
     prepared = prepare_ivd_turn(projection)
 
     assert projection.package_digest == PACKAGE_DIGEST
-    assert prepared.contract.package_digest == PACKAGE_DIGEST
-    assert prepared.contract_count == 1
-    assert prepared.contract.trusted_legacy_answer_enabled is True
-    assert prepared.contract.serving_projection == {
-        "records": ({"record_id": "record-1"},)
-    }
+    assert prepared.execution_contract.package_digest == PACKAGE_DIGEST
+    assert prepared.execution_contract_count == 1
+    assert prepared.trusted_legacy_answer_enabled is True
+    assert prepared.execution_contract.receipt_destination.endswith("receipts.jsonl")
+    assert prepared.execution_contract.serving_projection["records"] == (
+        {"record_id": "record-1"},
+    )
     assert "secret" not in repr(prepared)
     assert not hasattr(prepared, "user_text")
     with pytest.raises(FrozenInstanceError):
-        prepared.contract = None
+        prepared.execution_contract = None
 
 
 @pytest.mark.parametrize(
@@ -69,6 +75,22 @@ def test_loader_returns_only_immutable_serving_projection_bound_to_package(tmp_p
             "shared_identity": {"package_digest": PACKAGE_DIGEST},
             "projections": {"build": {}},
         },
+        {
+            "shared_identity": {"package_digest": PACKAGE_DIGEST},
+            "projections": {
+                "serving": {
+                    "package_digest": "b" * 64,
+                    "receipt_destination": "/tmp/receipt",
+                    "records": [],
+                }
+            },
+        },
+        {
+            "shared_identity": {"package_digest": PACKAGE_DIGEST},
+            "projections": {
+                "serving": {"package_digest": PACKAGE_DIGEST, "records": []}
+            },
+        },
     ],
 )
 def test_loader_fails_closed_for_missing_or_malformed_serving_projection(
@@ -79,3 +101,25 @@ def test_loader_fails_closed_for_missing_or_malformed_serving_projection(
 
     with pytest.raises(IVDRuntimeConfigurationError):
         load_serving_projection(manifest)
+
+
+def test_loader_reuses_cached_projection_without_reopening_same_file(tmp_path):
+    manifest = _write_release(tmp_path)
+
+    first = load_serving_projection(manifest)
+    with patch("pathlib.Path.open", side_effect=AssertionError("reopened")):
+        second = load_serving_projection(manifest)
+
+    assert second is first
+
+
+def test_loader_reloads_when_projection_stat_identity_changes(tmp_path):
+    manifest = _write_release(tmp_path)
+    first = load_serving_projection(manifest)
+    replacement_digest = "d" * 64
+    _write_release(tmp_path, digest=replacement_digest)
+
+    second = load_serving_projection(manifest)
+
+    assert second is not first
+    assert second.package_digest == replacement_digest
