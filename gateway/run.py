@@ -21572,6 +21572,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "IVD blocked-preflight telemetry skipped: %s",
                                 _blocked_telemetry_exc,
                             )
+                        if _prepared_ivd_turn is not None:
+                            try:
+                                _enqueue_gateway_ivd_receipt(
+                                    _blocked_result.get("final_response"),
+                                    _prepared_ivd_turn,
+                                    platform=platform_key,
+                                    session_key=session_key or session_id or "",
+                                    event_id=str(event_message_id or session_id or ""),
+                                    validation_status="preflight_blocked",
+                                )
+                            except Exception as _blocked_receipt_exc:
+                                logger.warning(
+                                    "IVD blocked-preflight receipt skipped: %s",
+                                    _blocked_receipt_exc,
+                                )
                         return _blocked_result
             except Exception as _guard_exc:
                 logger.warning(

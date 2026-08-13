@@ -286,3 +286,62 @@ async def test_real_run_sync_telemetry_failure_keeps_pass_receipt_and_answer(
     assert len(validations) == 1
     assert len(receipts) == 1
     assert receipts[0]["validation_status"] == "pass"
+
+
+@pytest.mark.parametrize("enqueue_result", [True, False])
+@pytest.mark.asyncio
+async def test_real_run_sync_records_preflight_blocked_receipt_before_early_return(
+    monkeypatch, tmp_path, enqueue_result
+):
+    receipts = []
+
+    class Agent:
+        def __init__(self, **kwargs):
+            raise AssertionError("agent constructed")
+
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["qqbot"],
+            "serving_projection_path": str(_write_projection(tmp_path)),
+        }
+    }
+    _install_runtime(monkeypatch, config, Agent)
+    turn = SimpleNamespace(
+        context="",
+        facts={},
+        blocks_answer_generation=True,
+        has_validator=True,
+        product_scope="",
+        product_variant="",
+        route_id="blocked",
+        route_version="1",
+        fast_path=False,
+        source_paths=(),
+        preflight_decision="block",
+        preflight_action="stop_before_answer_generation",
+        preflight_issues=("pending_source",),
+        validate=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("validator called")
+        ),
+    )
+    monkeypatch.setattr(
+        "gateway.after_sales_guard.prepare_after_sales_turn",
+        lambda *args, **kwargs: turn,
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.enqueue_ivd_receipt",
+        lambda destination, receipt: receipts.append(receipt) or enqueue_result,
+    )
+
+    result = await _runner()._run_agent(
+        "候选结论可以回复吗", "", [], _source(), "session",
+        session_key="qqbot:123", event_message_id="message-9",
+    )
+
+    assert result["api_calls"] == 0
+    assert result["preflight_blocked"] is True
+    assert "待验证或非正式来源" in result["final_response"]
+    assert len(receipts) == 1
+    assert receipts[0]["validation_status"] == "preflight_blocked"
+    assert receipts[0]["event_id"] == "message-9"
