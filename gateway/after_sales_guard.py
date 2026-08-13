@@ -310,6 +310,8 @@ def prepare_after_sales_turn(
     }
     if normalized_platform not in enabled_platforms:
         return None
+    if str(guard.get("engine_mode") or "compatibility").strip().lower() == "package":
+        raise RuntimeError("legacy after-sales router is disabled in package mode")
 
     module_path = Path(str(guard.get("workflow_module") or ""))
     validator_path = Path(str(guard.get("validator_module") or ""))

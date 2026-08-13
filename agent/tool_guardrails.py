@@ -477,3 +477,12 @@ def _sha256(value: str) -> str:
     # encode raises and takes down the whole conversation loop. The hash only
     # needs deterministic bytes, not valid UTF-8.
     return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
+def filter_tools_for_execution_mode(
+    tools: list[dict[str, Any]] | None,
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
+    """Remove the general agent tool plane from public IVD serving turns."""
+    if mode == "ivd_serving":
+        return []
+    return list(tools or [])

@@ -1,0 +1,190 @@
+from types import MappingProxyType, SimpleNamespace
+
+import pytest
+
+from gateway.run import _prepare_gateway_ivd_boundary
+
+
+def _prepared_package_turn(tmp_path):
+    package = tmp_path / "serving-package"
+    package.mkdir()
+    projection = MappingProxyType(
+        {
+            "serving_package_path": str(package),
+            "retrieval_budget": 1,
+            "context_budget": 8,
+            "skill_allowlist": (),
+        }
+    )
+    contract = SimpleNamespace(serving_projection=projection)
+    return SimpleNamespace(execution_contract=contract)
+
+
+def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
+    prepared = _prepared_package_turn(tmp_path)
+    calls = []
+
+    class Result:
+        text = "200 uL."
+        answer_shape = "scalar"
+        outcome = "answer"
+        model_calls = 0
+        index_transactions = 0
+        filesystem_scans = 0
+        effect_count = 0
+        sources = ()
+
+    class Engine:
+        def __init__(self, root):
+            calls.append(("engine", root))
+
+        def close(self):
+            calls.append(("close",))
+
+    class Dispatcher:
+        def __init__(self, root):
+            calls.append(("dispatcher", root))
+
+        def execute(self, engine, *, question, evidence=None):
+            calls.append(("dispatch", question, evidence))
+            return SimpleNamespace(
+                envelope=SimpleNamespace(
+                    clarifying_questions=(),
+                    model_call_budget=0,
+                    indexed_retrieval_budget=0,
+                ),
+                result=Result(),
+            )
+
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.prepare_enabled_ivd_turn",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "gateway.after_sales_guard.prepare_after_sales_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy router invoked")
+        ),
+    )
+    monkeypatch.setattr("gateway.ivd_runtime.IVDDispatcher", Dispatcher)
+    monkeypatch.setattr("gateway.ivd_runtime.IVDKnowledgeEngine", Engine)
+
+    selected, result = _prepare_gateway_ivd_boundary(
+        {
+            "after_sales_guard": {
+                "enabled": True,
+                "platforms": ["qqbot"],
+                "engine_mode": "package",
+            }
+        },
+        platform="qqbot",
+        message="无创提取需要多少血浆？",
+        history=[],
+    )
+
+    assert selected is prepared
+    assert result.text == "200 uL."
+    assert result.dispatch_count == 1
+    assert result.final_validation_count == 1
+    assert result.model_calls == 0
+    assert result.index_transactions == 0
+    assert [call[0] for call in calls] == ["dispatcher", "engine", "dispatch", "close"]
+
+
+def test_compatibility_mode_keeps_legacy_router_reachable(tmp_path, monkeypatch):
+    prepared = _prepared_package_turn(tmp_path)
+    legacy_turn = object()
+    calls = []
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.prepare_enabled_ivd_turn",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "gateway.after_sales_guard.prepare_after_sales_turn",
+        lambda *_args, **_kwargs: calls.append("legacy") or legacy_turn,
+    )
+
+    selected, result = _prepare_gateway_ivd_boundary(
+        {
+            "after_sales_guard": {
+                "enabled": True,
+                "platforms": ["qqbot"],
+                "engine_mode": "compatibility",
+            }
+        },
+        platform="qqbot",
+        message="问题",
+        history=[],
+    )
+
+    assert selected is prepared
+    assert result is legacy_turn
+    assert calls == ["legacy"]
+
+
+def test_package_mode_requires_loaded_package_contract(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.prepare_enabled_ivd_turn",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="package contract"):
+        _prepare_gateway_ivd_boundary(
+            {
+                "after_sales_guard": {
+                    "enabled": True,
+                    "platforms": ["qqbot"],
+                    "engine_mode": "package",
+                }
+            },
+            platform="qqbot",
+            message="问题",
+            history=[],
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_calls", "index_transactions", "expected"),
+    ((1, 0, "model-call budget"), (0, 1, "index-transaction budget")),
+)
+def test_package_turn_fails_closed_when_engine_exceeds_envelope_budget(
+    tmp_path, monkeypatch, model_calls, index_transactions, expected
+):
+    prepared = _prepared_package_turn(tmp_path)
+    result = SimpleNamespace(
+        text="不应发送",
+        answer_shape="scalar",
+        outcome="answer",
+        model_calls=model_calls,
+        index_transactions=index_transactions,
+        filesystem_scans=0,
+        effect_count=0,
+        sources=(),
+    )
+    envelope = SimpleNamespace(
+        clarifying_questions=(),
+        model_call_budget=0,
+        indexed_retrieval_budget=0,
+    )
+
+    class Engine:
+        def __init__(self, _root):
+            pass
+
+        def close(self):
+            pass
+
+    class Dispatcher:
+        def __init__(self, _root):
+            pass
+
+        def execute(self, _engine, **_kwargs):
+            return SimpleNamespace(envelope=envelope, result=result)
+
+    monkeypatch.setattr("gateway.ivd_runtime.IVDDispatcher", Dispatcher)
+    monkeypatch.setattr("gateway.ivd_runtime.IVDKnowledgeEngine", Engine)
+
+    from gateway.ivd_runtime import execute_exclusive_ivd_turn
+
+    with pytest.raises(RuntimeError, match=expected):
+        execute_exclusive_ivd_turn(prepared, question="问题")

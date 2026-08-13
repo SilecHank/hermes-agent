@@ -19,6 +19,101 @@ from gateway.ivd_execution_contract import (
     load_serving_projection,
     prepare_ivd_turn,
 )
+from gateway.ivd_dispatcher import IVDDispatcher
+from gateway.ivd_knowledge_engine import IVDKnowledgeEngine
+
+
+@dataclass(frozen=True)
+class ExclusiveIVDResult:
+    """One fully validated package answer selected by one dispatch."""
+
+    text: str
+    answer_shape: str
+    outcome: str
+    model_calls: int
+    index_transactions: int
+    filesystem_scans: int
+    effect_count: int
+    sources: tuple[object, ...]
+    dispatch_count: int = 1
+    final_validation_count: int = 1
+
+
+def ivd_engine_mode(config: Mapping[str, Any], *, platform: str) -> str:
+    guard = _enabled_ivd_guard(dict(config), platform)
+    if guard is None:
+        return "disabled"
+    mode = str(guard.get("engine_mode") or "compatibility").strip().lower()
+    if mode not in {"compatibility", "package"}:
+        from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+        raise IVDRuntimeConfigurationError("invalid IVD engine mode")
+    return mode
+
+
+def execute_exclusive_ivd_turn(
+    prepared: PreparedIVDTurn | None,
+    *,
+    question: str,
+    evidence: Mapping[str, object] | None = None,
+) -> ExclusiveIVDResult:
+    """Run the immutable package without constructing any legacy answer plane."""
+    if prepared is None:
+        from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+        raise IVDRuntimeConfigurationError("package contract is required")
+    projection = prepared.execution_contract.serving_projection
+    package_root = str(projection.get("serving_package_path") or "")
+    if not package_root:
+        from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+        raise IVDRuntimeConfigurationError("package contract has no serving package")
+    dispatcher = IVDDispatcher(package_root)
+    engine = IVDKnowledgeEngine(package_root)
+    try:
+        outcome = dispatcher.execute(
+            engine,
+            question=question,
+            evidence=evidence,
+        )
+        result = outcome.result
+        if result is None:
+            questions = tuple(outcome.envelope.clarifying_questions)
+            text = questions[0] if questions else "请补充产品名称、版本或SOP编号。"
+            return ExclusiveIVDResult(
+                text=text,
+                answer_shape="clarification",
+                outcome="clarification",
+                model_calls=0,
+                index_transactions=0,
+                filesystem_scans=0,
+                effect_count=0,
+                sources=(),
+            )
+        if int(result.model_calls) > int(outcome.envelope.model_call_budget):
+            from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+            raise IVDRuntimeConfigurationError("IVD model-call budget exceeded")
+        if int(result.index_transactions) > int(
+            outcome.envelope.indexed_retrieval_budget
+        ):
+            from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+            raise IVDRuntimeConfigurationError(
+                "IVD index-transaction budget exceeded"
+            )
+        return ExclusiveIVDResult(
+            text=str(result.text),
+            answer_shape=str(result.answer_shape),
+            outcome=str(result.outcome),
+            model_calls=int(result.model_calls),
+            index_transactions=int(result.index_transactions),
+            filesystem_scans=int(result.filesystem_scans),
+            effect_count=int(result.effect_count),
+            sources=tuple(result.sources),
+        )
+    finally:
+        engine.close()
 
 
 def _enabled_ivd_guard(config: dict[str, Any], platform: str) -> dict[str, Any] | None:

@@ -2288,11 +2288,20 @@ def _prepare_gateway_ivd_boundary(
     message: str,
     history: list[dict[str, Any]],
 ) -> tuple[Any, Any]:
-    """Establish the IVD contract before invoking legacy after-sales code."""
+    """Select exactly one IVD control plane for the turn."""
     from gateway.after_sales_guard import prepare_after_sales_turn
-    from gateway.ivd_runtime import prepare_enabled_ivd_turn
+    from gateway.ivd_runtime import (
+        execute_exclusive_ivd_turn,
+        ivd_engine_mode,
+        prepare_enabled_ivd_turn,
+    )
 
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
+    if ivd_engine_mode(config, platform=platform) == "package":
+        return prepared, execute_exclusive_ivd_turn(
+            prepared,
+            question=message,
+        )
     turn = prepare_after_sales_turn(
         config,
         platform=platform,
@@ -3555,9 +3564,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         history: list[dict[str, Any]],
     ) -> tuple[Any, Any]:
         from gateway.after_sales_guard import prepare_after_sales_turn
+        from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
         normalized_platform = str(platform or "").strip().lower()
         prepared = self._ivd_prepared_contracts.get(normalized_platform)
+        if ivd_engine_mode(config, platform=normalized_platform) == "package":
+            return prepared, execute_exclusive_ivd_turn(
+                prepared,
+                question=message,
+            )
         turn = prepare_after_sales_turn(
             config,
             platform=normalized_platform,
@@ -21557,6 +21572,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message=message,
                 history=history,
             )
+            if (
+                _after_sales_turn is not None
+                and getattr(_after_sales_turn, "dispatch_count", 0) == 1
+            ):
+                final_response = _after_sales_turn.text
+                if _prepared_ivd_turn is not None:
+                    final_response = _enqueue_gateway_ivd_receipt(
+                        final_response,
+                        _prepared_ivd_turn,
+                        platform=platform_key,
+                        session_key=session_key or session_id or "",
+                        event_id=_ivd_event_id,
+                        validation_status="pass",
+                    )
+                return {
+                    "final_response": final_response,
+                    "messages": [],
+                    "completed": True,
+                    "api_calls": _after_sales_turn.model_calls,
+                    "tools": [],
+                    "ivd_dispatch_count": _after_sales_turn.dispatch_count,
+                    "ivd_final_validation_count": _after_sales_turn.final_validation_count,
+                }
             try:
                 if _after_sales_turn is not None:
                     combined_ephemeral = (

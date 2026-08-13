@@ -881,6 +881,23 @@ def _notify_context_engine_turn_complete(
         )
 
 
+def enforce_ivd_serving_tool_boundary(agent, *, mode: str) -> None:
+    """Defense in depth for callers that accidentally construct an Agent."""
+    from agent.tool_guardrails import filter_tools_for_execution_mode
+
+    agent.tools = filter_tools_for_execution_mode(
+        getattr(agent, "tools", None),
+        mode=mode,
+    )
+    agent.valid_tool_names = {
+        tool["function"]["name"]
+        for tool in agent.tools
+        if isinstance(tool, dict)
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name")
+    }
+
+
 def run_conversation(
     agent,
     user_message: Any,
@@ -913,6 +930,10 @@ def run_conversation(
     Returns:
         Dict: Complete conversation result with final response and message history
     """
+    enforce_ivd_serving_tool_boundary(
+        agent,
+        mode=str(getattr(agent, "execution_mode", "standard") or "standard"),
+    )
     if moa_config is None:
         try:
             from hermes_cli.moa_config import decode_moa_turn
