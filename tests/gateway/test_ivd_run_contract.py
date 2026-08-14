@@ -85,12 +85,12 @@ def test_receipt_has_event_identity_and_no_answer_text(tmp_path):
     assert turn is None
 
 
-def test_receipt_enqueue_failure_keeps_answer(monkeypatch):
+def test_receipt_enqueue_unavailable_reports_failure(monkeypatch):
     monkeypatch.setattr("gateway.ivd_runtime._RECEIPT_QUEUE", None)
     assert enqueue_ivd_receipt("/tmp/receipt", {"turn_id": "x"}) is False
 
 
-def test_gateway_enqueues_receipt_once_and_preserves_final_response(monkeypatch):
+def test_gateway_receipt_failure_blocks_final_response(monkeypatch):
     calls = []
     contract = type(
         "Contract",
@@ -108,15 +108,15 @@ def test_gateway_enqueues_receipt_once_and_preserves_final_response(monkeypatch)
         lambda destination, receipt: calls.append((destination, receipt)) and False,
     )
 
-    answer = _enqueue_gateway_ivd_receipt(
-        "最终答案",
-        prepared,
-        platform="qqbot",
-        session_key="session",
-        event_id="event",
-        validation_status="pass",
-    )
+    with pytest.raises(RuntimeError, match="receipt"):
+        _enqueue_gateway_ivd_receipt(
+            "最终答案",
+            prepared,
+            platform="qqbot",
+            session_key="session",
+            event_id="event",
+            validation_status="pass",
+        )
 
-    assert answer == "最终答案"
     assert len(calls) == 1
     assert calls[0][1]["serving_projection_digest"] == "f" * 64

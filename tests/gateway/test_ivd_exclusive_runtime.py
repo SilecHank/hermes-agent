@@ -5,6 +5,17 @@ import pytest
 from gateway.run import _prepare_gateway_ivd_boundary
 
 
+@pytest.fixture(autouse=True)
+def _isolated_engine_cache(monkeypatch):
+    import gateway.ivd_runtime as runtime
+
+    monkeypatch.setattr(
+        runtime,
+        "_IVD_ENGINE_CACHE",
+        runtime._IVDKnowledgeEngineCache(),
+    )
+
+
 def _prepared_package_turn(tmp_path):
     package = tmp_path / "serving-package"
     package.mkdir()
@@ -16,7 +27,10 @@ def _prepared_package_turn(tmp_path):
             "skill_allowlist": (),
         }
     )
-    contract = SimpleNamespace(serving_projection=projection)
+    contract = SimpleNamespace(
+        package_digest="a" * 64,
+        serving_projection=projection,
+    )
     return SimpleNamespace(execution_contract=contract)
 
 
@@ -35,8 +49,9 @@ def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
         sources = ()
 
     class Engine:
-        def __init__(self, root):
+        def __init__(self, root, *, expected_package_digest):
             calls.append(("engine", root))
+            assert expected_package_digest == "a" * 64
 
         def close(self):
             calls.append(("close",))
@@ -88,7 +103,7 @@ def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
     assert result.final_validation_count == 1
     assert result.model_calls == 0
     assert result.index_transactions == 0
-    assert [call[0] for call in calls] == ["dispatcher", "engine", "dispatch", "close"]
+    assert [call[0] for call in calls] == ["dispatcher", "engine", "dispatch"]
 
 
 def test_compatibility_mode_keeps_legacy_router_reachable(tmp_path, monkeypatch):
@@ -168,7 +183,8 @@ def test_package_turn_fails_closed_when_engine_exceeds_envelope_budget(
     )
 
     class Engine:
-        def __init__(self, _root):
+        def __init__(self, _root, *, expected_package_digest):
+            assert expected_package_digest == "a" * 64
             pass
 
         def close(self):

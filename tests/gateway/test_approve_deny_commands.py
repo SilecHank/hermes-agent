@@ -39,6 +39,24 @@ def _make_event(text: str) -> MessageEvent:
     )
 
 
+def _make_group_source(member: str) -> SessionSource:
+    return SessionSource(
+        platform=Platform.QQBOT,
+        user_id=member,
+        chat_id="group-1",
+        user_name=f"member-{member}",
+        chat_type="group",
+    )
+
+
+def _make_group_event(text: str, member: str) -> MessageEvent:
+    return MessageEvent(
+        text=text,
+        source=_make_group_source(member),
+        message_id=f"m-{member}",
+    )
+
+
 def _make_runner():
     from gateway.run import GatewayRunner
 
@@ -63,6 +81,13 @@ def _make_runner():
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
+    source = _make_source()
+    session_key = runner._session_key_for_source(source)
+    runner._ivd_approval_owners = {
+        session_key: runner._effect_session_key_for_source(
+            source, effect="approval"
+        )
+    }
     return runner
 
 
@@ -218,6 +243,28 @@ class TestApproveCommand:
         assert entry.event.is_set()
 
     @pytest.mark.asyncio
+    async def test_group_member_cannot_slash_approve_another_participants_effect(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        owner = _make_group_source("member-a")
+        other = _make_group_source("member-b")
+        session_key = runner._session_key_for_source(owner)
+        runner._ivd_approval_owners[session_key] = (
+            runner._effect_session_key_for_source(owner, effect="approval")
+        )
+        entry = _ApprovalEntry({"command": "test"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(
+            _make_group_event("/approve", "member-b")
+        )
+
+        assert "不属于你" in result
+        assert entry.event.is_set() is False
+        assert entry.result is None
+
+    @pytest.mark.asyncio
     async def test_approve_all_resolves_multiple(self):
         """/approve all resolves all pending approvals."""
         from tools.approval import _ApprovalEntry, _gateway_queues
@@ -299,6 +346,27 @@ class TestDenyCommand:
         assert "denied" in result.lower()
         assert entry.event.is_set()
         assert entry.result == "deny"
+
+    @pytest.mark.asyncio
+    async def test_group_member_cannot_deny_another_participants_effect(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        owner = _make_group_source("member-a")
+        session_key = runner._session_key_for_source(owner)
+        runner._ivd_approval_owners[session_key] = (
+            runner._effect_session_key_for_source(owner, effect="approval")
+        )
+        entry = _ApprovalEntry({"command": "test"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_deny_command(
+            _make_group_event("/deny", "member-b")
+        )
+
+        assert "不属于你" in result
+        assert entry.event.is_set() is False
+        assert entry.result is None
 
     @pytest.mark.asyncio
     async def test_deny_all_resolves_all(self):

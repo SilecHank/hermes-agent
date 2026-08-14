@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
@@ -39,6 +40,103 @@ class ExclusiveIVDResult:
     final_validation_count: int = 1
 
 
+@dataclass
+class _CachedEngineGeneration:
+    package_digest: str
+    engine: IVDKnowledgeEngine
+    active_leases: int = 0
+    retired: bool = False
+
+
+class _IVDKnowledgeEngineLease:
+    def __init__(
+        self,
+        cache: "_IVDKnowledgeEngineCache",
+        generation: _CachedEngineGeneration,
+    ) -> None:
+        self._cache = cache
+        self._generation = generation
+        self._released = False
+
+    def __enter__(self) -> IVDKnowledgeEngine:
+        return self._generation.engine
+
+    def __exit__(self, *_args: object) -> None:
+        if not self._released:
+            self._released = True
+            self._cache.release(self._generation)
+
+
+class _IVDKnowledgeEngineCache:
+    """Keep one digest-bound engine active and retire generations safely."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._current: _CachedEngineGeneration | None = None
+
+    def acquire(
+        self,
+        package_root: str | Path,
+        package_digest: str,
+    ) -> _IVDKnowledgeEngineLease:
+        if not re.fullmatch(r"[0-9a-f]{64}", package_digest):
+            from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
+
+            raise IVDRuntimeConfigurationError("IVD package digest is invalid")
+        close_after_swap: IVDKnowledgeEngine | None = None
+        with self._lock:
+            generation = self._current
+            if generation is None or generation.package_digest != package_digest:
+                candidate = IVDKnowledgeEngine(
+                    package_root,
+                    expected_package_digest=package_digest,
+                )
+                generation = _CachedEngineGeneration(package_digest, candidate)
+                prior = self._current
+                self._current = generation
+                if prior is not None:
+                    prior.retired = True
+                    if prior.active_leases == 0:
+                        close_after_swap = prior.engine
+            generation.active_leases += 1
+        if close_after_swap is not None:
+            close_after_swap.close()
+        return _IVDKnowledgeEngineLease(self, generation)
+
+    def release(self, generation: _CachedEngineGeneration) -> None:
+        close_retired: IVDKnowledgeEngine | None = None
+        with self._lock:
+            if generation.active_leases <= 0:
+                return
+            generation.active_leases -= 1
+            if generation.retired and generation.active_leases == 0:
+                close_retired = generation.engine
+        if close_retired is not None:
+            close_retired.close()
+
+    def close(self) -> None:
+        close_current: IVDKnowledgeEngine | None = None
+        with self._lock:
+            generation = self._current
+            self._current = None
+            if generation is not None:
+                generation.retired = True
+                if generation.active_leases == 0:
+                    close_current = generation.engine
+        if close_current is not None:
+            close_current.close()
+
+
+_IVD_ENGINE_CACHE = _IVDKnowledgeEngineCache()
+
+
+def close_ivd_knowledge_engine_cache() -> None:
+    _IVD_ENGINE_CACHE.close()
+
+
+atexit.register(close_ivd_knowledge_engine_cache)
+
+
 def ivd_engine_mode(config: Mapping[str, Any], *, platform: str) -> str:
     guard = _enabled_ivd_guard(dict(config), platform)
     if guard is None:
@@ -68,9 +166,11 @@ def execute_exclusive_ivd_turn(
         from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 
         raise IVDRuntimeConfigurationError("package contract has no serving package")
+    package_digest = str(
+        getattr(prepared.execution_contract, "package_digest", "") or ""
+    )
     dispatcher = IVDDispatcher(package_root)
-    engine = IVDKnowledgeEngine(package_root)
-    try:
+    with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
             question=question,
@@ -112,8 +212,6 @@ def execute_exclusive_ivd_turn(
             effect_count=int(result.effect_count),
             sources=tuple(result.sources),
         )
-    finally:
-        engine.close()
 
 
 def _enabled_ivd_guard(config: dict[str, Any], platform: str) -> dict[str, Any] | None:
@@ -188,47 +286,76 @@ def preload_enabled_ivd_contracts(
 
 
 _MAX_RECEIPT_BYTES = 4096
-_RECEIPT_QUEUE: queue.Queue[tuple[AppendOnlyReceiptSink, bytes]] | None = queue.Queue(
+_RECEIPT_WRITE_ATTEMPTS = 3
+_RECEIPT_ENQUEUE_TIMEOUT_SECONDS = 0.25
+_RECEIPT_STOP = object()
+
+
+@dataclass
+class _ReceiptWriteTask:
+    destination: AppendOnlyReceiptSink
+    payload: bytes
+    completed: threading.Event = field(default_factory=threading.Event)
+    accepted: bool = False
+
+
+_RECEIPT_QUEUE: queue.Queue[_ReceiptWriteTask | object] | None = queue.Queue(
     maxsize=256
 )
 _RECEIPT_WORKER_STARTED = False
-_RECEIPT_WORKER_LOCK = threading.Lock()
+_RECEIPT_WORKER: threading.Thread | None = None
+_RECEIPT_ACCEPTING = True
+_RECEIPT_WORKER_LOCK = threading.RLock()
 
 
 def _append_ivd_receipt(sink: AppendOnlyReceiptSink, payload: bytes) -> bool:
     return sink.append(payload)
 
 
-def _receipt_worker() -> None:
-    assert _RECEIPT_QUEUE is not None
+def _receipt_worker(receipt_queue: queue.Queue[_ReceiptWriteTask | object]) -> None:
     while True:
-        destination, payload = _RECEIPT_QUEUE.get()
+        task = receipt_queue.get()
         try:
-            _append_ivd_receipt(destination, payload)
-        except Exception:
-            pass
+            if task is _RECEIPT_STOP:
+                return
+            assert isinstance(task, _ReceiptWriteTask)
+            try:
+                for _attempt in range(_RECEIPT_WRITE_ATTEMPTS):
+                    try:
+                        if _append_ivd_receipt(task.destination, task.payload):
+                            task.accepted = True
+                            break
+                    except Exception:
+                        continue
+            finally:
+                task.completed.set()
         finally:
-            _RECEIPT_QUEUE.task_done()
+            receipt_queue.task_done()
 
 
-def _ensure_receipt_worker() -> None:
-    global _RECEIPT_WORKER_STARTED
-    if _RECEIPT_WORKER_STARTED:
-        return
+def _ensure_receipt_worker() -> bool:
+    global _RECEIPT_WORKER, _RECEIPT_WORKER_STARTED
     with _RECEIPT_WORKER_LOCK:
-        if not _RECEIPT_WORKER_STARTED:
-            threading.Thread(
-                target=_receipt_worker,
-                name="ivd-receipt-writer",
-                daemon=True,
-            ).start()
-            _RECEIPT_WORKER_STARTED = True
+        if not _RECEIPT_ACCEPTING or _RECEIPT_QUEUE is None:
+            return False
+        if _RECEIPT_WORKER_STARTED:
+            return bool(_RECEIPT_WORKER and _RECEIPT_WORKER.is_alive())
+        worker = threading.Thread(
+            target=_receipt_worker,
+            args=(_RECEIPT_QUEUE,),
+            name="ivd-receipt-writer",
+            daemon=True,
+        )
+        worker.start()
+        _RECEIPT_WORKER = worker
+        _RECEIPT_WORKER_STARTED = True
+        return True
 
 
 def enqueue_ivd_receipt(
     destination: AppendOnlyReceiptSink, receipt: dict[str, Any]
 ) -> bool:
-    """Enqueue one bounded receipt; full/unavailable queues drop without retry."""
+    """Return success only after one bounded receipt is durably appended."""
     if _RECEIPT_QUEUE is None:
         return False
     payload = (
@@ -236,12 +363,44 @@ def enqueue_ivd_receipt(
     ).encode("utf-8")
     if len(payload) > _MAX_RECEIPT_BYTES:
         return False
-    _ensure_receipt_worker()
-    try:
-        _RECEIPT_QUEUE.put_nowait((destination, payload))
-        return True
-    except queue.Full:
-        return False
+    task = _ReceiptWriteTask(destination=destination, payload=payload)
+    with _RECEIPT_WORKER_LOCK:
+        if not _ensure_receipt_worker() or _RECEIPT_QUEUE is None:
+            return False
+        try:
+            _RECEIPT_QUEUE.put(task, timeout=_RECEIPT_ENQUEUE_TIMEOUT_SECONDS)
+        except queue.Full:
+            return False
+    task.completed.wait()
+    return task.accepted
+
+
+def drain_ivd_receipts(timeout: float = 5.0) -> bool:
+    """Stop accepting receipt work and drain every task accepted before shutdown."""
+    global _RECEIPT_ACCEPTING, _RECEIPT_WORKER, _RECEIPT_WORKER_STARTED
+    with _RECEIPT_WORKER_LOCK:
+        _RECEIPT_ACCEPTING = False
+        receipt_queue = _RECEIPT_QUEUE
+        worker = _RECEIPT_WORKER
+        if not _RECEIPT_WORKER_STARTED:
+            return receipt_queue is None or receipt_queue.empty()
+        if worker is None or receipt_queue is None:
+            return False
+        try:
+            receipt_queue.put(_RECEIPT_STOP, timeout=max(0.0, float(timeout)))
+        except queue.Full:
+            return False
+    worker.join(timeout=max(0.0, float(timeout)))
+    stopped = not worker.is_alive()
+    if stopped:
+        with _RECEIPT_WORKER_LOCK:
+            if _RECEIPT_WORKER is worker:
+                _RECEIPT_WORKER = None
+                _RECEIPT_WORKER_STARTED = False
+    return stopped
+
+
+atexit.register(drain_ivd_receipts)
 
 
 @dataclass(frozen=True)

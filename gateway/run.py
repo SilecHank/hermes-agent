@@ -2505,6 +2505,7 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     # and run_sync) must not leak into a future conversation's first user
     # message — session keys are source-derived and REUSED.
     "_pending_turn_sidecar_notes",
+    "_ivd_approval_owners",
 )
 
 # Sentinel for "caller did not pass metadata" vs "caller passed None".
@@ -4530,6 +4531,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             task_epoch=registry.current(*identity),
             effect=effect,
         )
+
+    def _approval_effect_owned_by_source(
+        self,
+        session_key: str,
+        source: SessionSource,
+    ) -> bool:
+        """Allow approval effects only for the participant that created them."""
+        owner = getattr(self, "_ivd_approval_owners", {}).get(session_key)
+        if not isinstance(owner, str) or not owner:
+            return False
+        current = self._effect_session_key_for_source(
+            source, effect="approval"
+        )
+        return owner == current
+
+    async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
+        session_key = self._session_key_for_source(event.source)
+        from tools.approval import has_blocking_approval
+
+        if has_blocking_approval(session_key) and not self._approval_effect_owned_by_source(
+            session_key, event.source
+        ):
+            logger.warning(
+                "Rejected approval from non-owner participant: session=%s user=%s",
+                session_key,
+                event.source.user_id,
+            )
+            return "当前审批不属于你，无法处理。"
+        return await GatewaySlashCommandsMixin._handle_approve_command(self, event)
+
+    async def _handle_deny_command(self, event: MessageEvent) -> str:
+        session_key = self._session_key_for_source(event.source)
+        from tools.approval import has_blocking_approval
+
+        if has_blocking_approval(session_key) and not self._approval_effect_owned_by_source(
+            session_key, event.source
+        ):
+            logger.warning(
+                "Rejected denial from non-owner participant: session=%s user=%s",
+                session_key,
+                event.source.user_id,
+            )
+            return "当前审批不属于你，无法处理。"
+        return await GatewaySlashCommandsMixin._handle_deny_command(self, event)
 
     def _advance_effect_epochs_for_session(
         self, session_key: str, *, reason: str
@@ -10894,7 +10939,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not check_qq_requirements():
                 logger.warning("QQBot: aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured")
                 return None
-            return QQAdapter(config)
+            adapter = QQAdapter(config)
+            adapter.gateway_runner = self
+            return adapter
 
         elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
@@ -22859,6 +22906,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
+                _approval_owners = getattr(self, "_ivd_approval_owners", None)
+                if (
+                    isinstance(_approval_owners, dict)
+                    and _approval_owners.get(_approval_session_key)
+                    == _approval_effect_key
+                ):
+                    _approval_owners.pop(_approval_session_key, None)
                 if _ivd_runtime_token is not None:
                     from gateway.ivd_runtime import (
                         end_ivd_answer_turn,

@@ -930,22 +930,19 @@ class QQAdapter(BasePlatformAdapter):
             self._last_msg_id[event.source.chat_id] = event.message_id
         if not event.get_command() and self._message_handler is not None:
             try:
-                from gateway.session_context import (
-                    EffectNamespace,
-                    build_effect_session_key,
-                )
                 from tools import clarify_gateway
 
                 source = event.source
-                clarify_key = build_effect_session_key(
-                    platform=source.platform.value,
-                    chat=str(source.chat_id or ""),
-                    thread=str(source.thread_id or ""),
-                    participant=str(source.user_id_alt or source.user_id or ""),
-                    task_epoch=0,
-                    effect=EffectNamespace.CLARIFICATION,
+                runner = getattr(self, "gateway_runner", None)
+                resolve_effect_key = getattr(
+                    runner, "_effect_session_key_for_source", None
                 )
-                if clarify_gateway.get_pending_for_session(
+                clarify_key = (
+                    resolve_effect_key(source, effect="clarification")
+                    if callable(resolve_effect_key)
+                    else None
+                )
+                if clarify_key and clarify_gateway.get_pending_for_session(
                     clarify_key, include_choice_prompts=True
                 ) is not None:
                     response = await self._message_handler(event)

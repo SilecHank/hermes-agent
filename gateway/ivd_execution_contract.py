@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import hmac
 import json
 import os
 import re
 import stat
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -51,10 +52,72 @@ _CACHE: OrderedDict[
     tuple[str, int, int, int, int], "ServingProjection"
 ] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
+_CONTRACT_AUTHORITY = object()
+_FILE_GRANT_ISSUER = object()
+_FILE_GRANT_SECRET = os.urandom(32)
 
 
 class IVDRuntimeConfigurationError(RuntimeError):
     """The managed IVD runtime cannot establish a serving contract."""
+
+
+class FileDeliveryCapabilityGrant:
+    """A process-issued grant bound to one contract, package, and object set."""
+
+    __slots__ = (
+        "contract_id",
+        "package_digest",
+        "allowed_object_ids",
+        "allowed_capabilities",
+        "grant_id",
+        "_signature",
+    )
+
+    def __init__(
+        self,
+        *,
+        contract_id: str,
+        package_digest: str,
+        allowed_object_ids: tuple[str, ...],
+        issuer: object,
+    ) -> None:
+        if issuer is not _FILE_GRANT_ISSUER:
+            raise IVDRuntimeConfigurationError("file delivery grant issuer is invalid")
+        if not contract_id or not _PACKAGE_DIGEST_RE.fullmatch(package_digest):
+            raise IVDRuntimeConfigurationError("file delivery grant identity is invalid")
+        normalized = tuple(sorted(set(allowed_object_ids)))
+        if not normalized or any(not _PACKAGE_DIGEST_RE.fullmatch(item) for item in normalized):
+            raise IVDRuntimeConfigurationError("file delivery grant objects are invalid")
+        identity = "\0".join((contract_id, package_digest, *normalized)).encode("utf-8")
+        signature = hmac.new(_FILE_GRANT_SECRET, identity, hashlib.sha256).hexdigest()
+        object.__setattr__(self, "contract_id", contract_id)
+        object.__setattr__(self, "package_digest", package_digest)
+        object.__setattr__(self, "allowed_object_ids", normalized)
+        object.__setattr__(self, "allowed_capabilities", ("deliver_file",))
+        object.__setattr__(self, "grant_id", "ivd-file-grant-" + signature)
+        object.__setattr__(self, "_signature", signature)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("file delivery grants are immutable")
+
+    def verify(self) -> bool:
+        if (
+            self.allowed_capabilities != ("deliver_file",)
+            or self.grant_id != "ivd-file-grant-" + self._signature
+            or not self.contract_id
+            or not _PACKAGE_DIGEST_RE.fullmatch(self.package_digest)
+            or not self.allowed_object_ids
+            or any(
+                not _PACKAGE_DIGEST_RE.fullmatch(item)
+                for item in self.allowed_object_ids
+            )
+        ):
+            return False
+        identity = "\0".join(
+            (self.contract_id, self.package_digest, *self.allowed_object_ids)
+        ).encode("utf-8")
+        expected = hmac.new(_FILE_GRANT_SECRET, identity, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(self._signature, expected)
 
 
 class AppendOnlyReceiptSink:
@@ -194,6 +257,52 @@ class CompatibilityExecutionContract:
     receipt_destination: AppendOnlyReceiptSink
     serving_projection: Mapping[str, Any]
     trusted_legacy_answer_enabled: bool = True
+    _authority_proof: object | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def issue_file_delivery_grant(
+        self, allowed_object_ids: tuple[str, ...]
+    ) -> FileDeliveryCapabilityGrant:
+        if self._authority_proof is not _CONTRACT_AUTHORITY:
+            raise IVDRuntimeConfigurationError(
+                "file delivery grants require a trusted execution contract"
+            )
+        return FileDeliveryCapabilityGrant(
+            contract_id=self.contract_id,
+            package_digest=self.package_digest,
+            allowed_object_ids=allowed_object_ids,
+            issuer=_FILE_GRANT_ISSUER,
+        )
+
+
+def validate_file_delivery_authorization(
+    contract: object,
+    grant: object,
+    *,
+    object_id: str,
+) -> tuple[CompatibilityExecutionContract, FileDeliveryCapabilityGrant]:
+    """Validate exact process-issued contract and grant identities."""
+    if (
+        type(contract) is not CompatibilityExecutionContract
+        or contract._authority_proof is not _CONTRACT_AUTHORITY
+    ):
+        raise IVDRuntimeConfigurationError(
+            "file delivery requires a trusted execution contract"
+        )
+    if type(grant) is not FileDeliveryCapabilityGrant or not grant.verify():
+        raise IVDRuntimeConfigurationError(
+            "file delivery requires a trusted capability grant"
+        )
+    if (
+        grant.contract_id != contract.contract_id
+        or grant.package_digest != contract.package_digest
+        or object_id not in grant.allowed_object_ids
+    ):
+        raise IVDRuntimeConfigurationError(
+            "file delivery grant binding does not match the requested object"
+        )
+    return contract, grant
 
 
 @dataclass(frozen=True)
@@ -382,6 +491,7 @@ def prepare_ivd_turn(projection: ServingProjection) -> PreparedIVDTurn:
         raise IVDRuntimeConfigurationError("a serving projection is required")
     identity = (
         f"{projection.package_digest}\0{projection.serving_projection_digest}"
+        f"\0{os.urandom(32).hex()}"
     )
     contract = CompatibilityExecutionContract(
         contract_id="ivd-contract-" + hashlib.sha256(identity.encode()).hexdigest(),
@@ -389,5 +499,6 @@ def prepare_ivd_turn(projection: ServingProjection) -> PreparedIVDTurn:
         serving_projection_digest=projection.serving_projection_digest,
         receipt_destination=projection.receipt_destination,
         serving_projection=projection.serving_projection,
+        _authority_proof=_CONTRACT_AUTHORITY,
     )
     return PreparedIVDTurn(execution_contract=contract)

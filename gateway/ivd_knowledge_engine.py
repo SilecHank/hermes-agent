@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,7 +49,14 @@ class IVDKnowledgeEngine:
         "renders/render-policy.json",
     )
 
-    def __init__(self, package_root: str | Path) -> None:
+    def __init__(
+        self,
+        package_root: str | Path,
+        *,
+        expected_package_digest: str | None = None,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._closed = False
         self._root = Path(package_root)
         if not self._root.is_dir() or self._root.is_symlink():
             raise PackageIntegrityError("serving package root invalid")
@@ -75,26 +83,47 @@ class IVDKnowledgeEngine:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        if hashlib.sha256(digest_payload).hexdigest() != manifest.get("package_digest"):
+        observed_package_digest = hashlib.sha256(digest_payload).hexdigest()
+        if observed_package_digest != manifest.get("package_digest"):
             raise PackageIntegrityError("package digest mismatch")
+        if (
+            expected_package_digest is not None
+            and expected_package_digest != observed_package_digest
+        ):
+            raise PackageIntegrityError("expected package digest mismatch")
+        self._package_digest = observed_package_digest
 
         self._graph = self._read_json("indexes/diagnostic-graph.json")
         self._renderer = IVDRenderer(self._read_json("renders/render-policy.json"))
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
-        self._database = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        self._database.row_factory = sqlite3.Row
-        self._database.execute("PRAGMA query_only=ON")
-        self._known_product_lines = tuple(
-            row[0]
-            for row in self._database.execute(
-                "SELECT DISTINCT product_line FROM products ORDER BY product_line"
-            ).fetchall()
-            if row[0]
-        )
+        connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=ON")
+            known_product_lines = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT product_line FROM products ORDER BY product_line"
+                ).fetchall()
+                if row[0]
+            )
+        except Exception:
+            connection.close()
+            raise
+        self._database = connection
+        self._known_product_lines = known_product_lines
+
+    @property
+    def package_digest(self) -> str:
+        return self._package_digest
 
     def close(self) -> None:
-        self._database.close()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._database.close()
 
     def __enter__(self) -> "IVDKnowledgeEngine":
         return self
@@ -301,6 +330,32 @@ class IVDKnowledgeEngine:
         }
 
     def execute(
+        self,
+        *,
+        question: str,
+        product_line: str = "",
+        product_variant: str | None = None,
+        workflow_stage: str = "",
+        knowledge_type: str = "",
+        answer_shape: str = "",
+        evidence: Mapping[str, object] | None = None,
+        allow_index_transaction: bool = False,
+    ) -> ExecutionResult:
+        with self._lock:
+            if self._closed:
+                raise PackageIntegrityError("knowledge engine is closed")
+            return self._execute(
+                question=question,
+                product_line=product_line,
+                product_variant=product_variant,
+                workflow_stage=workflow_stage,
+                knowledge_type=knowledge_type,
+                answer_shape=answer_shape,
+                evidence=evidence,
+                allow_index_transaction=allow_index_transaction,
+            )
+
+    def _execute(
         self,
         *,
         question: str,

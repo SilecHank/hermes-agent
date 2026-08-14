@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Protocol
 
+from gateway.ivd_execution_contract import (
+    IVDRuntimeConfigurationError,
+    validate_file_delivery_authorization,
+)
+from gateway.ivd_receipt_sink import effect_ledger_for_destination
+
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_FIELDS = {"schema_version", "originals", "source_vault_digest"}
@@ -55,6 +61,9 @@ class DocumentEffectReceipt:
     object_id: str
     object_digest: str
     status: str
+    contract_id: str
+    package_digest: str
+    grant_id: str
 
 
 def _canonical(value: object) -> bytes:
@@ -128,6 +137,7 @@ class ManifestBoundDocumentDelivery:
             raise DocumentDeliveryError("source vault is unavailable") from error
         self._sender = sender
         self._receipt_sink = receipt_sink
+        self._effect_ledger = effect_ledger_for_destination(receipt_sink)
         self._objects = self._load_manifest()
 
     def __del__(self) -> None:
@@ -187,14 +197,22 @@ class ManifestBoundDocumentDelivery:
                 raise DocumentDeliveryError("source vault object binding conflicts")
         return objects
 
-    def send(self, *, object_id: str, expected_digest: str, grant: object) -> DocumentEffectReceipt:
-        capabilities = getattr(grant, "allowed_capabilities", ())
-        if (
-            isinstance(capabilities, str)
-            or not isinstance(capabilities, (tuple, list, set, frozenset))
-            or "deliver_file" not in capabilities
-        ):
-            raise CapabilityDenied("deliver_file capability is required")
+    def send(
+        self,
+        *,
+        object_id: str,
+        expected_digest: str,
+        contract: object,
+        grant: object,
+    ) -> DocumentEffectReceipt:
+        try:
+            trusted_contract, trusted_grant = validate_file_delivery_authorization(
+                contract,
+                grant,
+                object_id=object_id,
+            )
+        except IVDRuntimeConfigurationError as error:
+            raise CapabilityDenied("trusted deliver_file authorization is required") from error
         if not _SHA256.fullmatch(object_id) or not _SHA256.fullmatch(expected_digest):
             raise DocumentDeliveryError("document digest is invalid")
         entry = self._objects.get(object_id)
@@ -202,27 +220,53 @@ class ManifestBoundDocumentDelivery:
             raise DocumentDeliveryError("document object is not in the manifest")
         if entry.get("object_digest") != expected_digest:
             raise DocumentDeliveryError("requested document digest mismatch")
-        data = _read_at(self._root_fd, str(entry["object_path"]), _MAX_OBJECT_BYTES)
-        digest = hashlib.sha256(data).hexdigest()
-        if digest != expected_digest or len(data) != entry["size"]:
-            raise DocumentDeliveryError("document object integrity mismatch")
-        logical_name = PurePosixPath(str(entry["logical_path"])).name
-        if not logical_name:
-            raise DocumentDeliveryError("document logical name is invalid")
-        document = DeliveredDocument(object_id, digest, logical_name, data)
-        try:
-            self._sender(document)
-        except Exception as error:
-            raise DocumentDeliveryError("document sender failed") from error
-        receipt = DocumentEffectReceipt(object_id, digest, "delivered")
-        payload = _canonical(
-            {
-                "effect": "deliver_file",
-                "object_digest": digest,
-                "object_id": object_id,
-                "status": "delivered",
-            }
-        ) + b"\n"
-        if not self._receipt_sink.append(payload):
-            raise DocumentDeliveryError("document effect receipt was not recorded")
-        return receipt
+
+        def deliver_once() -> tuple[DocumentEffectReceipt, bytes]:
+            data = _read_at(
+                self._root_fd,
+                str(entry["object_path"]),
+                _MAX_OBJECT_BYTES,
+            )
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != expected_digest or len(data) != entry["size"]:
+                raise DocumentDeliveryError("document object integrity mismatch")
+            logical_name = PurePosixPath(str(entry["logical_path"])).name
+            if not logical_name:
+                raise DocumentDeliveryError("document logical name is invalid")
+            document = DeliveredDocument(object_id, digest, logical_name, data)
+            try:
+                self._sender(document)
+            except Exception as error:
+                raise DocumentDeliveryError("document sender failed") from error
+            receipt = DocumentEffectReceipt(
+                object_id=object_id,
+                object_digest=digest,
+                status="delivered",
+                contract_id=trusted_contract.contract_id,
+                package_digest=trusted_contract.package_digest,
+                grant_id=trusted_grant.grant_id,
+            )
+            payload = _canonical(
+                {
+                    "effect": "deliver_file",
+                    "contract_id": receipt.contract_id,
+                    "grant_id": receipt.grant_id,
+                    "package_digest": receipt.package_digest,
+                    "object_digest": receipt.object_digest,
+                    "object_id": receipt.object_id,
+                    "status": receipt.status,
+                }
+            ) + b"\n"
+            return receipt, payload
+
+        return self._effect_ledger.execute(
+            key=(
+                trusted_contract.contract_id,
+                trusted_contract.package_digest,
+                "deliver_file",
+                object_id,
+            ),
+            digest=expected_digest,
+            operation=deliver_once,
+            receipt_submitter=self._receipt_sink.append,
+        )

@@ -1,7 +1,10 @@
 import threading
 
+import pytest
+
 from gateway.ivd_receipt_sink import (
     AuthoritativeTurnReceiptSink,
+    ReceiptPersistenceError,
     TurnReceipt,
 )
 from gateway.run import _enqueue_gateway_ivd_receipt
@@ -30,13 +33,22 @@ def test_turn_emits_one_authoritative_receipt():
     assert sink.authoritative_count == 1
 
 
-def test_receipt_failure_does_not_change_answer():
-    sink = AuthoritativeTurnReceiptSink(submitter=lambda _receipt: False)
+def test_receipt_failure_blocks_answer_handoff_and_remains_retryable():
+    attempts = []
+
+    def submitter(receipt):
+        attempts.append(receipt)
+        return len(attempts) > 1
+
+    sink = AuthoritativeTurnReceiptSink(submitter=submitter)
     answer = "200 uL。"
 
-    returned = sink.submit_after_handoff(answer, _receipt())
+    with pytest.raises(RuntimeError, match="receipt"):
+        sink.submit_after_handoff(answer, _receipt())
 
-    assert returned == answer
+    assert sink.submit_after_handoff(answer, _receipt()) == answer
+    assert len(attempts) == 2
+    assert sink.authoritative_count == 1
     assert sink.failed_count == 1
 
 
@@ -52,6 +64,43 @@ def test_concurrent_duplicate_submissions_still_write_once():
 
     assert len(submitted) == 1
     assert sink.authoritative_count == 1
+
+
+def test_concurrent_duplicate_can_retry_one_failed_persistence():
+    entered = threading.Event()
+    release = threading.Event()
+    attempts = []
+    outcomes = []
+
+    def submitter(receipt):
+        attempts.append(receipt)
+        if len(attempts) == 1:
+            entered.set()
+            release.wait(timeout=2)
+            return False
+        return True
+
+    sink = AuthoritativeTurnReceiptSink(submitter=submitter)
+
+    def submit():
+        try:
+            outcomes.append(sink.submit(_receipt()))
+        except ReceiptPersistenceError:
+            outcomes.append("blocked")
+
+    first = threading.Thread(target=submit)
+    second = threading.Thread(target=submit)
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert sorted(outcomes, key=str) == [True, "blocked"]
+    assert len(attempts) == 2
+    assert sink.authoritative_count == 1
+    assert sink.failed_count == 1
 
 
 def test_receipt_rejects_competing_outcome_payloads():

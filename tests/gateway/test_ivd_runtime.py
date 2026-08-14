@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -507,7 +508,40 @@ def test_oversized_receipt_is_dropped_before_writer_queue():
     assert submitted is False
 
 
-def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch):
+def test_enqueue_waits_for_durable_writer_ack(monkeypatch):
+    import gateway.ivd_runtime as runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+
+    class Sink:
+        def append(self, _payload):
+            entered.set()
+            release.wait(timeout=2)
+            return True
+
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER", None)
+    monkeypatch.setattr(runtime, "_RECEIPT_ACCEPTING", True)
+    monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", runtime.queue.Queue(maxsize=1))
+    worker = threading.Thread(
+        target=lambda: results.append(
+            enqueue_ivd_receipt(Sink(), {"turn_id": "durable"})
+        )
+    )
+
+    worker.start()
+    assert entered.wait(timeout=1)
+    assert worker.is_alive()
+    release.set()
+    worker.join(timeout=2)
+
+    assert results == [True]
+    assert runtime.drain_ivd_receipts(timeout=2) is True
+
+
+def test_receipt_worker_retries_then_reports_terminal_failure(monkeypatch):
     import gateway.ivd_runtime as runtime
 
     attempts = []
@@ -517,12 +551,109 @@ def test_receipt_worker_failure_is_one_attempt_without_retry(monkeypatch):
         {"append": lambda self, payload: attempts.append(payload) and False},
     )()
     monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER", None)
+    monkeypatch.setattr(runtime, "_RECEIPT_ACCEPTING", True)
     monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", runtime.queue.Queue(maxsize=1))
 
-    assert enqueue_ivd_receipt(sink, {"turn_id": "one"})
-    runtime._RECEIPT_QUEUE.join()
+    assert enqueue_ivd_receipt(sink, {"turn_id": "one"}) is False
 
-    assert len(attempts) == 1
+    assert len(attempts) == 3
+    assert runtime.drain_ivd_receipts(timeout=2) is True
+
+
+def test_receipt_queue_full_reports_failure(monkeypatch):
+    import gateway.ivd_runtime as runtime
+
+    receipt_queue = runtime.queue.Queue(maxsize=1)
+    receipt_queue.put(object())
+    worker = type("Worker", (), {"is_alive": lambda self: True})()
+    monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", receipt_queue)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", True)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER", worker)
+    monkeypatch.setattr(runtime, "_RECEIPT_ACCEPTING", True)
+    monkeypatch.setattr(runtime, "_RECEIPT_ENQUEUE_TIMEOUT_SECONDS", 0.01)
+
+    assert enqueue_ivd_receipt(object(), {"turn_id": "queue-full"}) is False
+
+
+def test_receipt_enqueue_and_shutdown_have_one_atomic_acceptance_boundary(
+    monkeypatch,
+):
+    import gateway.ivd_runtime as runtime
+
+    enqueue_ready = threading.Event()
+    allow_enqueue = threading.Event()
+
+    class PausingQueue(runtime.queue.Queue):
+        def put(self, item, block=True, timeout=None):
+            if isinstance(item, runtime._ReceiptWriteTask):
+                enqueue_ready.set()
+                allow_enqueue.wait(timeout=2)
+            return super().put(item, block=block, timeout=timeout)
+
+    receipt_queue = PausingQueue(maxsize=2)
+    monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", receipt_queue)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER", None)
+    monkeypatch.setattr(runtime, "_RECEIPT_ACCEPTING", True)
+    persisted = []
+    sink = type(
+        "Sink",
+        (),
+        {"append": lambda self, payload: persisted.append(payload) or True},
+    )()
+    enqueue_results = []
+    drain_results = []
+    enqueue_thread = threading.Thread(
+        target=lambda: enqueue_results.append(
+            enqueue_ivd_receipt(sink, {"turn_id": "accepted-before-stop"})
+        ),
+        daemon=True,
+    )
+    drain_thread = threading.Thread(
+        target=lambda: drain_results.append(runtime.drain_ivd_receipts(timeout=2)),
+        daemon=True,
+    )
+
+    enqueue_thread.start()
+    assert enqueue_ready.wait(timeout=1)
+    drain_thread.start()
+    allow_enqueue.set()
+    enqueue_thread.join(timeout=2)
+    drain_thread.join(timeout=2)
+
+    lost_or_blocked = enqueue_thread.is_alive() or enqueue_results != [True]
+    if enqueue_thread.is_alive():
+        while not receipt_queue.empty():
+            queued = receipt_queue.get_nowait()
+            if isinstance(queued, runtime._ReceiptWriteTask):
+                queued.completed.set()
+            receipt_queue.task_done()
+        enqueue_thread.join(timeout=1)
+
+    assert not lost_or_blocked
+    assert drain_results == [True]
+    assert len(persisted) == 1
+
+
+def test_receipt_shutdown_drains_and_rejects_new_work(monkeypatch):
+    import gateway.ivd_runtime as runtime
+
+    persisted = []
+    sink = type(
+        "Sink",
+        (),
+        {"append": lambda self, payload: persisted.append(payload) or True},
+    )()
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER_STARTED", False)
+    monkeypatch.setattr(runtime, "_RECEIPT_WORKER", None)
+    monkeypatch.setattr(runtime, "_RECEIPT_ACCEPTING", True)
+    monkeypatch.setattr(runtime, "_RECEIPT_QUEUE", runtime.queue.Queue(maxsize=2))
+
+    assert enqueue_ivd_receipt(sink, {"turn_id": "before-stop"}) is True
+    assert runtime.drain_ivd_receipts(timeout=2) is True
+    assert len(persisted) == 1
+    assert enqueue_ivd_receipt(sink, {"turn_id": "after-stop"}) is False
 
 
 def test_append_receipt_does_not_retry_partial_os_write(monkeypatch):

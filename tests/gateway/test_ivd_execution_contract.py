@@ -11,6 +11,7 @@ import pytest
 
 import gateway.ivd_execution_contract as execution_contracts
 from gateway.ivd_execution_contract import (
+    CompatibilityExecutionContract,
     IVDRuntimeConfigurationError,
     load_serving_projection,
     prepare_ivd_turn,
@@ -98,6 +99,26 @@ def test_loader_accepts_release_schema_and_keeps_only_serving_identity(tmp_path)
     assert not hasattr(prepared, "user_text")
     with pytest.raises(FrozenInstanceError):
         prepared.execution_contract = None
+
+
+def test_only_prepared_execution_contract_can_issue_file_delivery_grant(tmp_path):
+    prepared = prepare_ivd_turn(load_serving_projection(_write_release(tmp_path)))
+    contract = prepared.execution_contract
+
+    grant = contract.issue_file_delivery_grant(("b" * 64,))
+
+    assert grant.contract_id == contract.contract_id
+    assert grant.package_digest == contract.package_digest
+    assert grant.allowed_object_ids == ("b" * 64,)
+    forged = CompatibilityExecutionContract(
+        contract_id=contract.contract_id,
+        package_digest=contract.package_digest,
+        serving_projection_digest=contract.serving_projection_digest,
+        receipt_destination=contract.receipt_destination,
+        serving_projection=contract.serving_projection,
+    )
+    with pytest.raises(IVDRuntimeConfigurationError, match="trusted"):
+        forged.issue_file_delivery_grant(("b" * 64,))
 
 
 def test_loader_rejects_serving_tamper_even_with_updated_projection_digest(tmp_path):

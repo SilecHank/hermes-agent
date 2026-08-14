@@ -114,6 +114,24 @@ def test_qq_group_members_share_one_session_without_losing_sender_identity():
     assert member_b.user_id == "member-b"
 
 
+def test_gateway_created_qq_adapter_is_bound_to_epoch_owner(monkeypatch):
+    from gateway.platforms.qqbot import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    runner = _runner(group_sessions_per_user=True)
+    monkeypatch.setattr(
+        "gateway.platforms.qqbot.check_qq_requirements", lambda: True
+    )
+
+    adapter = runner._create_adapter(
+        Platform.QQBOT,
+        _make_config(app_id="a", client_secret="b"),
+    )
+
+    assert isinstance(adapter, QQAdapter)
+    assert adapter.gateway_runner is runner
+
+
 @pytest.mark.parametrize(
     "platform",
     [Platform.QQBOT, Platform.WECOM, Platform.WEIXIN],
@@ -195,8 +213,10 @@ async def test_qq_active_group_routes_same_member_reply_to_clarify_not_busy_hand
     adapter.config.extra["group_sessions_per_user"] = True
     adapter._message_handler = AsyncMock(return_value="")
     adapter._busy_session_handler = AsyncMock(return_value=True)
+    runner = _runner(group_sessions_per_user=True)
+    adapter.gateway_runner = runner
     session_key = GatewayRunner._effect_session_key_for_source(
-        _runner(group_sessions_per_user=True),
+        runner,
         _qq_group_source("group-1", "member-a"),
         effect="clarification",
     )
@@ -221,6 +241,135 @@ async def test_qq_active_group_routes_same_member_reply_to_clarify_not_busy_hand
 
     adapter._message_handler.assert_awaited_once_with(event)
     adapter._busy_session_handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_qq_group_member_b_cannot_consume_member_a_clarification(monkeypatch):
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    runner = _runner(group_sessions_per_user=True)
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    adapter.gateway_runner = runner
+    adapter._message_handler = AsyncMock(return_value="")
+    base_handler = AsyncMock(return_value=None)
+    monkeypatch.setattr(BasePlatformAdapter, "handle_message", base_handler)
+    key_a = runner._effect_session_key_for_source(
+        _qq_group_source("group-1", "member-a"), effect="clarification"
+    )
+    entry = clarify_gateway.register(
+        clarify_id="clarify-member-a",
+        session_key=key_a,
+        question="卡在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    clarify_gateway.mark_awaiting_text(entry.clarify_id)
+    event_b = MessageEvent(
+        text="2",
+        message_type=MessageType.TEXT,
+        source=_qq_group_source("group-1", "member-b"),
+        message_id="msg-member-b",
+    )
+    try:
+        await adapter.handle_message(event_b)
+        assert entry.response is None
+    finally:
+        clarify_gateway.clear_session(key_a)
+
+    adapter._message_handler.assert_not_awaited()
+    base_handler.assert_awaited_once_with(event_b)
+
+
+@pytest.mark.asyncio
+async def test_qq_reply_from_old_epoch_is_not_consumed_after_reset(monkeypatch):
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    runner = _runner(group_sessions_per_user=True)
+    source = _qq_group_source("group-1", "member-a")
+    conversation_key = runner._session_key_for_source(source)
+    old_key = runner._effect_session_key_for_source(
+        source, effect="clarification"
+    )
+    entry = clarify_gateway.register(
+        clarify_id="clarify-old-epoch",
+        session_key=old_key,
+        question="卡在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    clarify_gateway.mark_awaiting_text(entry.clarify_id)
+    runner._clear_conversation_scope(conversation_key, reason="reset")
+    current_key = runner._effect_session_key_for_source(
+        source, effect="clarification"
+    )
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    adapter.gateway_runner = runner
+    adapter._message_handler = AsyncMock(return_value="")
+    base_handler = AsyncMock(return_value=None)
+    monkeypatch.setattr(BasePlatformAdapter, "handle_message", base_handler)
+    event = MessageEvent(
+        text="2",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="msg-after-reset",
+    )
+    try:
+        await adapter.handle_message(event)
+        assert current_key != old_key
+        assert entry.response is None
+    finally:
+        clarify_gateway.clear_session(old_key)
+        clarify_gateway.clear_session(current_key)
+
+    adapter._message_handler.assert_not_awaited()
+    base_handler.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_qq_reply_routes_to_current_epoch_after_reset(monkeypatch):
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.platforms.qqbot.adapter import QQAdapter
+    from tests.gateway.test_qqbot import _make_config
+
+    runner = _runner(group_sessions_per_user=True)
+    source = _qq_group_source("group-1", "member-a")
+    conversation_key = runner._session_key_for_source(source)
+    old_key = runner._effect_session_key_for_source(
+        source, effect="clarification"
+    )
+    runner._clear_conversation_scope(conversation_key, reason="reset")
+    current_key = runner._effect_session_key_for_source(
+        source, effect="clarification"
+    )
+    entry = clarify_gateway.register(
+        clarify_id="clarify-current-epoch",
+        session_key=current_key,
+        question="卡在哪一步？",
+        choices=["建任务", "数据导入"],
+    )
+    clarify_gateway.mark_awaiting_text(entry.clarify_id)
+    adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+    adapter.gateway_runner = runner
+    adapter._message_handler = AsyncMock(return_value="")
+    base_handler = AsyncMock(return_value=None)
+    monkeypatch.setattr(BasePlatformAdapter, "handle_message", base_handler)
+    event = MessageEvent(
+        text="2",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="msg-current-epoch",
+    )
+    try:
+        await adapter.handle_message(event)
+        assert current_key != old_key
+    finally:
+        clarify_gateway.clear_session(old_key)
+        clarify_gateway.clear_session(current_key)
+
+    adapter._message_handler.assert_awaited_once_with(event)
+    base_handler.assert_not_awaited()
 
 
 def test_qq_busy_ack_does_not_expose_english_internal_template():

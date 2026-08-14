@@ -33,12 +33,22 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str) -> MessageEvent:
+def _make_event(text: str, source: SessionSource | None = None) -> MessageEvent:
     return MessageEvent(
         text=text,
         message_type=MessageType.TEXT,
-        source=_make_source(),
+        source=source or _make_source(),
         message_id="m1",
+    )
+
+
+def _make_group_source(member: str) -> SessionSource:
+    return SessionSource(
+        platform=Platform.QQBOT,
+        user_id=member,
+        chat_id="group-1",
+        user_name=f"member-{member}",
+        chat_type="group",
     )
 
 
@@ -66,7 +76,7 @@ def _make_runner():
     )
     # _unwrap_ephemeral is a real base-adapter method; emulate its contract.
     adapter._unwrap_ephemeral = lambda r: (r, 0) if isinstance(r, str) else (None, 0)
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {Platform.TELEGRAM: adapter, Platform.QQBOT: adapter}
     runner._running_agents = {}
     runner._running_agents_ts = {}
     runner._pending_messages = {}
@@ -82,11 +92,14 @@ def _make_runner():
     return runner, adapter
 
 
-def _register_blocking_approval(runner):
+def _register_blocking_approval(runner, source: SessionSource | None = None):
     """Register a real blocking approval entry for the runner's session."""
     from tools.approval import _ApprovalEntry, _gateway_queues
-    source = _make_source()
+    source = source or _make_source()
     session_key = runner._session_key_for_source(source)
+    runner.__dict__.setdefault("_ivd_approval_owners", {})[session_key] = (
+        runner._effect_session_key_for_source(source, effect="approval")
+    )
     entry = _ApprovalEntry({"command": "rm -rf /tmp/test"})
     _gateway_queues.setdefault(session_key, []).append(entry)
     return session_key, entry
@@ -152,6 +165,26 @@ def test_plaintext_session_maps_to_session_choice():
 
     assert handled is True
     assert entry.result == "session"
+    _clear_approval_state()
+
+
+def test_group_member_cannot_consume_another_participants_plaintext_approval():
+    _clear_approval_state()
+    runner, adapter = _make_runner()
+    owner = _make_group_source("member-a")
+    other = _make_group_source("member-b")
+    session_key, entry = _register_blocking_approval(runner, owner)
+
+    handled = asyncio.run(
+        runner._handle_active_session_busy_message(
+            _make_event("yes", other), session_key
+        )
+    )
+
+    assert handled is True
+    assert entry.event.is_set() is False
+    assert entry.result is None
+    adapter._send_with_retry.assert_awaited()
     _clear_approval_state()
 
 

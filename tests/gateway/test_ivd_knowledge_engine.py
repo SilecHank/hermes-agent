@@ -221,6 +221,46 @@ def test_scalar_lookup_returns_value_and_unit_without_model(package: Path):
     assert result.sources == (result.source,)
 
 
+def test_engine_binds_observed_package_digest_to_expected_release(package: Path):
+    manifest = json.loads((package / "package-manifest.json").read_text())
+    digest = manifest["package_digest"]
+
+    engine = IVDKnowledgeEngine(package, expected_package_digest=digest)
+    try:
+        assert engine.package_digest == digest
+    finally:
+        engine.close()
+
+    with pytest.raises(PackageIntegrityError, match="expected package digest"):
+        IVDKnowledgeEngine(package, expected_package_digest="f" * 64)
+
+
+def test_engine_closes_candidate_database_when_release_initialization_fails(
+    package: Path, monkeypatch
+):
+    import gateway.ivd_knowledge_engine as engine_module
+
+    class BrokenDatabase:
+        row_factory = None
+        close_count = 0
+
+        def execute(self, statement):
+            if statement == "PRAGMA query_only=ON":
+                return self
+            raise sqlite3.DatabaseError("broken release registry")
+
+        def close(self):
+            self.close_count += 1
+
+    database = BrokenDatabase()
+    monkeypatch.setattr(engine_module.sqlite3, "connect", lambda *_args, **_kwargs: database)
+
+    with pytest.raises(sqlite3.DatabaseError, match="broken release registry"):
+        IVDKnowledgeEngine(package)
+
+    assert database.close_count == 1
+
+
 def test_process_and_file_exact_lookups_are_zero_search_transactions(package: Path):
     engine = IVDKnowledgeEngine(package)
 
