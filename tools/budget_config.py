@@ -33,6 +33,7 @@ class BudgetConfig:
     turn_budget: int = DEFAULT_TURN_BUDGET_CHARS
     preview_size: int = DEFAULT_PREVIEW_SIZE_CHARS
     tool_overrides: Dict[str, int] = field(default_factory=dict)
+    honor_pinned_thresholds: bool = True
 
     def resolve_threshold(self, tool_name: str) -> int | float:
         """Resolve the persistence threshold for a tool.
@@ -46,7 +47,7 @@ class BudgetConfig:
         equal 100K; for a scaled-down budget it prevents a per-tool registry
         value from re-inflating the cap past the model's window (#23767).
         """
-        if tool_name in PINNED_THRESHOLDS:
+        if self.honor_pinned_thresholds and tool_name in PINNED_THRESHOLDS:
             return PINNED_THRESHOLDS[tool_name]
         if tool_name in self.tool_overrides:
             return self.tool_overrides[tool_name]

@@ -23,11 +23,109 @@ def test_all_gateway_stream_consumers_receive_outbound_sanitizer():
     )
 
 
-@pytest.mark.parametrize("platform", ["weixin", "wecom", "qqbot"])
+@pytest.mark.parametrize("platform", ["weixin", "wecom", "qqbot", "telegram"])
 def test_normal_ivd_answer_is_unchanged(platform):
     answer = "结论：该参数为 100 ng。\n依据：SOP-JL-110 B2。"
 
     assert sanitize_human_outbound(platform, answer, kind="final") == answer
+
+
+@pytest.mark.parametrize("platform", ["weixin", "wecom", "qqbot", "telegram"])
+def test_ivd_answer_is_normalized_to_copy_friendly_plain_text(platform):
+    answer = (
+        "# 主要差异\n\n"
+        "**V5 流程**\n"
+        "- 使用 `PMseq RNA V5` 试剂。\n"
+        "- 参见 [正式 SOP](https://example.test/sop-v5)。"
+    )
+
+    assert sanitize_human_outbound(platform, answer, kind="final") == (
+        "主要差异\n\n"
+        "V5 流程\n"
+        "• 使用 PMseq RNA V5 试剂。\n"
+        "• 参见 正式 SOP：https://example.test/sop-v5。"
+    )
+
+
+def test_ivd_plain_text_preserves_code_and_professional_identifiers():
+    answer = (
+        "**复核命令**\n\n"
+        "```sh\npython3 -B tool.py --sample sample_id --glob '*.fq.gz'\n```\n\n"
+        "HBA1/HBA2、anti-3.7、sample_id、/path_with_under/file.md、5*10 均保持原样。"
+    )
+
+    assert sanitize_human_outbound("telegram", answer, kind="final") == (
+        "复核命令\n\n"
+        "python3 -B tool.py --sample sample_id --glob '*.fq.gz'\n\n"
+        "HBA1/HBA2、anti-3.7、sample_id、/path_with_under/file.md、5*10 均保持原样。"
+    )
+
+
+def test_ivd_plain_text_removes_safe_italic_and_partial_fence_markers():
+    answer = "_关键差异_，但 sample_id 保持原样。\n```text\n正在生成"
+
+    assert sanitize_human_outbound("weixin", answer, kind="interim") == (
+        "关键差异，但 sample_id 保持原样。\n正在生成"
+    )
+
+
+def test_ivd_markdown_table_becomes_readable_plain_lines():
+    answer = (
+        "| 版本 | 关键差异 |\n"
+        "| --- | --- |\n"
+        "| V4 | 旧流程 |\n"
+        "| V5 | 新流程 |"
+    )
+
+    sanitized = sanitize_human_outbound("wecom", answer, kind="final")
+
+    assert sanitized == (
+        "1. V4\n"
+        "关键差异：旧流程\n\n"
+        "2. V5\n"
+        "关键差异：新流程"
+    )
+    assert "|" not in sanitized
+
+
+def test_ivd_comparison_table_becomes_scannable_numbered_blocks():
+    answer = (
+        "## 实验流程对比\n\n"
+        "| 环节 | V4（SOP-JL-410） | V5（SOP-JL-501） |\n"
+        "| --- | --- | --- |\n"
+        "| 流程主线 | 逆转录 → 二链合成 | 逆转录 → 二链合成 → 片段化、末端修复和加A |\n"
+        "| 内标 | R10，仅20×稀释 | R3，20×/50×两档 |"
+    )
+
+    assert sanitize_human_outbound("weixin", answer, kind="final") == (
+        "实验流程对比\n\n"
+        "1. 流程主线\n"
+        "V4（SOP-JL-410）：逆转录 → 二链合成\n"
+        "V5（SOP-JL-501）：逆转录 → 二链合成 → 片段化、末端修复和加A\n\n"
+        "2. 内标\n"
+        "V4（SOP-JL-410）：R10，仅20×稀释\n"
+        "V5（SOP-JL-501）：R3，20×/50×两档"
+    )
+
+
+def test_ivd_answer_hides_internal_review_reference_slug():
+    answer = "V5 新增片段化步骤（已审核 reference: pmseq-v4-v5-sop-distinction）。"
+
+    assert sanitize_human_outbound("telegram", answer, kind="final") == (
+        "V5 新增片段化步骤。"
+    )
+
+
+@pytest.mark.parametrize("kind", ["final", "status", "interim", "operational"])
+def test_ivd_streaming_partial_does_not_expose_unmatched_markdown(kind):
+    assert sanitize_human_outbound("qqbot", "**正在核实", kind=kind) == "正在核实"
+
+
+@pytest.mark.parametrize("platform", ["local", "api_server", "webhook", "msgraph_webhook"])
+def test_raw_surfaces_keep_markdown_byte_identical(platform):
+    raw = "# 标题\n**原始诊断** [链接](https://example.test/raw)"
+
+    assert sanitize_human_outbound(platform, raw, kind="final") == raw
 
 
 @pytest.mark.parametrize(

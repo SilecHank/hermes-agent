@@ -15,6 +15,7 @@ from gateway.ivd_runtime import (
     begin_ivd_answer_turn,
     build_ivd_retrieval_context,
     consume_ivd_search,
+    can_use_ivd_session_search,
     end_ivd_answer_turn,
     get_ivd_retrieval_snapshot,
     record_ivd_search_result,
@@ -55,6 +56,23 @@ def test_missing_routed_source_does_not_use_direct_profile():
     policy = resolve_ivd_retrieval_policy("建库投入量是多少", turn)
 
     assert policy.profile == "index_fallback"
+
+
+def test_comparison_with_generic_routed_source_keeps_one_search_available(tmp_path):
+    source = tmp_path / "IVD-KnowledgeHub" / "knowledge-base" / "reference" / "reagent-consumable.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("formal", encoding="utf-8")
+    turn = SimpleNamespace(
+        fast_path=True,
+        source_paths=(str(source),),
+        route_id="reagent_short_answer",
+        answer_contract={"task_kind": "compare", "deliverable": "difference_list"},
+    )
+
+    policy = resolve_ivd_retrieval_policy("PMseq RNA V5试剂盒实验流程跟V4有什么差异", turn)
+
+    assert policy.profile == "index_fallback"
+    assert policy.max_searches == 2
 
 
 def test_cross_product_conflict_overrides_direct_route():
@@ -175,6 +193,30 @@ def test_maintenance_mode_does_not_apply_answer_budget():
     try:
         assert consume_ivd_search() == (True, 0, 0)
         assert consume_ivd_search() == (True, 0, 0)
+    finally:
+        end_ivd_answer_turn(token)
+
+
+def test_checkpoint_suppresses_broad_history_search_unless_explicitly_allowed():
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=False,
+    )
+    try:
+        assert can_use_ivd_session_search() is False
+    finally:
+        end_ivd_answer_turn(token)
+
+    token = begin_ivd_answer_turn(
+        max_searches=2,
+        mode="answer",
+        checkpoint_loaded=True,
+        allow_history_search=True,
+    )
+    try:
+        assert can_use_ivd_session_search() is True
     finally:
         end_ivd_answer_turn(token)
 

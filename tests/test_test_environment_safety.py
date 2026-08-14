@@ -108,6 +108,14 @@ class TestEnvironmentSafetyTests(unittest.TestCase):
 
         self.assertIn('HERMES_TEST_PASS_FDS="$HERMES_TEST_PASS_FDS"', runner)
 
+    def test_canonical_runner_preserves_gateway_guard_cache_override(self):
+        runner = (PROJECT_ROOT / "scripts/run_tests.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'HERMES_GATEWAY_GUARD_CACHE_DIR="$HERMES_GATEWAY_GUARD_CACHE_DIR"',
+            runner,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

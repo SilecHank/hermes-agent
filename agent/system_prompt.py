@@ -317,10 +317,21 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             )
         except Exception:
             _compact_cats = frozenset()
+        _allowed_skill_names = None
+        try:
+            from agent.ivd_skill_governance import resolve_ivd_skill_catalog
+            from hermes_cli.config import load_config_readonly
+
+            _allowed_skill_names = resolve_ivd_skill_catalog(
+                agent.platform or "", load_config_readonly()
+            )
+        except Exception:
+            _allowed_skill_names = None
         skills_prompt = _r.build_skills_system_prompt(
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
             compact_categories=_compact_cats or None,
+            allowed_skill_names=_allowed_skill_names,
         )
     else:
         skills_prompt = ""

@@ -465,6 +465,68 @@ class TestGeneratedSystemdUnits:
 
         assert "/home/test/.nvm/versions/node/v24.14.0/bin" in unit
 
+    def test_active_host_fence_environment_persists_in_systemd_and_launchd(self, monkeypatch):
+        manifest = "a" * 64
+        values = {
+            "IVD_ACTIVE_HOST_FENCE_REQUIRED": "true",
+            "IVD_ACTIVE_HOST_ID": "mac-standby",
+            "IVD_ACTIVE_HOST_RECORD_URL": (
+                "https://api.github.com/repos/SilecHank/ivd-hermes-standby/contents/active-host.json"
+            ),
+            "IVD_ACTIVE_HOST_TOKEN_FILE": "/Users/test/.hermes/ivd-state/github-token",
+            "IVD_DEPLOYMENT_MANIFEST_SHA256": manifest,
+        }
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        plist = gateway_cli.generate_launchd_plist()
+
+        for name, value in values.items():
+            assert f'Environment="{name}={value}"' in unit
+            assert f"<key>{name}</key>\n        <string>{value}</string>" in plist
+
+    def test_active_host_fence_service_generation_rejects_partial_configuration(self, monkeypatch):
+        monkeypatch.setenv("IVD_ACTIVE_HOST_FENCE_REQUIRED", "true")
+        monkeypatch.setenv("IVD_ACTIVE_HOST_ID", "mac-standby")
+
+        with pytest.raises(ValueError, match="active-host fence service environment"):
+            gateway_cli.generate_systemd_unit(system=False)
+
+    def test_persisted_active_host_fence_survives_environment_loss(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "active-host-fence.json"
+        monkeypatch.setattr(gateway_cli, "_ivd_fence_config_path", lambda: config_path)
+        values = {
+            "IVD_ACTIVE_HOST_FENCE_REQUIRED": "true",
+            "IVD_ACTIVE_HOST_ID": "wsl-primary",
+            "IVD_ACTIVE_HOST_RECORD_URL": (
+                "https://api.github.com/repos/SilecHank/ivd-hermes-standby/contents/active-host.json"
+            ),
+            "IVD_ACTIVE_HOST_TOKEN_FILE": "/run/credentials/hermes/github-token",
+            "IVD_DEPLOYMENT_MANIFEST_SHA256": "b" * 64,
+        }
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+        gateway_cli._persist_ivd_fence_environment_from_process()
+        for name in values:
+            monkeypatch.delenv(name)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        for name, value in values.items():
+            assert f'Environment="{name}={value}"' in unit
+
+    def test_invalid_persisted_active_host_fence_cannot_silently_disable(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "active-host-fence.json"
+        config_path.write_text("{}\n", encoding="utf-8")
+        config_path.chmod(0o600)
+        monkeypatch.setattr(gateway_cli, "_ivd_fence_config_path", lambda: config_path)
+        monkeypatch.delenv("IVD_ACTIVE_HOST_FENCE_REQUIRED", raising=False)
+
+        with pytest.raises(ValueError, match="persisted active-host fence"):
+            gateway_cli.generate_launchd_plist()
+
     def test_user_unit_does_not_leak_profile_node_symlink_target(self, tmp_path, monkeypatch):
         # Regression for the multi-profile gateway restart-loop flap (#48700):
         # ~/.local/bin/node is often a symlink into a *specific* profile's node

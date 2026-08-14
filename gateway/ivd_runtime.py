@@ -459,7 +459,14 @@ def resolve_ivd_retrieval_policy(
         if _is_formal_result_path(str(path)) and Path(str(path)).is_file()
     )
     fast_path = bool(getattr(turn, "fast_path", False))
-    if fast_path and source_paths and not _EVIDENCE_EXPANSION_RE.search(text):
+    answer_contract = getattr(turn, "answer_contract", {}) or {}
+    comparison_needs_search = answer_contract.get("task_kind") == "compare"
+    if (
+        fast_path
+        and source_paths
+        and not comparison_needs_search
+        and not _EVIDENCE_EXPANSION_RE.search(text)
+    ):
         return DIRECT_POLICY
 
     if _EVIDENCE_INTENT_RE.search(text):
@@ -527,6 +534,8 @@ class IVDTurnBudget:
     last_search_signature: tuple[str, str, str] | None = None
     last_search_had_gain: bool = False
     stop_reason: str = ""
+    checkpoint_loaded: bool = False
+    allow_history_search: bool = False
 
 
 _CURRENT_BUDGET: ContextVar[IVDTurnBudget | None] = ContextVar(
@@ -540,6 +549,8 @@ def begin_ivd_answer_turn(
     max_searches: int | None = None,
     mode: str = "answer",
     policy: IVDRetrievalPolicy | None = None,
+    checkpoint_loaded: bool = False,
+    allow_history_search: bool = False,
 ) -> Token:
     if policy is None:
         requested = max(1, int(max_searches if max_searches is not None else 4))
@@ -557,12 +568,21 @@ def begin_ivd_answer_turn(
         profile=policy.profile,
         stages=policy.stages,
         hard_limit=max(1, int(policy.hard_limit)),
+        checkpoint_loaded=bool(checkpoint_loaded),
+        allow_history_search=bool(allow_history_search),
     )
     return _CURRENT_BUDGET.set(budget)
 
 
 def end_ivd_answer_turn(token: Token) -> None:
     _CURRENT_BUDGET.reset(token)
+
+
+def can_use_ivd_session_search() -> bool:
+    budget = _CURRENT_BUDGET.get()
+    if budget is None or budget.mode != "answer":
+        return True
+    return not budget.checkpoint_loaded or budget.allow_history_search
 
 
 def _search_signature(

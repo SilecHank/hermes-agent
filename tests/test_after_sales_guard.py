@@ -1,13 +1,19 @@
 import os
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 from gateway.after_sales_guard import (
+    activate_validated_fact,
     CriticalAfterSalesValidator,
+    build_direct_fact_result,
     build_preflight_block_result,
     prepare_after_sales_turn,
 )
+from gateway.ivd_verified_facts import VerifiedFactService
+from hermes_state import SessionDB
 
 
 def _knowledgehub_root():
@@ -43,6 +49,61 @@ def _config_with_fast_response(enabled=True):
     return config
 
 
+def _verified_fact_fixture(
+    tmp_path,
+    *,
+    mode="active",
+    manifest_revision="rev-a",
+    value="30-240",
+):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    service = VerifiedFactService(db)
+    assert service.activate(
+        {
+            "fact_id": "fact-wes-dna-input",
+            "product_scope": "WES",
+            "product_variant": "V5",
+            "question_type": "scalar_lookup",
+            "fact_key": "dna_starting_input",
+            "value": value,
+            "unit": "ng",
+            "conditions": [],
+            "answer_template": "{value} {unit}。",
+            "evidence": [
+                {
+                    "evidence_id": "ev-a",
+                    "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                    "source_revision": "rev-a",
+                }
+            ],
+            "source_revision": "rev-a",
+            "status": "active",
+        }
+    )
+    manifest = tmp_path / "knowledge-release.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "source_revisions": {
+                    "knowledge-base/reference/wes-v5-sop-index.md": manifest_revision
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config_with_fast_response()
+    config["after_sales_guard"].update(
+        {
+            "answer_shape_enabled": True,
+            "evidence_sidecar_enabled": True,
+            "verified_fact_reuse_mode": mode,
+            "knowledge_release_manifest": str(manifest),
+        }
+    )
+    return db, config
+
+
 def _write_experience_modules(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -67,7 +128,6 @@ def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
     fast = _write_experience_modules(tmp_path)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
-    config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
     config["after_sales_guard"]["validator_module"] = str(tmp_path / "missing-validator.py")
     config["after_sales_guard"]["cards_dir"] = str(tmp_path / "missing-cards")
 
@@ -86,6 +146,87 @@ def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
 
     assert len(set(contexts.values())) == 1
     assert "先直接回答结论" in contexts["qqbot"]
+
+
+def _write_boundary_fast_module(tmp_path, source_path, *, source_status="source_candidates_found"):
+    scripts = tmp_path / "scripts-boundary"
+    scripts.mkdir()
+    fast = scripts / "hermes_fast_response_pipeline.py"
+    fast.write_text(
+        "def build_fast_response_plan(message, question_type='general'):\n"
+        "    return {\n"
+        "      'runtime_preflight': {'eligible': True, 'route_version': 'boundary-v1'},\n"
+        "      'answer_template': {'style': 'short_first'},\n"
+        "      'preflight_gate': {'decision': 'allow', 'pipeline_action': 'continue_final_answer', 'issues': []},\n"
+        "      'fast_path': {'route_id': 'sop_parameter_short_answer'},\n"
+        "      'initial_files': [],\n"
+        "      'answer_contract': {\n"
+        "        'deliverable': 'difference_list', 'comparison_dimensions': ['process'],\n"
+        "        'excluded_topics': ['reaction_conditions', 'performance_claims'],\n"
+        "        'must_preserve': ['version_scope', 'source_conflict', 'uncertainty'],\n"
+        "        'detail_level': 'brief'},\n"
+        f"      'source_location': {{'status': {source_status!r}, 'input_sufficient': True,\n"
+        f"        'candidates': [{{'resolved_path': {str(source_path)!r}, 'authority': 'locator_only'}}]}}\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+    (scripts / "after_sales_platform_policy.py").write_text(
+        "def render_answer_experience_context(*, platform):\n"
+        "    return '[统一体验]\\n按当前任务边界直接回答。'\n",
+        encoding="utf-8",
+    )
+    return fast
+
+
+def test_four_platforms_receive_same_boundary_and_material_location(tmp_path):
+    source = tmp_path / "PMseq RNA V5 SOP.pdf"
+    source.write_text("fixture", encoding="utf-8")
+    fast = _write_boundary_fast_module(tmp_path, source)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+
+    contexts = []
+    for platform in ("weixin", "wecom", "qqbot", "telegram"):
+        turn = prepare_after_sales_turn(
+            config,
+            platform=platform,
+            message="PMseq RNA V5跟V4有什么不同，只列流程差异",
+            history=[],
+        )
+        assert turn is not None
+        assert turn.answer_contract["deliverable"] == "difference_list"
+        assert turn.source_location["status"] == "source_candidates_found"
+        assert str(source.resolve()) in turn.source_paths
+        assert "只输出差异清单" in turn.context
+        assert "反应条件" in turn.context
+        assert "正文第一行直接进入第1项差异" in turn.context
+        assert "禁止前置“结论”“主要差异”“来源”" in turn.context
+        assert "不得输出材料库文件名、路径或内部 reference 标识" in turn.context
+        contexts.append(turn.context)
+
+    assert len(set(contexts)) == 1
+
+
+def test_sufficient_identity_lookup_failure_does_not_repeat_known_fields(tmp_path):
+    source = tmp_path / "PMseq RNA V5 SOP.pdf"
+    source.write_text("fixture", encoding="utf-8")
+    fast = _write_boundary_fast_module(tmp_path, source)
+    config = _config(enabled=True)
+    config["after_sales_guard"]["fast_response_module"] = str(fast)
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="PMseq RNA V5 建库投入量是多少",
+        history=[],
+    )
+    assert turn is not None
+    fallback = turn.validate("建库投入量为100ng。", messages=[])["fallback"]
+
+    assert "请补充产品版本" not in fallback
+    assert "请补充SOP编号" not in fallback
+    assert "材料库没有" not in fallback
+    assert "未完成已定位正式资料的读取" in fallback
 
 
 def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path):
@@ -253,7 +394,7 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
         history=[],
     )
     source_path = turn.source_paths[0]
-    missing_source = turn.validate("建库投入量为100ng。", messages=[])
+    missing_source = turn.validate("建库投入量为30-240ng。", messages=[])
     messages = [
         {
             "role": "assistant",
@@ -271,22 +412,418 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
         {
             "role": "tool",
             "tool_call_id": "source-read",
-            "content": "当前正式SOP规定建库投入量为100ng。",
+            "content": "当前受控参数索引规定建库投入量为30-240ng。",
         },
     ]
 
-    supported = turn.validate("建库投入量为100ng。", messages=messages)
+    supported = turn.validate("建库投入量为30-240ng。", messages=messages)
     unsupported = turn.validate("建库投入量为400ng。", messages=messages)
 
     assert missing_source["ok"] is False
     assert "formal_source_not_read" in missing_source["reasons"]
     assert "请先读取" not in missing_source["fallback"]
-    assert "未能从当前产品的正式来源核实该参数" in missing_source["fallback"]
+    assert "未能完成正式来源核实" in missing_source["fallback"]
+    assert "请补充产品版本" not in missing_source["fallback"]
+    assert "SOP编号" not in missing_source["fallback"]
     assert supported["ok"] is True
     assert unsupported["ok"] is False
-    assert "unsupported_numeric_claim:400ng" in unsupported["reasons"]
+    assert "scalar_claim_mismatch" in unsupported["reasons"]
     assert "请重新读取" not in unsupported["fallback"]
-    assert "与已核实的正式来源不一致" in unsupported["fallback"]
+    assert "与该产品、该参数字段的正式值不一致" in unsupported["fallback"]
+
+
+def test_fast_plan_carries_canonical_answer_shape_into_turn():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+
+
+def test_scalar_turn_uses_canonical_fact_key_from_knowledgehub():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.fact_key == "plasma_starting_volume"
+    assert "NIFTY项目手工提取富集建库实验标准作业指导书.md" in turn.source_paths[0]
+    assert "只输出一个已核实数值及单位" in turn.context
+    assert "不要补充原因、建议、下一步或可见来源标签" in turn.context
+
+
+def test_validated_scalar_answer_returns_canonical_value_and_unit_only():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "向浅孔板中加入200μL血浆样本。",
+        },
+    ]
+
+    result = turn.validate(
+        "无创提取需要200 μL血浆。建议同时注意样本质量并按SOP操作。",
+        messages=messages,
+    )
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "200 μL。"
+
+
+def test_scalar_answer_with_multiple_supported_values_is_not_truncated():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "标准流程使用200μL血浆；另一个条件使用600μL。",
+        },
+    ]
+
+    result = turn.validate("标准流程200μL，另一个条件600μL。", messages=messages)
+
+    assert result["ok"] is False
+    assert "scalar_claim_not_unique" in result["reasons"]
+    assert "normalized_response" not in result
+
+
+def test_scalar_answer_rejects_a_different_number_from_the_same_sop():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="无创提取需要多少血浆",
+        history=[],
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "提取加样使用200μL血浆；血浆分装时可见600μL。",
+        },
+    ]
+
+    result = turn.validate("600 μL。", messages=messages)
+
+    assert result["ok"] is False
+    assert "scalar_claim_mismatch" in result["reasons"]
+
+
+def test_fact_card_scalar_answer_uses_the_same_canonical_boundary():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.facts
+
+    result = turn.validate("文库浓度应≥2 ng/μL，建议再检查质控记录。")
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "≥2 ng/μL。"
+
+
+def test_fact_card_scalar_rejects_value_outside_current_route_contract():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+    turn = replace(turn, expected_scalar_claims=(">=2 ng/μL",))
+
+    result = turn.validate("文库浓度是4 ng/μL。")
+
+    assert result["ok"] is False
+    assert "scalar_claim_mismatch" in result["reasons"]
+
+
+def test_shadow_fact_hit_does_not_bypass_model(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="shadow")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is True
+    assert turn.direct_response == ""
+
+
+def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="active")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    result = build_direct_fact_result(turn, "WES V5 建库投入量是多少")
+
+    assert turn is not None
+    assert turn.answer_shape == "scalar_lookup"
+    assert turn.direct_response == "30-240 ng。"
+    assert result["api_calls"] == 0
+    assert result["final_response"] == "30-240 ng。"
+
+
+def test_active_fact_with_old_scalar_value_does_not_bypass_current_route(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240")
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is False
+    assert turn.direct_response == ""
+
+
+def test_ascii_threshold_operator_is_preserved_in_canonical_response():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="NIFTY文库浓度是多少",
+        history=[
+            {"role": "user", "content": "NIFTY文库质控异常"},
+            {"role": "assistant", "content": "请提供文库浓度。"},
+        ],
+    )
+
+    result = turn.validate("文库浓度应>=2 ng/μL。")
+
+    assert result["ok"] is True
+    assert result["normalized_response"] == "≥2 ng/μL。"
+
+
+def test_stale_source_revision_disables_direct_fact_reuse(tmp_path):
+    db, config = _verified_fact_fixture(
+        tmp_path,
+        mode="active",
+        manifest_revision="rev-b",
+    )
+
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert turn is not None
+    assert turn.verified_fact_hit is False
+    assert turn.direct_response == ""
+
+
+def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    validation = {
+        "ok": True,
+        "adopted_claims": [
+            {
+                "fact_key": "dna_starting_input",
+                "value": "30-240",
+                "unit": "ng",
+                "conditions": [],
+                "evidence_id": "ev-new",
+                "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                "source_revision": "rev-a",
+                "locator": "fact:dna_starting_input",
+            }
+        ],
+    }
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation=validation,
+    ) is True
+    match = VerifiedFactService(db).lookup(
+        product_scope="WES",
+        product_variant="V5",
+        fact_key="dna_starting_input",
+        conditions=[],
+        source_revisions={"knowledge-base/reference/wes-v5-sop-index.md": "rev-a"},
+    )
+    assert match["rendered_answer"] == "30-240 ng。"
+
+
+def test_fact_activation_rejects_value_outside_current_scalar_contract(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation={
+            "ok": True,
+            "adopted_claims": [
+                {
+                    "fact_key": "dna_starting_input",
+                    "value": "100",
+                    "unit": "ng",
+                    "conditions": [],
+                    "evidence_id": "ev-old",
+                    "source_path": "knowledge-base/reference/wes-v5-sop-index.md",
+                    "source_revision": "rev-a",
+                }
+            ],
+        },
+    ) is False
+
+
+def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+    source_path = turn.source_paths[0]
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "source-read",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": source_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "source-read",
+            "content": "当前受控参数索引规定建库投入量为30-240ng。",
+        },
+    ]
+
+    result = turn.validate("30-240 ng。", messages=messages)
+
+    assert result["ok"] is True
+    assert len(result["adopted_claims"]) == 1
+    assert result["adopted_claims"][0]["value"] == "30-240"
+    assert result["adopted_claims"][0]["source_revision"] == "rev-a"
+    assert result["adopted_claims"][0]["tool_call_id"] == "source-read"
+
+
+def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode="off")
+    turn = prepare_after_sales_turn(
+        config,
+        platform="weixin",
+        message="WES V5 建库投入量是多少",
+        history=[],
+        session_db=db,
+    )
+
+    assert activate_validated_fact(
+        db,
+        turn,
+        question="WES V5 建库投入量是多少",
+        validation={"ok": False, "adopted_claims": []},
+    ) is False
 
 
 def test_unsafe_fast_route_injects_only_shared_answer_experience():
@@ -298,7 +835,7 @@ def test_unsafe_fast_route_injects_only_shared_answer_experience():
     )
 
     assert turn is not None
-    assert "IVD售后自然回答约定" in turn.context
+    assert "只完成用户当前要求的交付物" in turn.context
     assert "快速回答管线" not in turn.context
     assert "已识别产品" not in turn.context
     assert turn.facts == {}

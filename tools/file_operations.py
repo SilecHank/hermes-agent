@@ -866,9 +866,22 @@ class ShellFileOperations(FileOperations):
         )
     
     def _has_command(self, cmd: str) -> bool:
-        """Check if a command exists in the environment (cached)."""
+        """Check if a command is executable in the environment (cached).
+
+        WSL can inherit Windows application paths whose entries are visible to
+        ``command -v`` but cannot be executed by the active Linux shell.  Treat
+        those entries as unavailable so callers can use their portable
+        fallback instead of silently returning an empty search result.
+        """
         if cmd not in self._command_cache:
-            result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
+            quoted_cmd = self._escape_shell_arg(cmd)
+            result = self._exec(
+                "resolved=$(command -v -- " + quoted_cmd + " 2>/dev/null) || exit 1; "
+                "case \"$resolved\" in "
+                "/*) [ -x \"$resolved\" ] ;; "
+                "*) true ;; "
+                "esac && echo 'yes'"
+            )
             self._command_cache[cmd] = result.stdout.strip() == 'yes'
         return self._command_cache[cmd]
     

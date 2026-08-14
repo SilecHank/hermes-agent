@@ -3596,6 +3596,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message=message,
             history=history,
             prepared_ivd_turn=prepared,
+            session_db=getattr(self._session_db, "_db", self._session_db),
         )
         return prepared, turn
 
@@ -21681,6 +21682,139 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
+            # Resolve durable IVD task state before any broad transcript recall.
+            # This is opt-in and intent-gated: a new full question never resumes
+            # an old task merely because product terms look similar.
+            _ivd_checkpoint_loaded = False
+            _ivd_checkpoint_service = None
+            _ivd_checkpoint_scope = None
+            _ivd_checkpoint_record = None
+            _ivd_route_scope = None
+            _ivd_checkpoint_owner = f"gateway:{os.getpid()}:{session_id}"
+            _ivd_checkpoint_config = user_config.get("after_sales_guard") or {}
+            _ivd_checkpoint_platforms = _ivd_checkpoint_config.get("platforms") or []
+            if isinstance(_ivd_checkpoint_platforms, str):
+                _ivd_checkpoint_platforms = [
+                    item.strip()
+                    for item in _ivd_checkpoint_platforms.split(",")
+                    if item.strip()
+                ]
+            _ivd_checkpoint_enabled = bool(
+                isinstance(_ivd_checkpoint_config, dict)
+                and _ivd_checkpoint_config.get("enabled", False)
+                and _ivd_checkpoint_config.get("task_checkpoint_enabled", False)
+                and platform_key in _ivd_checkpoint_platforms
+            )
+            from gateway.ivd_route_epoch import route_epoch_enabled
+
+            _ivd_route_epoch_enabled = route_epoch_enabled(
+                _ivd_checkpoint_config, platform_key
+            )
+            if (
+                _ivd_route_epoch_enabled
+                and source.chat_id
+                and (source.user_id_alt or source.user_id)
+            ):
+                try:
+                    from gateway.ivd_route_epoch import (
+                        IVDRouteEpochService,
+                        RouteScope,
+                    )
+
+                    _route_scope = RouteScope(
+                        profile=str(source.profile or "ivd"),
+                        platform=platform_key,
+                        chat_type=str(source.chat_type or "dm"),
+                        chat_id=str(source.chat_id),
+                        user_id=str(source.user_id_alt or source.user_id),
+                    )
+                    _route_entry = self.session_store._entries.get(session_key)
+                    _route_previous_session_id = str(
+                        getattr(_route_entry, "prev_session_id", "") or ""
+                    )
+                    _route_boundary_reason = str(
+                        getattr(_route_entry, "auto_reset_reason", "") or ""
+                    )
+                    if _route_previous_session_id and not _route_boundary_reason:
+                        _route_boundary_reason = "explicit_reset"
+                    IVDRouteEpochService(
+                        getattr(self._session_db, "_db", self._session_db)
+                    ).reconcile_current(
+                        _route_scope,
+                        session_id=session_id,
+                        previous_session_id=_route_previous_session_id,
+                        boundary_reason=_route_boundary_reason,
+                        now=time.time(),
+                    )
+                except Exception as _route_epoch_exc:
+                    logger.warning("IVD route epoch reconciliation skipped: %s", _route_epoch_exc)
+            if _ivd_checkpoint_enabled:
+                try:
+                    from gateway.ivd_task_checkpoint import (
+                        CheckpointScope,
+                        IVDTaskCheckpointService,
+                        build_checkpoint_result,
+                        message_allows_history_search,
+                        render_checkpoint_context,
+                        wants_task_continuation,
+                    )
+
+                    _checkpoint_chat_id = str(source.chat_id or "")
+                    _checkpoint_user_id = str(source.user_id_alt or source.user_id or "")
+                    if _checkpoint_chat_id and _checkpoint_user_id:
+                        _ivd_checkpoint_scope = CheckpointScope(
+                            profile=str(source.profile or "ivd"),
+                            platform=platform_key,
+                            chat_type=str(source.chat_type or "dm"),
+                            chat_id=_checkpoint_chat_id,
+                            user_id=_checkpoint_user_id,
+                        )
+                        _ivd_checkpoint_service = IVDTaskCheckpointService(
+                            getattr(self._session_db, "_db", self._session_db)
+                        )
+                    if (
+                        _ivd_checkpoint_service is not None
+                        and wants_task_continuation(str(message or ""))
+                    ):
+                        _checkpoint_resolution = _ivd_checkpoint_service.resolve_continuation(
+                            _ivd_checkpoint_scope
+                        )
+                        if _checkpoint_resolution["action"] == "clarify":
+                            return build_checkpoint_result(
+                                _checkpoint_resolution["message"],
+                                user_message=str(message or ""),
+                            )
+                        if _checkpoint_resolution["action"] == "resume":
+                            _ivd_checkpoint_record = _checkpoint_resolution["checkpoint"]
+                            _lease = _ivd_checkpoint_service.acquire_lease(
+                                _ivd_checkpoint_record["task_id"],
+                                owner_id=_ivd_checkpoint_owner,
+                                ttl_seconds=180,
+                            )
+                            if _lease is None:
+                                return build_checkpoint_result(
+                                    "该任务正在另一执行端处理中，请稍后再试。",
+                                    user_message=str(message or ""),
+                                )
+                            combined_ephemeral = (
+                                combined_ephemeral
+                                + "\n\n"
+                                + render_checkpoint_context(_ivd_checkpoint_record)
+                            ).strip()
+                            _ivd_checkpoint_loaded = True
+                            _ivd_checkpoint_allow_history = message_allows_history_search(
+                                str(message or "")
+                            )
+                        else:
+                            _ivd_checkpoint_allow_history = False
+                    else:
+                        _ivd_checkpoint_allow_history = False
+                except Exception as _checkpoint_exc:
+                    logger.warning("IVD task checkpoint resolution skipped: %s", _checkpoint_exc)
+                    _ivd_checkpoint_allow_history = False
+            else:
+                _ivd_checkpoint_allow_history = False
+
             # Product-specific troubleshooting facts are injected per turn so
             # they constrain the current model call without entering transcript
             # history or leaking into an unrelated follow-up. The guard is
@@ -21786,6 +21920,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     _blocked_receipt_exc,
                                 )
                         return _blocked_result
+                    if _after_sales_turn.direct_response:
+                        from gateway.after_sales_guard import build_direct_fact_result
+                        from gateway.after_sales_telemetry import (
+                            append_runtime_event,
+                            build_runtime_event,
+                            default_runtime_event_path,
+                        )
+
+                        _direct_result = build_direct_fact_result(
+                            _after_sales_turn, message
+                        )
+                        try:
+                            _direct_event = build_runtime_event(
+                                platform=platform_key,
+                                session_key=session_key or session_id or "",
+                                product_scope=_after_sales_turn.product_scope,
+                                product_variant=_after_sales_turn.product_variant,
+                                route_id=_after_sales_turn.route_id,
+                                route_version=_after_sales_turn.route_version,
+                                fast_path=True,
+                                elapsed_seconds=0,
+                                api_calls=0,
+                                tool_names=(),
+                                source_paths=_after_sales_turn.source_paths,
+                                validation_status="pass",
+                                question_text=_ivd_question_text,
+                                answer_shape=_after_sales_turn.answer_shape,
+                                verified_fact_reuse="active_hit",
+                            )
+                            _guard_config = user_config.get("after_sales_guard") or {}
+                            append_runtime_event(
+                                _guard_config.get("runtime_events_path")
+                                or default_runtime_event_path(),
+                                _direct_event,
+                            )
+                        except Exception as _direct_telemetry_exc:
+                            logger.warning(
+                                "IVD direct-fact telemetry skipped: %s",
+                                _direct_telemetry_exc,
+                            )
+                        return _direct_result
             except Exception as _guard_exc:
                 logger.warning(
                     "After-sales workflow fact injection skipped: %s", _guard_exc
@@ -22234,6 +22409,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # IVD context projection is an opt-in request view layered over the
+            # configured context engine. It never replaces transcript history
+            # and leaves the delegate's normal hard-limit compression intact.
+            _projection_config = user_config.get("after_sales_guard") or {}
+            _projection_platforms = _projection_config.get("platforms") or []
+            if isinstance(_projection_platforms, str):
+                _projection_platforms = [
+                    item.strip()
+                    for item in _projection_platforms.split(",")
+                    if item.strip()
+                ]
+            _projection_budget_enabled = bool(
+                _after_sales_turn is not None
+                and isinstance(_projection_config, dict)
+                and _projection_config.get("enabled", False)
+                and _projection_config.get("context_budget_enabled", False)
+                and platform_key in _projection_platforms
+            )
+            if _projection_budget_enabled:
+                try:
+                    from agent.ivd_context_engine import ensure_ivd_context_engine
+
+                    _projection_constraints = []
+                    if _after_sales_turn.product_scope:
+                        _projection_constraints.append(
+                            f"产品={_after_sales_turn.product_scope}"
+                        )
+                    if _after_sales_turn.product_variant:
+                        _projection_constraints.append(
+                            f"版本={_after_sales_turn.product_variant}"
+                        )
+                    agent.context_compressor = ensure_ivd_context_engine(
+                        agent.context_compressor,
+                        enabled=True,
+                        policy=_projection_config.get("context_projection_policy") or {},
+                        active_constraints=_projection_constraints,
+                        session_revision=int(_current_msg_count or 0),
+                        tool_schemas=agent.tools or (),
+                        answer_shape=_after_sales_turn.answer_shape,
+                        max_output_tokens=int(agent.max_tokens or 8_000),
+                        projection_enabled=bool(
+                            _projection_config.get(
+                                "context_projection_enabled", False
+                            )
+                        ),
+                    )
+                except Exception as _projection_exc:
+                    logger.warning(
+                        "IVD context projection attachment skipped: %s",
+                        _projection_exc,
+                    )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -22834,6 +23061,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _approval_session_token = set_current_session_key(_approval_session_key)
             _ivd_runtime_token = None
             _ivd_retrieval_snapshot: dict[str, object] = {}
+            _ivd_skill_token = None
+            _ivd_skill_snapshot: dict[str, object] = {}
             _after_sales_config = user_config.get("after_sales_guard") or {}
             _after_sales_platforms = _after_sales_config.get("platforms") or []
             if isinstance(_after_sales_platforms, str):
@@ -22846,16 +23075,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and platform_key in _after_sales_platforms
             ):
                 from gateway.ivd_runtime import begin_ivd_answer_turn
+                from agent.ivd_skill_governance import begin_ivd_skill_turn
+
+                _ivd_skill_token = begin_ivd_skill_turn(
+                    question=_ivd_question_text,
+                    governance_mode=str(
+                        _after_sales_config.get("skill_governance_mode") or "off"
+                    ),
+                )
 
                 if _ivd_retrieval_policy is not None:
                     _ivd_runtime_token = begin_ivd_answer_turn(
                         policy=_ivd_retrieval_policy,
                         mode="answer",
+                        checkpoint_loaded=_ivd_checkpoint_loaded,
+                        allow_history_search=_ivd_checkpoint_allow_history,
                     )
                 else:
                     _ivd_runtime_token = begin_ivd_answer_turn(
                         max_searches=4,
                         mode="answer",
+                        checkpoint_loaded=_ivd_checkpoint_loaded,
+                        allow_history_search=_ivd_checkpoint_allow_history,
                     )
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
@@ -22916,6 +23157,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     == _approval_effect_key
                 ):
                     _approval_owners.pop(_approval_session_key, None)
+                if _ivd_skill_token is not None:
+                    from agent.ivd_skill_governance import (
+                        end_ivd_skill_turn,
+                        get_ivd_skill_snapshot,
+                    )
+
+                    try:
+                        _ivd_skill_snapshot = get_ivd_skill_snapshot()
+                    finally:
+                        end_ivd_skill_turn(_ivd_skill_token)
                 if _ivd_runtime_token is not None:
                     from gateway.ivd_runtime import (
                         end_ivd_answer_turn,
@@ -22978,19 +23229,261 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and _after_sales_config.get("enabled", False)
                 and platform_key in _after_sales_platforms
             ):
-                from functools import partial
+                try:
+                    _turn_messages = result.get("messages") or []
+                    _recent_turn_messages = []
+                    for _message_item in reversed(_turn_messages):
+                        _recent_turn_messages.append(_message_item)
+                        if _message_item.get("role") == "user":
+                            break
+                    _tool_names = []
+                    for _message_item in reversed(_recent_turn_messages):
+                        for _tool_call in _message_item.get("tool_calls") or []:
+                            _tool_names.append(
+                                str((_tool_call.get("function") or {}).get("name") or "")
+                            )
+                    from agent.tool_result_classification import (
+                        build_effect_receipts_from_messages,
+                    )
 
-                _telemetry_action = partial(
-                    _append_ivd_turn_telemetry,
-                    config=_after_sales_config,
-                    platform=platform_key,
-                    session_key=session_key or session_id or "",
-                    turn=_after_sales_turn,
-                    result=result,
-                    question_text=_ivd_question_text,
-                    retrieval_snapshot=_ivd_retrieval_snapshot,
-                    started_at=_ivd_started_at,
-                )
+                    _turn_effect_receipts = build_effect_receipts_from_messages(
+                        list(result.get("messages") or [])
+                    )
+                    _validation_status = "not_applicable"
+                    _validation: dict[str, object] = {
+                        "ok": True,
+                        "adopted_claims": [],
+                    }
+                    if _after_sales_turn is not None and _after_sales_turn.has_validator:
+                        _validation = _after_sales_turn.validate(
+                            str(final_response or ""),
+                            messages=_turn_messages,
+                        )
+                        _validation_status = "pass" if _validation.get("ok") else "fallback"
+                        if _validation.get("ok") and _validation.get("adopted_claims"):
+                            try:
+                                from gateway.after_sales_guard import activate_validated_fact
+
+                                activate_validated_fact(
+                                    getattr(self._session_db, "_db", self._session_db),
+                                    _after_sales_turn,
+                                    question=_ivd_question_text,
+                                    validation=_validation,
+                                )
+                            except Exception as _fact_activation_exc:
+                                logger.warning(
+                                    "IVD verified-fact activation skipped: %s",
+                                    _fact_activation_exc,
+                                )
+                    try:
+                        _receipt_updates: dict[str, dict[str, object]] = {}
+                        for _claim in _validation.get("adopted_claims") or ():
+                            _call_id = str(_claim.get("tool_call_id") or "")
+                            _evidence_id = str(_claim.get("evidence_id") or "")
+                            if not _call_id or not _evidence_id:
+                                continue
+                            _receipt = _receipt_updates.setdefault(
+                                _call_id,
+                                {
+                                    "evidence_ids": [],
+                                    "source": str(_claim.get("source_path") or ""),
+                                },
+                            )
+                            _receipt["evidence_ids"].append(_evidence_id)
+                        for _effect in _turn_effect_receipts:
+                            if _effect.get("effect_disposition") == "read_only":
+                                continue
+                            _call_id = str(_effect.get("idempotency_id") or "")
+                            if _call_id:
+                                _receipt_updates[_call_id] = dict(_effect)
+                        _context_engine = getattr(agent, "context_compressor", None)
+                        _add_receipts = getattr(_context_engine, "add_receipts", None)
+                        if _receipt_updates and callable(_add_receipts):
+                            _add_receipts(_receipt_updates)
+                    except Exception as _receipt_exc:
+                        logger.warning(
+                            "IVD validated context receipt skipped: %s",
+                            _receipt_exc,
+                        )
+                    if (
+                        _ivd_checkpoint_enabled
+                        and _ivd_checkpoint_service is not None
+                        and _ivd_checkpoint_scope is not None
+                    ):
+                        try:
+                            from gateway.ivd_task_checkpoint import CheckpointConflict
+
+                            _checkpoint_is_unfinished = bool(
+                                result.get("interrupted")
+                                or result.get("partial")
+                                or result.get("completed") is False
+                            )
+                            _checkpoint_constraints = []
+                            if _after_sales_turn is not None:
+                                if _after_sales_turn.product_scope:
+                                    _checkpoint_constraints.append(
+                                        f"产品={_after_sales_turn.product_scope}"
+                                    )
+                                if _after_sales_turn.product_variant:
+                                    _checkpoint_constraints.append(
+                                        f"版本={_after_sales_turn.product_variant}"
+                                    )
+                            _checkpoint_claims = list(
+                                _validation.get("adopted_claims") or []
+                            )
+                            _checkpoint_effects = _turn_effect_receipts
+                            _checkpoint_evidence_ids = [
+                                str(item.get("evidence_id") or "")
+                                for item in _checkpoint_claims
+                                if item.get("evidence_id")
+                            ]
+                            if _ivd_checkpoint_record is not None:
+                                _next_state = (
+                                    "active" if _checkpoint_is_unfinished else "completed"
+                                )
+                                _next_payload = dict(
+                                    _ivd_checkpoint_record.get("payload") or {}
+                                )
+                                if _checkpoint_constraints:
+                                    _next_payload["active_constraints"] = _checkpoint_constraints
+                                if _checkpoint_evidence_ids:
+                                    _next_payload["evidence_ids"] = _checkpoint_evidence_ids
+                                    _next_payload["adopted_facts"] = _checkpoint_claims
+                                if _checkpoint_effects:
+                                    _next_payload["side_effects"] = _checkpoint_effects
+                                if _checkpoint_is_unfinished:
+                                    _next_payload["unfinished_steps"] = [
+                                        "继续当前未完成任务"
+                                    ]
+                                _ivd_checkpoint_service.save(
+                                    task_id=_ivd_checkpoint_record["task_id"],
+                                    scope=_ivd_checkpoint_scope,
+                                    state=_next_state,
+                                    source_session_id=session_id,
+                                    payload=_next_payload,
+                                    expected_revision=int(
+                                        _ivd_checkpoint_record["revision"]
+                                    ),
+                                )
+                                if (
+                                    _next_state == "completed"
+                                    and _ivd_route_epoch_enabled
+                                    and _ivd_route_scope is not None
+                                ):
+                                    from gateway.ivd_route_epoch import IVDRouteEpochService
+
+                                    IVDRouteEpochService(
+                                        getattr(
+                                            self._session_db,
+                                            "_db",
+                                            self._session_db,
+                                        )
+                                    ).mark_task_completed(
+                                        _ivd_route_scope,
+                                        session_id=session_id,
+                                        now=time.time(),
+                                    )
+                            elif _checkpoint_is_unfinished:
+                                import hashlib
+
+                                _checkpoint_task_id = "ivd-" + hashlib.sha256(
+                                    f"{session_key or session_id}\0{_ivd_question_text}".encode(
+                                        "utf-8"
+                                    )
+                                ).hexdigest()[:16]
+                                _ivd_checkpoint_service.save(
+                                    task_id=_checkpoint_task_id,
+                                    scope=_ivd_checkpoint_scope,
+                                    state="active",
+                                    source_session_id=session_id,
+                                    payload={
+                                        "active_constraints": _checkpoint_constraints,
+                                        "unfinished_steps": ["继续当前未完成任务"],
+                                        "evidence_ids": _checkpoint_evidence_ids,
+                                        "adopted_facts": _checkpoint_claims,
+                                        "side_effects": _checkpoint_effects,
+                                    },
+                                )
+                        except CheckpointConflict as _checkpoint_conflict:
+                            logger.warning(
+                                "IVD task checkpoint revision conflict: %s",
+                                _checkpoint_conflict,
+                            )
+                        except Exception as _checkpoint_write_exc:
+                            logger.warning(
+                                "IVD task checkpoint write skipped: %s",
+                                _checkpoint_write_exc,
+                            )
+                    _event = build_runtime_event(
+                        platform=platform_key,
+                        session_key=session_key or session_id or "",
+                        product_scope=(
+                            _after_sales_turn.product_scope
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        product_variant=(
+                            _after_sales_turn.product_variant
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        route_id=(
+                            _after_sales_turn.route_id
+                            if _after_sales_turn is not None
+                            else "standard"
+                        ),
+                        route_version=(
+                            _after_sales_turn.route_version
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        fast_path=bool(_after_sales_turn and _after_sales_turn.fast_path),
+                        elapsed_seconds=time.monotonic() - _ivd_started_at,
+                        api_calls=int(result.get("api_calls") or 0),
+                        tool_names=_tool_names,
+                        source_paths=(
+                            _after_sales_turn.source_paths
+                            if _after_sales_turn is not None
+                            else ()
+                        ),
+                        validation_status=_validation_status,
+                        question_text=_ivd_question_text,
+                        retrieval_snapshot=_ivd_retrieval_snapshot,
+                        preflight_decision=(
+                            _after_sales_turn.preflight_decision
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        preflight_action=(
+                            _after_sales_turn.preflight_action
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        preflight_issues=(
+                            _after_sales_turn.preflight_issues
+                            if _after_sales_turn is not None
+                            else ()
+                        ),
+                        answer_shape=(
+                            _after_sales_turn.answer_shape
+                            if _after_sales_turn is not None
+                            else ""
+                        ),
+                        verified_fact_reuse=(
+                            "shadow_hit"
+                            if _after_sales_turn is not None
+                            and _after_sales_turn.verified_fact_hit
+                            and not _after_sales_turn.direct_response
+                            else "off"
+                        ),
+                        skill_snapshot=_ivd_skill_snapshot,
+                    )
+                    _telemetry_path = _after_sales_config.get("runtime_events_path") or (
+                        default_runtime_event_path()
+                    )
+                    append_runtime_event(_telemetry_path, _event)
+                except Exception as _telemetry_exc:
+                    logger.warning("IVD runtime telemetry skipped: %s", _telemetry_exc)
 
             if _prepared_ivd_turn is not None:
                 final_response = self._finalize_ivd_lifecycle(
@@ -23001,7 +23494,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     platform=platform_key,
                     session_key=session_key or session_id or "",
                     event_id=_ivd_event_id,
-                    telemetry_action=_telemetry_action,
+                    telemetry_action=None,
                 )
 
             # Sync session_id immediately after run_conversation(). Compression
@@ -24521,6 +25014,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # in-memory module.
     from gateway.code_skew import record_boot_fingerprint
     record_boot_fingerprint()
+
+    # The optional IVD ownership fence must run before PID/runtime locks,
+    # adapters, or the embedded cron scheduler can acquire local authority.
+    from gateway.active_host_fence import assert_active_host_or_raise
+    assert_active_host_or_raise()
 
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.

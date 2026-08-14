@@ -14,6 +14,7 @@ import logging
 import os
 import json
 import threading
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -1832,7 +1833,7 @@ class SessionStore:
         if not callable(finder):
             return None
         try:
-            return finder(
+            recovered = finder(
                 source=source.platform.value,
                 user_id=source.user_id,
                 session_key=session_key,
@@ -1840,6 +1841,33 @@ class SessionStore:
                 chat_type=source.chat_type if allow_peer_fallback else None,
                 thread_id=source.thread_id,
             )
+            if not isinstance(recovered, dict):
+                return recovered
+            # Existing routes without an epoch binding retain legacy recovery.
+            # Once an IVD route is bound, exact current-epoch crash recovery is
+            # mandatory and session_search cannot alter this decision.
+            try:
+                from gateway.ivd_route_epoch import (
+                    IVDRouteEpochService,
+                    RouteScope,
+                )
+
+                scope = RouteScope(
+                    profile=str(source.profile or "ivd"),
+                    platform=source.platform.value,
+                    chat_type=str(source.chat_type or "dm"),
+                    chat_id=str(source.chat_id or ""),
+                    user_id=str(source.user_id_alt or source.user_id or ""),
+                )
+                route_service = IVDRouteEpochService(self._db)
+                route_binding = route_service.get(scope)
+                if isinstance(route_binding, dict) and not route_service.can_recover(
+                    scope, session_id=str(recovered.get("id") or "")
+                ):
+                    return None
+            except Exception:
+                logger.debug("IVD route epoch recovery gate skipped", exc_info=True)
+            return recovered
         except Exception as exc:
             logger.debug(
                 "Gateway session DB recovery failed for %s: %s",
@@ -1849,6 +1877,77 @@ class SessionStore:
             if raise_on_lookup_error:
                 raise
             return None
+
+    def _advance_bound_ivd_route(
+        self,
+        old_entry: SessionEntry,
+        new_entry: SessionEntry,
+        *,
+        reason: str,
+    ) -> None:
+        """Advance an existing IVD binding; unbound legacy routes are ignored."""
+        if self._db is None or old_entry.origin is None:
+            return
+        try:
+            from gateway.ivd_route_epoch import IVDRouteEpochService, RouteScope
+
+            source = old_entry.origin
+            scope = RouteScope(
+                profile=str(source.profile or "ivd"),
+                platform=source.platform.value,
+                chat_type=str(source.chat_type or "dm"),
+                chat_id=str(source.chat_id or ""),
+                user_id=str(source.user_id_alt or source.user_id or ""),
+            )
+            service = IVDRouteEpochService(self._db)
+            binding = service.get(scope)
+            if not isinstance(binding, dict):
+                return
+            if str(binding.get("session_id") or "") != old_entry.session_id:
+                return
+            service.advance_boundary(
+                scope,
+                new_session_id=new_entry.session_id,
+                reason=reason,
+                now=time.time(),
+                expected_epoch=int(binding["route_epoch"]),
+            )
+        except Exception:
+            logger.warning("IVD route boundary update skipped", exc_info=True)
+
+    def _advance_bound_ivd_compression_route(
+        self,
+        entry: SessionEntry,
+        *,
+        parent_session_id: str,
+        child_session_id: str,
+    ) -> None:
+        if self._db is None or entry.origin is None:
+            return
+        try:
+            from gateway.ivd_route_epoch import IVDRouteEpochService, RouteScope
+
+            source = entry.origin
+            scope = RouteScope(
+                profile=str(source.profile or "ivd"),
+                platform=source.platform.value,
+                chat_type=str(source.chat_type or "dm"),
+                chat_id=str(source.chat_id or ""),
+                user_id=str(source.user_id_alt or source.user_id or ""),
+            )
+            service = IVDRouteEpochService(self._db)
+            binding = service.get(scope)
+            if not isinstance(binding, dict):
+                return
+            service.bind_compression_child(
+                scope,
+                parent_session_id=parent_session_id,
+                child_session_id=child_session_id,
+                expected_epoch=int(binding["route_epoch"]),
+                now=time.time(),
+            )
+        except Exception:
+            logger.warning("IVD compression route update skipped", exc_info=True)
 
     def _recover_session_from_db(
         self,
@@ -2456,6 +2555,7 @@ class SessionStore:
         auto_reset_reason = None
         reset_had_activity = False
         prev_session_id: Optional[str] = None
+        route_boundary_old_entry: Optional[SessionEntry] = None
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -2491,6 +2591,7 @@ class SessionStore:
                         reset_had_activity = entry.last_prompt_tokens > 0
                         db_end_session_id = entry.session_id
                         prev_session_id = entry.session_id
+                        route_boundary_old_entry = entry
                     entry = None
                     _needs_recover = True
                 elif entry.session_id != _stale_session_id:
@@ -2506,6 +2607,7 @@ class SessionStore:
                         reset_had_activity = entry.last_prompt_tokens > 0
                         db_end_session_id = entry.session_id
                         prev_session_id = entry.session_id
+                        route_boundary_old_entry = entry
                         self._entries.pop(session_key, None)
                         entry = None
                         _needs_recover = True
@@ -2611,6 +2713,13 @@ class SessionStore:
                 )
             except Exception as e:
                 print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+
+        if route_boundary_old_entry is not None and auto_reset_reason:
+            self._advance_bound_ivd_route(
+                route_boundary_old_entry,
+                entry,
+                reason=auto_reset_reason,
+            )
 
         return entry
 
@@ -2881,6 +2990,7 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                prev_session_id=old_entry.session_id,
             )
 
             self._entries[session_key] = new_entry
@@ -2922,6 +3032,13 @@ class SessionStore:
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
+        if new_entry is not None:
+            self._advance_bound_ivd_route(
+                old_entry,
+                new_entry,
+                reason="explicit_reset",
+            )
+
         return new_entry
 
     def advance_compression_session(
@@ -2958,7 +3075,13 @@ class SessionStore:
                 return None
             entry.updated_at = _now()
             self._save()
-            return entry
+            updated_entry = entry
+        self._advance_bound_ivd_compression_route(
+            updated_entry,
+            parent_session_id=expected_session_id,
+            child_session_id=target_session_id,
+        )
+        return updated_entry
 
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
