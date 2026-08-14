@@ -3581,7 +3581,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
         normalized_platform = str(platform or "").strip().lower()
-        prepared = self._ivd_prepared_contracts.get(normalized_platform)
+        prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
+        prepared = prepared_contracts.get(normalized_platform)
         if ivd_engine_mode(config, platform=normalized_platform) == "package":
             return prepared, execute_exclusive_ivd_turn(
                 prepared,
@@ -10009,7 +10010,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _stop_started_at_box,
                 )
             finally:
-                self._close_ivd_prepared_contracts()
+                GatewayRunner._close_ivd_prepared_contracts(self)
                 _watchdog_done.set()
 
         async def _stop_impl_body(_kill_tool_subprocesses, _stop_started_at_box) -> None:
@@ -11550,10 +11551,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # has been *idle* beyond the inactivity threshold (or when the agent
         # object has no activity tracker and wall-clock age is extreme).
         _raw_stale_timeout = _float_env("HERMES_AGENT_TIMEOUT", 1800)
-        _stale_ts = self._running_agents_ts.get(_quick_key, 0)
-        if _quick_key in self._running_agents and _stale_ts:
+        _running_agents = self.__dict__.setdefault("_running_agents", {})
+        _running_agents_ts = self.__dict__.setdefault("_running_agents_ts", {})
+        _stale_ts = _running_agents_ts.get(_quick_key, 0)
+        if _quick_key in _running_agents and _stale_ts:
             _stale_age = time.time() - _stale_ts
-            _stale_agent = self._running_agents.get(_quick_key)
+            _stale_agent = _running_agents.get(_quick_key)
             # Never evict the pending sentinel — it was just placed moments
             # ago during the async setup phase before the real agent is
             # created.  Sentinels have no get_activity_summary(), so the

@@ -2,6 +2,7 @@ from hermes_state import AsyncSessionDB
 """Tests for gateway /status behavior and token persistence."""
 
 from datetime import datetime
+from pathlib import Path
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -650,8 +651,6 @@ async def test_status_command_bypasses_active_session_guard():
 @pytest.mark.asyncio
 async def test_profile_command_reports_custom_root_profile(monkeypatch, tmp_path):
     """Gateway /profile detects custom-root profiles (not under ~/.hermes)."""
-    from pathlib import Path
-
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
         session_id="sess-1",
@@ -700,7 +699,7 @@ async def test_profile_command_reports_source_stamped_profile(monkeypatch, tmp_p
     result = await runner._handle_profile_command(event)
 
     assert "**Profile:** `milo`" in result
-    assert f"**Home:** `{profile_home}`" in result
+    assert f"**Home:** `~/{profile_home.relative_to(Path.home())}`" in result
 
 
 @pytest.mark.asyncio
@@ -731,7 +730,7 @@ async def test_profile_command_ignores_stamp_when_multiplexing_off(monkeypatch, 
     result = await runner._handle_profile_command(event)
 
     assert "**Profile:** `default`" in result
-    assert f"**Home:** `{hermes_home}`" in result
+    assert f"**Home:** `~/{hermes_home.relative_to(Path.home())}`" in result
 
 
 @pytest.mark.asyncio
@@ -755,7 +754,7 @@ async def test_profile_command_unstamped_source_unchanged(monkeypatch, tmp_path)
     result = await runner._handle_profile_command(_make_event("/profile"))
 
     assert "**Profile:** `default`" in result
-    assert f"**Home:** `{hermes_home}`" in result
+    assert f"**Home:** `~/{hermes_home.relative_to(Path.home())}`" in result
 
 
 @pytest.mark.asyncio

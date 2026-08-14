@@ -112,7 +112,10 @@ async def test_gateway_clarify_reply_resumes_typing_before_returning_empty_ack()
     runner._adapter_for_source = lambda source: adapter
     runner._update_prompt_pending = {}
 
-    cm.register("clarify-2", "clarify-session", "What is missing?", None)
+    clarify_key = runner._effect_session_key_for_source(
+        event.source, effect="clarification"
+    )
+    cm.register("clarify-2", clarify_key, "What is missing?", None)
 
     with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
         result = await runner._handle_message(event)

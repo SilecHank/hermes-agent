@@ -94,6 +94,12 @@ def _make_runner(adapter):
     return runner
 
 
+def _clarify_key(runner, event):
+    return runner._effect_session_key_for_source(
+        event.source, effect="clarification"
+    )
+
+
 async def _dispatch(runner, event):
     """Run _handle_message with a tripwire installed AFTER the clarify
     intercept (the slash-confirm pending lookup is the next statement), so a
@@ -116,12 +122,13 @@ async def test_thread_prose_not_swallowed_by_native_multi_choice_clarify():
 
     adapter = _StubAdapter()
     runner = _make_runner(adapter)
+    event = _event("just checking the visual UI, no need to pass any data")
     # Native interactive multi-choice prompt: awaiting_text stays False.
-    entry = cm.register("cl-native", SESSION_KEY, "Pick a UI variant", ["buttons", "dropdown"])
+    entry = cm.register("cl-native", _clarify_key(runner, event), "Pick a UI variant", ["buttons", "dropdown"])
     assert entry.awaiting_text is False
 
     with pytest.raises(_FellThroughIntercept):
-        await _dispatch(runner, _event("just checking the visual UI, no need to pass any data"))
+        await _dispatch(runner, event)
 
     # The clarify entry must still be pending and unresolved.
     with cm._lock:
@@ -139,9 +146,10 @@ async def test_numeric_reply_still_resolves_native_multi_choice_clarify():
 
     adapter = _StubAdapter()
     runner = _make_runner(adapter)
-    cm.register("cl-num", SESSION_KEY, "Pick a UI variant", ["buttons", "dropdown"])
+    event = _event("2")
+    cm.register("cl-num", _clarify_key(runner, event), "Pick a UI variant", ["buttons", "dropdown"])
 
-    result = await _dispatch(runner, _event("2"))
+    result = await _dispatch(runner, event)
 
     assert result == ""  # intercepted + acknowledged silently
     with cm._lock:
@@ -159,9 +167,10 @@ async def test_exact_label_reply_still_resolves_native_multi_choice_clarify():
 
     adapter = _StubAdapter()
     runner = _make_runner(adapter)
-    cm.register("cl-label", SESSION_KEY, "Pick a UI variant", ["buttons", "dropdown"])
+    event = _event("Buttons")
+    cm.register("cl-label", _clarify_key(runner, event), "Pick a UI variant", ["buttons", "dropdown"])
 
-    result = await _dispatch(runner, _event("Buttons"))
+    result = await _dispatch(runner, event)
 
     assert result == ""
     with cm._lock:
@@ -180,10 +189,11 @@ async def test_prose_still_accepted_after_other_flips_text_capture():
 
     adapter = _StubAdapter()
     runner = _make_runner(adapter)
-    cm.register("cl-other", SESSION_KEY, "Pick a UI variant", ["buttons", "dropdown"])
+    event = _event("a carousel actually")
+    cm.register("cl-other", _clarify_key(runner, event), "Pick a UI variant", ["buttons", "dropdown"])
     assert cm.mark_awaiting_text("cl-other") is True
 
-    result = await _dispatch(runner, _event("a carousel actually"))
+    result = await _dispatch(runner, event)
 
     assert result == ""
     with cm._lock:
@@ -201,9 +211,10 @@ async def test_prose_still_accepted_for_open_ended_clarify():
 
     adapter = _StubAdapter()
     runner = _make_runner(adapter)
-    cm.register("cl-open", SESSION_KEY, "What should I name it?", None)
+    event = _event("call it hermes-ux")
+    cm.register("cl-open", _clarify_key(runner, event), "What should I name it?", None)
 
-    result = await _dispatch(runner, _event("call it hermes-ux"))
+    result = await _dispatch(runner, event)
 
     assert result == ""
     with cm._lock:
