@@ -103,8 +103,9 @@ def test_worker_marks_completed_and_writes_artifact(tmp_path):
 
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert payload["status"] == "completed"
-    assert len(payload["steps"]) == 1
+    assert len(payload["steps"]) == 2
     assert payload["steps"][0]["name"] == "isolated_self_maintenance"
+    assert payload["steps"][1]["name"] == "portable_state_sync"
     assert calls
     assert "已完成" in ledger.format_status_summary(claim.command_id)
 

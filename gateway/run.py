@@ -3590,13 +3590,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         from gateway.after_sales_guard import prepare_after_sales_turn
 
+        session_db = getattr(self, "_session_db", None)
         turn = prepare_after_sales_turn(
             config,
             platform=normalized_platform,
             message=message,
             history=history,
             prepared_ivd_turn=prepared,
-            session_db=getattr(self._session_db, "_db", self._session_db),
+            session_db=getattr(session_db, "_db", session_db),
         )
         return prepared, turn
 

@@ -7,6 +7,7 @@ to download, cache, and optionally inject text from non-image/audio files.
 
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
@@ -137,8 +138,9 @@ def make_message(attachments: list, content: str = "") -> SimpleNamespace:
     )
 
 
+@contextmanager
 def _mock_aiohttp_download(raw_bytes: bytes):
-    """Return a patch context manager that makes aiohttp return raw_bytes."""
+    """Make the download deterministic without consulting external DNS."""
     resp = AsyncMock()
     resp.status = 200
     resp.read = AsyncMock(return_value=raw_bytes)
@@ -150,7 +152,11 @@ def _mock_aiohttp_download(raw_bytes: bytes):
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
 
-    return patch("aiohttp.ClientSession", return_value=session)
+    with (
+        patch.object(discord_platform, "is_safe_url", return_value=True),
+        patch("aiohttp.ClientSession", return_value=session),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +356,10 @@ class TestIncomingDocumentHandling:
 
             return FakeSession()
 
-        with patch("aiohttp.ClientSession", return_value=make_session([content1, content2])):
+        with (
+            patch.object(discord_platform, "is_safe_url", return_value=True),
+            patch("aiohttp.ClientSession", return_value=make_session([content1, content2])),
+        ):
             msg = make_message(
                 attachments=[
                     make_attachment(filename="file1.txt", content_type="text/plain"),
@@ -510,4 +519,3 @@ class TestAllowAnyAttachment:
         """Garbage in max_attachment_bytes config falls back to 32 MiB."""
         adapter.config.extra["max_attachment_bytes"] = "not-a-number"
         assert adapter._discord_max_attachment_bytes() == 32 * 1024 * 1024
-
