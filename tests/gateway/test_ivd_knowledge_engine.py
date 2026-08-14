@@ -238,6 +238,23 @@ def test_unambiguous_near_exact_question_uses_one_compiled_index_lookup(package:
     assert result.filesystem_scans == 0
 
 
+def test_reordered_equivalent_parameter_question_uses_one_compiled_index_lookup(package: Path):
+    result = IVDKnowledgeEngine(package).execute(
+        question="无创血浆提取量是多少",
+        product_line="NIFTY",
+        product_variant="标准版",
+        workflow_stage="extraction",
+        knowledge_type="parameter",
+        answer_shape="scalar",
+        allow_index_transaction=True,
+    )
+
+    assert result.text == "200 uL."
+    assert result.model_calls == 0
+    assert result.index_transactions == 1
+    assert result.filesystem_scans == 0
+
+
 def test_engine_binds_observed_package_digest_to_expected_release(package: Path):
     manifest = json.loads((package / "package-manifest.json").read_text())
     digest = manifest["package_digest"]

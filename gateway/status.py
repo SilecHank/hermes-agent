@@ -419,6 +419,11 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         basename = token.rsplit("/", 1)[-1]
         if basename in ("hermes-gateway", "hermes-gateway.exe"):
             return "run"
+    if any(
+        token == "-m" and index + 1 < len(tokens) and tokens[index + 1] == "gateway.run"
+        for index, token in enumerate(tokens)
+    ):
+        return "run"
 
     joined = " ".join(tokens)
     has_gateway_entry = (

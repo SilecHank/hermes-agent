@@ -102,7 +102,6 @@
     "hermes_cli/default_soul.py",
     "hermes_cli/env_loader.py",
     "hermes_cli/fallback_config.py",
-    "hermes_cli/main.py",
     "hermes_cli/managed_scope.py",
     "hermes_cli/route_identity.py",
     "hermes_cli/runtime_provider.py",

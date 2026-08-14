@@ -24,6 +24,7 @@ ACCEPT = [
     "python -m hermes_cli.main gateway run --replace",
     "python -m hermes_cli/main.py gateway run",
     "python gateway/run.py",
+    "python -m gateway.run",
     "hermes-gateway.exe",
     "hermes gateway",          # bare `hermes gateway` defaults to run
     "hermes gateway run",

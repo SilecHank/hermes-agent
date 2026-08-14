@@ -95,6 +95,7 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
         )["files"]
     }
     assert "gateway/after_sales_guard.py" not in built
+    assert "hermes_cli/main.py" not in built
     assert required <= built
     assert not any(
         path == ".git"
@@ -105,8 +106,9 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
     script = (
         "import pathlib, sys; "
         f"root=pathlib.Path({str(result.root)!r}).resolve(); "
-        "sys.path=[str(root)]+[p for p in sys.path if p and "
-        "'unified-engine-phase-b' not in p and pathlib.Path(p).resolve()!=root]; "
+        "sys.path=[str(root)]+[p for p in sys.path if p and pathlib.Path(p).resolve()!=root "
+        "and not any((pathlib.Path(p)/name).is_dir() for name in "
+        "('gateway','agent','plugins','hermes_cli','cron'))]; "
         "import gateway.run; "
         "outside=[]; "
         "names=('gateway','agent','plugins','hermes_cli','cron'); "

@@ -34,7 +34,8 @@ class _Dispatcher:
     def __init__(self, _root):
         pass
 
-    def execute(self, engine, *, question, evidence=None):
+    def execute(self, engine, *, question, context="", evidence=None):
+        assert context == ""
         engine.answer(question, evidence)
         return SimpleNamespace(
             envelope=SimpleNamespace(

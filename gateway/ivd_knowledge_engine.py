@@ -163,7 +163,8 @@ class IVDKnowledgeEngine:
     @staticmethod
     def _projection() -> str:
         return """
-            SELECT e.entity_id, e.knowledge_kind, p.product_line, p.product_variant,
+            SELECT x.alias AS matched_alias, e.entity_id, e.knowledge_kind,
+                   p.product_line, p.product_variant,
                    s.source_document_id, v.source_version, l.source_locator,
                    v.source_path, v.source_sha256, v.source_record_digest,
                    e.workflow_stage, e.step_id, e.object_name, e.fact_key,
@@ -225,57 +226,21 @@ class IVDKnowledgeEngine:
         ).fetchall()
         return self._hit(rows[0]) if len(rows) == 1 else None
 
-    def _fts_registry(
-        self,
-        question: str,
-        product_line: str,
-        product_variant: str | None,
-        workflow_stage: str,
-        knowledge_type: str,
-    ) -> SimpleNamespace | None:
-        tokens = re.findall(r"[^\W_]+", question, flags=re.UNICODE)
-        if not tokens or len(tokens) > 16 or len(question) > 256:
-            return None
-        expression = " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
-        clauses = ["aliases_fts MATCH ?", "a.effective_status='active'"]
-        values: list[object] = [expression]
-        if product_line:
-            clauses.append("p.product_line=?")
-            values.append(product_line)
-        if product_variant is not None:
-            clauses.append("p.product_variant=?")
-            values.append(product_variant)
-        if workflow_stage:
-            clauses.append("e.workflow_stage=?")
-            values.append(workflow_stage)
-        if knowledge_type:
-            kinds = self._registry_kinds(knowledge_type)
-            if not kinds:
-                return None
-            placeholders = ",".join("?" for _ in kinds)
-            clauses.append(f"e.knowledge_kind IN ({placeholders})")
-            values.extend(kinds)
-        rows = self._database.execute(
-            """
-            SELECT DISTINCT x.alias, x.assertion_id
-            FROM aliases_fts x
-            JOIN assertions a ON a.assertion_id=x.assertion_id
-            JOIN entities e ON e.entity_id=a.entity_id
-            JOIN products p ON p.product_id=e.product_id
-            WHERE """ + " AND ".join(clauses) + " ORDER BY x.assertion_id LIMIT 2",
-            values,
-        ).fetchall()
-        if len(rows) != 1:
-            return None
-        return self._exact_registry(
-            str(rows[0]["alias"]),
-            product_line,
-            product_variant,
-            workflow_stage,
-            knowledge_type,
+    @staticmethod
+    def _semantic_signature(value: str) -> tuple[str, frozenset[str]]:
+        normalized = re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "", value.casefold())
+        for noise in (
+            "请帮我", "麻烦", "请问", "需要多少", "是多少", "多少",
+            "一下", "的", "呀", "呢", "吗",
+        ):
+            normalized = normalized.replace(noise, "")
+        grams = frozenset(
+            normalized[index : index + 2]
+            for index in range(max(0, len(normalized) - 1))
         )
+        return normalized, grams
 
-    def _contained_registry(
+    def _semantic_registry(
         self,
         question: str,
         product_line: str,
@@ -283,13 +248,11 @@ class IVDKnowledgeEngine:
         workflow_stage: str,
         knowledge_type: str,
     ) -> SimpleNamespace | None:
-        """Resolve one unambiguous near-exact alias without a filesystem search."""
-        clauses = [
-            "a.effective_status='active'",
-            "length(x.alias)>=2",
-            "(instr(?, x.alias)>0 OR instr(x.alias, ?)>0)",
-        ]
-        values: list[object] = [question, question]
+        query_text, query_grams = self._semantic_signature(question)
+        if len(query_text) < 2 or len(question) > 256:
+            return None
+        clauses = ["a.effective_status='active'", "length(x.alias)>=2"]
+        values: list[object] = []
         if product_line:
             clauses.append("p.product_line=?")
             values.append(product_line)
@@ -310,21 +273,39 @@ class IVDKnowledgeEngine:
             self._projection()
             + " WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY length(x.alias) DESC, x.assertion_id LIMIT 4",
+            + " ORDER BY x.assertion_id, length(x.alias) DESC LIMIT 256",
             values,
         ).fetchall()
         if not rows:
             return None
-        facts = {
-            (
+        candidates: dict[tuple[str, str, str, str], tuple[float, sqlite3.Row]] = {}
+        for row in rows:
+            alias_text, alias_grams = self._semantic_signature(str(row["matched_alias"]))
+            if not alias_text:
+                continue
+            if alias_text in query_text or query_text in alias_text:
+                score = 1.0
+            elif not alias_grams or not query_grams:
+                score = 0.0
+            else:
+                score = len(alias_grams & query_grams) / min(
+                    len(alias_grams), len(query_grams)
+                )
+            fact = (
                 str(row["entity_id"]),
                 str(row["fact_key"]),
                 str(row["source_locator"]),
                 str(row["value"]),
             )
-            for row in rows
-        }
-        return self._hit(rows[0]) if len(facts) == 1 else None
+            previous = candidates.get(fact)
+            if previous is None or score > previous[0]:
+                candidates[fact] = (score, row)
+        ranked = sorted(candidates.values(), key=lambda item: item[0], reverse=True)
+        if not ranked or ranked[0][0] < 0.55:
+            return None
+        if len(ranked) > 1 and ranked[1][0] >= ranked[0][0] - 0.12:
+            return None
+        return self._hit(ranked[0][1])
 
     def _diagnostic(
         self,
@@ -497,13 +478,7 @@ class IVDKnowledgeEngine:
 
         fuzzy = None
         if allow_index_transaction:
-            fuzzy = self._fts_registry(
-                normalized,
-                product_line,
-                product_variant,
-                workflow_stage,
-                knowledge_type,
-            ) or self._contained_registry(
+            fuzzy = self._semantic_registry(
                 normalized,
                 product_line,
                 product_variant,

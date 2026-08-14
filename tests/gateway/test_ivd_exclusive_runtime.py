@@ -60,8 +60,8 @@ def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
         def __init__(self, root):
             calls.append(("dispatcher", root))
 
-        def execute(self, engine, *, question, evidence=None):
-            calls.append(("dispatch", question, evidence))
+        def execute(self, engine, *, question, context="", evidence=None):
+            calls.append(("dispatch", question, context, evidence))
             return SimpleNamespace(
                 envelope=SimpleNamespace(
                     clarifying_questions=(),
@@ -104,6 +104,52 @@ def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
     assert result.model_calls == 0
     assert result.index_transactions == 0
     assert [call[0] for call in calls] == ["dispatcher", "engine", "dispatch"]
+
+
+def test_package_turn_caps_recent_context_to_compiled_budget(tmp_path, monkeypatch):
+    prepared = _prepared_package_turn(tmp_path)
+    observed = {}
+
+    class Engine:
+        def __init__(self, _root, *, expected_package_digest):
+            assert expected_package_digest == "a" * 64
+
+        def close(self):
+            pass
+
+    class Dispatcher:
+        def __init__(self, _root):
+            pass
+
+        def execute(self, _engine, *, question, context="", evidence=None):
+            observed.update(question=question, context=context, evidence=evidence)
+            return SimpleNamespace(
+                envelope=SimpleNamespace(
+                    clarifying_questions=("请补充产品名称。",),
+                    model_call_budget=0,
+                    indexed_retrieval_budget=0,
+                ),
+                result=None,
+            )
+
+    monkeypatch.setattr("gateway.ivd_runtime.IVDDispatcher", Dispatcher)
+    monkeypatch.setattr("gateway.ivd_runtime.IVDKnowledgeEngine", Engine)
+
+    from gateway.ivd_runtime import execute_exclusive_ivd_turn
+
+    result = execute_exclusive_ivd_turn(
+        prepared,
+        question="多少？",
+        history=[
+            {"role": "user", "content": "NIFTY无创提取流程"},
+            {"role": "assistant", "content": "不应计入"},
+            {"role": "user", "content": "需要多少血浆以及后续说明"},
+        ],
+    )
+
+    assert result.outcome == "clarification"
+    assert len(observed["context"]) <= 8
+    assert "不应计入" not in observed["context"]
 
 
 def test_compatibility_mode_keeps_legacy_router_reachable(tmp_path, monkeypatch):

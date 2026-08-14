@@ -130,6 +130,32 @@ class _IVDKnowledgeEngineCache:
 _IVD_ENGINE_CACHE = _IVDKnowledgeEngineCache()
 
 
+def _bounded_user_context(
+    history: list[dict[str, Any]] | None,
+    *,
+    budget: int,
+) -> str:
+    if budget <= 0:
+        return ""
+    selected: list[str] = []
+    remaining = budget
+    for item in reversed((history or [])[-6:]):
+        if item.get("role") != "user" or not isinstance(item.get("content"), str):
+            continue
+        content = str(item["content"]).strip()
+        if not content:
+            continue
+        separator = 1 if selected else 0
+        if remaining <= separator:
+            break
+        chunk = content[: remaining - separator]
+        selected.append(chunk)
+        remaining -= len(chunk) + separator
+        if remaining <= 0:
+            break
+    return " ".join(reversed(selected))
+
+
 def close_ivd_knowledge_engine_cache() -> None:
     _IVD_ENGINE_CACHE.close()
 
@@ -171,10 +197,10 @@ def execute_exclusive_ivd_turn(
         getattr(prepared.execution_contract, "package_digest", "") or ""
     )
     dispatcher = IVDDispatcher(package_root)
-    recent_context = " ".join(
-        str(item.get("content") or "")
-        for item in (history or [])[-6:]
-        if item.get("role") == "user" and isinstance(item.get("content"), str)
+    context_budget = int(projection.get("context_budget") or 0)
+    recent_context = _bounded_user_context(
+        history,
+        budget=context_budget,
     )
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
