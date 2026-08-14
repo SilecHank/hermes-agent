@@ -275,6 +275,57 @@ class IVDKnowledgeEngine:
             knowledge_type,
         )
 
+    def _contained_registry(
+        self,
+        question: str,
+        product_line: str,
+        product_variant: str | None,
+        workflow_stage: str,
+        knowledge_type: str,
+    ) -> SimpleNamespace | None:
+        """Resolve one unambiguous near-exact alias without a filesystem search."""
+        clauses = [
+            "a.effective_status='active'",
+            "length(x.alias)>=2",
+            "(instr(?, x.alias)>0 OR instr(x.alias, ?)>0)",
+        ]
+        values: list[object] = [question, question]
+        if product_line:
+            clauses.append("p.product_line=?")
+            values.append(product_line)
+        if product_variant is not None:
+            clauses.append("p.product_variant=?")
+            values.append(product_variant)
+        if workflow_stage:
+            clauses.append("e.workflow_stage=?")
+            values.append(workflow_stage)
+        if knowledge_type:
+            kinds = self._registry_kinds(knowledge_type)
+            if not kinds:
+                return None
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"e.knowledge_kind IN ({placeholders})")
+            values.extend(kinds)
+        rows = self._database.execute(
+            self._projection()
+            + " WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY length(x.alias) DESC, x.assertion_id LIMIT 4",
+            values,
+        ).fetchall()
+        if not rows:
+            return None
+        facts = {
+            (
+                str(row["entity_id"]),
+                str(row["fact_key"]),
+                str(row["source_locator"]),
+                str(row["value"]),
+            )
+            for row in rows
+        }
+        return self._hit(rows[0]) if len(facts) == 1 else None
+
     def _diagnostic(
         self,
         question: str,
@@ -444,17 +495,21 @@ class IVDKnowledgeEngine:
                 sources[0] if len(sources) == 1 else None, sources,
             )
 
-        fuzzy = (
-            self._fts_registry(
+        fuzzy = None
+        if allow_index_transaction:
+            fuzzy = self._fts_registry(
+                normalized,
+                product_line,
+                product_variant,
+                workflow_stage,
+                knowledge_type,
+            ) or self._contained_registry(
                 normalized,
                 product_line,
                 product_variant,
                 workflow_stage,
                 knowledge_type,
             )
-            if allow_index_transaction
-            else None
-        )
         if fuzzy is not None:
             rendered = self._renderer.render_registry_hit(fuzzy)
             if answer_shape and rendered.answer_shape != answer_shape:

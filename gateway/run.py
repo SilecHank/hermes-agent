@@ -2300,6 +2300,7 @@ def _prepare_gateway_ivd_boundary(
         return prepared, execute_exclusive_ivd_turn(
             prepared,
             question=message,
+            history=history,
         )
     from gateway.after_sales_guard import prepare_after_sales_turn
 
@@ -3587,6 +3588,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return prepared, execute_exclusive_ivd_turn(
                 prepared,
                 question=message,
+                history=history,
             )
         from gateway.after_sales_guard import prepare_after_sales_turn
 

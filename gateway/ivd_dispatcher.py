@@ -327,14 +327,17 @@ class IVDDispatcher:
                 return str(item["stage"])
         return None
 
-    def dispatch(self, question: str) -> DecisionEnvelope:
+    def dispatch(self, question: str, *, context: str = "") -> DecisionEnvelope:
         text = str(question or "").strip()
+        routing_text = f"{context} {text}".strip()
         operation = self._match_intent(text, self._operations)
         product_line, product_variant, product_conflict = self._match_product(
-            text,
+            routing_text,
             excluded_scopes=self._platform_scopes if operation is not None else frozenset(),
         )
-        semantic = self._match_intent(text, self._semantics)
+        semantic = self._match_intent(text, self._semantics) or self._match_intent(
+            routing_text, self._semantics
+        )
         selected = operation or semantic or next(
             item for item in self._semantics if item["intent"] == "product_fact"
         )
@@ -346,13 +349,13 @@ class IVDDispatcher:
             intent=intent,
             product_line=None if product_conflict else product_line,
             product_variant=None if product_conflict else product_variant,
-            workflow_stage=self._workflow_stage(text),
+            workflow_stage=self._workflow_stage(routing_text),
             knowledge_type=str(selected["knowledge_type"]),
             risk_class=str(selected["risk_class"]),
             answer_shape="clarification" if ambiguous else str(selected["answer_shape"]),
             ambiguities=("product_line",) if ambiguous else (),
             clarifying_questions=(self._product_question,) if ambiguous else (),
-            indexed_retrieval_budget=0,
+            indexed_retrieval_budget=0 if ambiguous else 1,
             model_call_budget=0,
             envelope_count=1,
             metadata=MappingProxyType({"resolution_order": _RESOLUTION_ORDER}),
@@ -363,9 +366,10 @@ class IVDDispatcher:
         engine: _KnowledgeEngine,
         *,
         question: str,
+        context: str = "",
         evidence: Mapping[str, object] | None = None,
     ) -> DispatchOutcome:
-        envelope = self.dispatch(question)
+        envelope = self.dispatch(question, context=context)
         if envelope.clarifying_questions:
             return DispatchOutcome(envelope=envelope, result=None)
         result = engine.execute(
@@ -376,6 +380,6 @@ class IVDDispatcher:
             knowledge_type=envelope.knowledge_type,
             answer_shape=envelope.answer_shape,
             evidence=dict(evidence or {}),
-            allow_index_transaction=False,
+            allow_index_transaction=envelope.indexed_retrieval_budget > 0,
         )
         return DispatchOutcome(envelope=envelope, result=result)

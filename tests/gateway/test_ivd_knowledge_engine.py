@@ -221,6 +221,23 @@ def test_scalar_lookup_returns_value_and_unit_without_model(package: Path):
     assert result.sources == (result.source,)
 
 
+def test_unambiguous_near_exact_question_uses_one_compiled_index_lookup(package: Path):
+    result = IVDKnowledgeEngine(package).execute(
+        question="请问无创提取需要多少血浆呀",
+        product_line="NIFTY",
+        product_variant="标准版",
+        workflow_stage="extraction",
+        knowledge_type="parameter",
+        answer_shape="scalar",
+        allow_index_transaction=True,
+    )
+
+    assert result.text == "200 uL."
+    assert result.model_calls == 0
+    assert result.index_transactions == 1
+    assert result.filesystem_scans == 0
+
+
 def test_engine_binds_observed_package_digest_to_expected_release(package: Path):
     manifest = json.loads((package / "package-manifest.json").read_text())
     digest = manifest["package_digest"]

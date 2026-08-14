@@ -228,6 +228,19 @@ class IVDDispatcherTests(unittest.TestCase):
         self.assertEqual(0, engine.calls)
         self.assertEqual("clarification", outcome.envelope.answer_shape)
 
+    def test_recent_context_supplies_product_for_a_followup(self):
+        engine = _RecordingEngine()
+
+        outcome = IVDDispatcher(self.root).execute(
+            engine,
+            question="那需要多少血浆？",
+            context="前面讨论的是无创提取流程。",
+        )
+
+        self.assertIsNotNone(outcome.result)
+        self.assertEqual("NIFTY", engine.arguments["product_line"])
+        self.assertEqual("extraction", engine.arguments["workflow_stage"])
+
     def test_composition_passes_frozen_scope_to_knowledge_engine(self):
         engine = _RecordingEngine()
 
@@ -245,7 +258,7 @@ class IVDDispatcherTests(unittest.TestCase):
         self.assertEqual("parameter", engine.arguments["knowledge_type"])
         self.assertEqual("scalar", engine.arguments["answer_shape"])
         self.assertEqual({"same_batch": True}, engine.arguments["evidence"])
-        self.assertFalse(engine.arguments["allow_index_transaction"])
+        self.assertTrue(engine.arguments["allow_index_transaction"])
 
     def test_invalid_or_non_package_vocabulary_fails_closed(self):
         vocabulary = self.root / "indexes" / "dispatch-vocabulary-v1.json"

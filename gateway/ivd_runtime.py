@@ -153,6 +153,7 @@ def execute_exclusive_ivd_turn(
     prepared: PreparedIVDTurn | None,
     *,
     question: str,
+    history: list[dict[str, Any]] | None = None,
     evidence: Mapping[str, object] | None = None,
 ) -> ExclusiveIVDResult:
     """Run the immutable package without constructing any legacy answer plane."""
@@ -170,10 +171,16 @@ def execute_exclusive_ivd_turn(
         getattr(prepared.execution_contract, "package_digest", "") or ""
     )
     dispatcher = IVDDispatcher(package_root)
+    recent_context = " ".join(
+        str(item.get("content") or "")
+        for item in (history or [])[-6:]
+        if item.get("role") == "user" and isinstance(item.get("content"), str)
+    )
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
             question=question,
+            context=recent_context,
             evidence=evidence,
         )
         result = outcome.result
