@@ -40,7 +40,6 @@
     "agent/turn_retry_state.py",
     "agent/usage_pricing.py",
     "gateway/__init__.py",
-    "gateway/after_sales_guard.py",
     "gateway/after_sales_telemetry.py",
     "gateway/authz_mixin.py",
     "gateway/channel_directory.py",

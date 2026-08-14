@@ -94,6 +94,7 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
             (result.root / "serving-agent-manifest.json").read_text()
         )["files"]
     }
+    assert "gateway/after_sales_guard.py" not in built
     assert required <= built
     assert not any(
         path == ".git"
@@ -122,6 +123,43 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
         capture_output=True,
         text=True,
     )
+
+
+def test_package_gateway_boundary_does_not_import_legacy_guard(monkeypatch):
+    import builtins
+
+    from gateway import run
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "gateway.after_sales_guard":
+            raise AssertionError("legacy guard imported by package mode")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.prepare_enabled_ivd_turn",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.ivd_engine_mode",
+        lambda *_args, **_kwargs: "package",
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.execute_exclusive_ivd_turn",
+        lambda *_args, **_kwargs: "package-result",
+    )
+
+    prepared, result = run._prepare_gateway_ivd_boundary(
+        {},
+        platform="weixin",
+        message="无创提取需要多少血浆？",
+        history=[],
+    )
+
+    assert prepared is not None
+    assert result == "package-result"
 
 
 @pytest.mark.parametrize(

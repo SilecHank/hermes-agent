@@ -2289,7 +2289,6 @@ def _prepare_gateway_ivd_boundary(
     history: list[dict[str, Any]],
 ) -> tuple[Any, Any]:
     """Select exactly one IVD control plane for the turn."""
-    from gateway.after_sales_guard import prepare_after_sales_turn
     from gateway.ivd_runtime import (
         execute_exclusive_ivd_turn,
         ivd_engine_mode,
@@ -2302,6 +2301,8 @@ def _prepare_gateway_ivd_boundary(
             prepared,
             question=message,
         )
+    from gateway.after_sales_guard import prepare_after_sales_turn
+
     turn = prepare_after_sales_turn(
         config,
         platform=platform,
@@ -3576,7 +3577,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         message: str,
         history: list[dict[str, Any]],
     ) -> tuple[Any, Any]:
-        from gateway.after_sales_guard import prepare_after_sales_turn
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
         normalized_platform = str(platform or "").strip().lower()
@@ -3586,6 +3586,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 prepared,
                 question=message,
             )
+        from gateway.after_sales_guard import prepare_after_sales_turn
+
         turn = prepare_after_sales_turn(
             config,
             platform=normalized_platform,
