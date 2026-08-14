@@ -8,6 +8,7 @@ import gateway.after_sales_telemetry as after_sales_telemetry
 from gateway.after_sales_telemetry import (
     append_runtime_event,
     build_runtime_event,
+    build_turn_span_event,
     default_runtime_event_path,
 )
 
@@ -83,6 +84,37 @@ def test_runtime_event_never_infers_missing_product_scope():
     )
 
     assert event["product_scope"] == ""
+
+
+def test_active_turn_span_has_no_competing_outcome_fields():
+    event = build_turn_span_event(
+        turn_id="ivd-turn-1",
+        elapsed_seconds=1.25,
+        api_calls=1,
+        tool_names=["read_file"],
+        retrieval_snapshot={
+            "profile": "direct",
+            "searches": 0,
+            "signature_count": 1,
+            "formal_source_count": 1,
+            "stop_reason": "formal_source_found",
+        },
+    )
+
+    assert event["event_type"] == "ivd_turn_span"
+    assert event["turn_id"] == "ivd-turn-1"
+    assert event["span_name"] == "runtime"
+    assert event["counters"]["model_calls"] == 1
+    assert event["counters"]["skill_calls"] == 1
+    for forbidden in (
+        "route_id",
+        "route_version",
+        "validation_status",
+        "source_paths",
+        "answer_text",
+        "product_scope",
+    ):
+        assert forbidden not in event
 
 
 def test_runtime_event_records_sanitized_preflight_gate_decision():

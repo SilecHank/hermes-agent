@@ -178,6 +178,40 @@ def build_runtime_event(
     return event
 
 
+def build_turn_span_event(
+    *,
+    turn_id: str,
+    elapsed_seconds: float,
+    api_calls: int,
+    tool_names: Iterable[str],
+    retrieval_snapshot: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build non-authoritative timing/count observability for a TurnReceipt."""
+    tools = [str(name) for name in tool_names if str(name)]
+    retrieval = retrieval_snapshot or {}
+    return {
+        "schema_version": 1,
+        "event_type": "ivd_turn_span",
+        "authoritative": False,
+        "turn_id": str(turn_id),
+        "span_name": "runtime",
+        "timings": {
+            "total_ms": round(max(0.0, float(elapsed_seconds)) * 1000, 3),
+        },
+        "counters": {
+            "model_calls": max(0, int(api_calls)),
+            "skill_calls": len(tools),
+            "index_calls": max(0, int(retrieval.get("searches") or 0)),
+            "retrieval_signatures": max(
+                0, int(retrieval.get("signature_count") or 0)
+            ),
+            "formal_source_reads": max(
+                0, int(retrieval.get("formal_source_count") or 0)
+            ),
+        },
+    }
+
+
 def append_runtime_event(path: str | Path, event: dict[str, object]) -> None:
     target = Path(path)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
