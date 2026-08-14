@@ -24,7 +24,13 @@ _MANIFEST_FIELDS = {
     "content_manifest_digest",
 }
 _FILE_FIELDS = {"path", "sha256", "size", "executable"}
-_MANDATORY_FORBIDDEN_PATHS = (".git", "skills", "tests", "tools/search_files.py")
+_MANDATORY_FORBIDDEN_PATHS = (
+    ".git",
+    "gateway/after_sales_guard.py",
+    "skills",
+    "tests",
+    "tools/search_files.py",
+)
 
 
 class ServingAgentBuildError(RuntimeError):

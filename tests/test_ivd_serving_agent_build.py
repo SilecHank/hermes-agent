@@ -188,6 +188,21 @@ def test_allowlist_cannot_relax_mandatory_development_boundaries(tmp_path):
         build_serving_agent(root, tmp_path / "serving-agent", allowlist)
 
 
+def test_allowlist_cannot_reintroduce_legacy_after_sales_guard(tmp_path):
+    root = tmp_path / "agent"
+    _write(root / "gateway/run.py")
+    _write(root / "gateway/after_sales_guard.py")
+    allowlist = _allowlist(
+        root, ["gateway/run.py", "gateway/after_sales_guard.py"]
+    )
+    payload = json.loads(allowlist.read_text(encoding="utf-8"))
+    payload["forbidden_paths"] = []
+    allowlist.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ServingAgentBuildError):
+        build_serving_agent(root, tmp_path / "serving-agent", allowlist)
+
+
 def test_build_rejects_symlink_source_and_nonempty_destination(tmp_path):
     root = tmp_path / "agent"
     _write(root / "gateway/run.py")
