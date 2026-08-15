@@ -195,8 +195,8 @@ def detect_audio_environment() -> dict:
     try:
         with open('/proc/version', 'r', encoding="utf-8") as f:
             if 'microsoft' in f.read().lower():
-                if os.environ.get('PULSE_SERVER'):
-                    notices.append("Running in WSL with PulseAudio bridge")
+                if has_forwarded_audio:
+                    notices.append("Running in WSL with forwarded audio bridge")
                 else:
                     warnings.append(
                         "Running in WSL -- audio requires PulseAudio bridge.\n"
