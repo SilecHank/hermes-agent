@@ -883,6 +883,8 @@ def _notify_context_engine_turn_complete(
 
 def enforce_ivd_serving_tool_boundary(agent, *, mode: str) -> None:
     """Defense in depth for callers that accidentally construct an Agent."""
+    if mode != "ivd_serving":
+        return
     from agent.tool_guardrails import filter_tools_for_execution_mode
 
     agent.tools = filter_tools_for_execution_mode(
