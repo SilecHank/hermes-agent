@@ -383,9 +383,18 @@ class IVDKnowledgeEngine:
         if matched_platforms:
             matched_platforms = [max(matched_platforms, key=len)]
         matched_subs = [s for s in sub_projects if s and s.casefold() in n]
-        if matched_subs:
+        if matched_subs and len(matched_subs) > 1:
             longest = max(matched_subs, key=len)
             matched_subs = [longest]
+        elif not matched_subs:
+            for token in re.findall(r"[a-zA-Z0-9\u4e00-\u9fff]+", normalized):
+                token_l = token.casefold()
+                if len(token_l) < 2:
+                    continue
+                prefix_matches = [s for s in sub_projects if s and s.casefold().startswith(token_l)]
+                if prefix_matches:
+                    matched_subs = prefix_matches
+                    break
         method_tokens = [
             token for token in re.split(r"[\s,，、]+", normalized)
             if token and any(k in token for k in ("提取", "建库", "杂交", "富集", "自动化", "纳磁", "磁珠", "PCR", "手动", "单纯化", "板式", "单管"))
