@@ -406,19 +406,21 @@ class IVDKnowledgeEngine:
 
         if not results:
             n = normalized.casefold()
-            for entry in all_entries:
-                title = str(entry.get("title") or "").casefold()
-                doc = str(entry.get("document") or "").casefold()
-                product = str(entry.get("product") or "").casefold()
-                if product_line:
-                    pl = product_line.casefold()
-                    if pl in product or product in pl:
+            def _norm(value: object) -> str:
+                return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").casefold())
+            if product_line:
+                pl = _norm(product_line)
+                for entry in all_entries:
+                    ep = _norm(entry.get("product"))
+                    if pl and ep and (pl in ep or ep in pl):
                         results.append(entry)
-                        continue
-                # keyword match: any meaningful token of question appears in title
-                tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n) if t not in ("sop",)]
-                if tokens and any(t in title or t in doc for t in tokens):
-                    results.append(entry)
+            if not results:
+                tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n) if t != "sop"]
+                for entry in all_entries:
+                    title = _norm(entry.get("title"))
+                    doc = _norm(entry.get("document"))
+                    if tokens and any(t in title or t in doc for t in tokens):
+                        results.append(entry)
 
         # de-duplicate by document+title+path
         seen = set()
