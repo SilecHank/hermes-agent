@@ -95,6 +95,10 @@ class IVDKnowledgeEngine:
 
         self._graph = self._read_json("indexes/diagnostic-graph.json")
         self._renderer = IVDRenderer(self._read_json("renders/render-policy.json"))
+        self._equipment_reagent_index: dict[str, object] | None = None
+        _er_relative = "indexes/equipment-reagent-index.json"
+        if _er_relative in members:
+            self._equipment_reagent_index = self._read_json(_er_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -361,6 +365,73 @@ class IVDKnowledgeEngine:
             "source_ids": match.get("formal_source_ids", []),
         }
 
+    def _equipment_reagent_lookup(self, normalized: str) -> "ExecutionResult | None":
+        index = self._equipment_reagent_index
+        if not isinstance(index, dict):
+            return None
+        groups = index.get("groups")
+        if not isinstance(groups, list) or not groups:
+            return None
+        if not any(key in normalized for key in ("设备", "试剂", "耗材", "清单")):
+            return None
+
+        platforms = sorted({str(g.get("platform") or "") for g in groups if isinstance(g, dict) and g.get("platform")})
+        sub_projects = sorted({str(g.get("sub_project") or "") for g in groups if isinstance(g, dict) and g.get("sub_project")})
+        n = normalized.casefold()
+        matched_platforms = [p for p in platforms if p and p.casefold() in n]
+        matched_subs = [s for s in sub_projects if s and s.casefold() in n]
+
+        candidates = [g for g in groups if isinstance(g, dict)]
+        if matched_platforms:
+            candidates = [g for g in candidates if g.get("platform") in matched_platforms]
+        if matched_subs:
+            candidates = [g for g in candidates if g.get("sub_project") in matched_subs]
+        if not candidates or len(candidates) > 8:
+            return None
+
+        want_equipment = any(k in normalized for k in ("设备",))
+        want_reagent = any(k in normalized for k in ("试剂", "耗材"))
+        if not want_equipment and not want_reagent:
+            want_equipment = want_reagent = True
+
+        lines = ["Workflow: equipment-reagent-selection.md", ""]
+        for group in candidates:
+            lines.append(f"## {group.get('sub_project')} · {group.get('platform')} · {group.get('method')}")
+            lines.append("")
+            if want_equipment:
+                equip = group.get("equipment") if isinstance(group.get("equipment"), list) else []
+                if equip:
+                    lines.append("### 设备清单")
+                    lines.append("")
+                    lines.append("| 实验区 | 设备名称 | 参数要求 | 品牌/型号 | 数量 | 必选性 | 物料编码(SAP) |")
+                    lines.append("|------|------|------|------|-----|------|------|")
+                    for item in equip:
+                        lines.append(
+                            f"| {item.get('workflow_step') or '-'} | {item.get('item_name') or '-'} "
+                            f"| {item.get('specification') or '-'} | {item.get('brand') or '-'} {item.get('model') or ''} "
+                            f"| {item.get('quantity') or '-'} | {item.get('required_level') or '-'} "
+                            f"| {item.get('sap_code') or '-'} |"
+                        )
+                    lines.append("")
+            if want_reagent:
+                reagents = group.get("reagents") if isinstance(group.get("reagents"), list) else []
+                if reagents:
+                    lines.append("### 试剂耗材清单")
+                    lines.append("")
+                    lines.append("| 物料名称 | 规格 | 单个样本使用量 | 单位 | SAP物料编码 | RM编码 |")
+                    lines.append("|------|------|------|------|------|------|")
+                    for item in reagents:
+                        lines.append(
+                            f"| {item.get('item_name') or '-'} | {item.get('specification') or '-'} "
+                            f"| {item.get('quantity') or '-'} | {item.get('unit') or '-'} "
+                            f"| {item.get('sap_code') or '-'} | {item.get('material_code') or '-'} |"
+                        )
+                    lines.append("")
+        text = "\n".join(lines).strip()
+        if not text:
+            return None
+        return ExecutionResult(text, "answer", "answer", 0, 0, 0, 0, None, ())
+
     def execute(
         self,
         *,
@@ -475,6 +546,10 @@ class IVDKnowledgeEngine:
                 0, 0, 0, int(diagnostic.get("effect_count") or 0),
                 sources[0] if len(sources) == 1 else None, sources,
             )
+
+        equipment_reagent = self._equipment_reagent_lookup(normalized)
+        if equipment_reagent is not None:
+            return equipment_reagent
 
         fuzzy = None
         if allow_index_transaction:
