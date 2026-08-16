@@ -2302,7 +2302,6 @@ def _prepare_gateway_ivd_boundary(
             question=message,
             history=history,
         )
-    from gateway.after_sales_guard import prepare_after_sales_turn
 
     turn = prepare_after_sales_turn(
         config,
@@ -3590,7 +3589,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 question=message,
                 history=history,
             )
-        from gateway.after_sales_guard import prepare_after_sales_turn
 
         session_db = getattr(self, "_session_db", None)
         turn = prepare_after_sales_turn(
@@ -21868,7 +21866,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _after_sales_turn.facts.get("current_stage", ""),
                     )
                     if _after_sales_turn.blocks_answer_generation:
-                        from gateway.after_sales_guard import build_preflight_block_result
                         from gateway.after_sales_telemetry import (
                             append_runtime_event,
                             build_runtime_event,
@@ -21924,7 +21921,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 )
                         return _blocked_result
                     if _after_sales_turn.direct_response:
-                        from gateway.after_sales_guard import build_direct_fact_result
                         from gateway.after_sales_telemetry import (
                             append_runtime_event,
                             build_runtime_event,
@@ -22735,7 +22731,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # workflow card matched, validation runs inside conversation_loop
             # before the assistant message is persisted.
             if _after_sales_turn is not None and _after_sales_turn.has_validator:
-                from gateway.after_sales_guard import CriticalAfterSalesValidator
 
                 agent._final_response_validator = CriticalAfterSalesValidator(
                     turn=_after_sales_turn,
@@ -23265,7 +23260,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _validation_status = "pass" if _validation.get("ok") else "fallback"
                         if _validation.get("ok") and _validation.get("adopted_claims"):
                             try:
-                                from gateway.after_sales_guard import activate_validated_fact
 
                                 activate_validated_fact(
                                     getattr(self._session_db, "_db", self._session_db),
