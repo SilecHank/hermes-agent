@@ -29,7 +29,6 @@ _MANDATORY_FORBIDDEN_PATHS = (
     "gateway/after_sales_guard.py",
     "skills",
     "tests",
-    "tools/search_files.py",
 )
 
 
