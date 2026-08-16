@@ -1215,13 +1215,14 @@ class WeixinAdapter(BasePlatformAdapter):
         # Text debounce batching (mirrors Telegram adapter pattern).
         # iLink delivers messages individually, so rapid multi-message
         # bursts (forwarded batches, paste-splits) each trigger a
-        # separate agent invocation.  Default 3s delay / 5s split delay
-        # are tuned for iLink's typical delivery cadence.  Tunable via
+        # separate agent invocation.  Default 0.6s delay / 5s split delay
+        # align the quiet period with WeCom while still merging iLink's
+        # rapid-fire fragments.  Tunable via
         # config.yaml under
         # ``gateway.platforms.weixin.extra.text_batch_delay_seconds`` /
         # ``text_batch_split_delay_seconds``.
         self._text_batch_delay_seconds = self._coerce_float_extra(
-            "text_batch_delay_seconds", 3.0
+            "text_batch_delay_seconds", 0.6
         )
         self._text_batch_split_delay_seconds = self._coerce_float_extra(
             "text_batch_split_delay_seconds", 5.0
@@ -1784,13 +1785,21 @@ class WeixinAdapter(BasePlatformAdapter):
                     ret = resp.get("ret")
                     errcode = resp.get("errcode")
                     if (ret is not None and ret not in {0,}) or (errcode is not None and errcode not in {0,}):
-                        is_session_expired = (
+                        is_stale_session = (
                             ret == SESSION_EXPIRED_ERRCODE
                             or errcode == SESSION_EXPIRED_ERRCODE
                             or _is_stale_session_ret(ret, errcode, resp.get("errmsg"))
                         )
+                        # A stale session (-14, or -2 with "unknown error") is
+                        # not a rate limit. Classify it before the rate-limit
+                        # branch so we never open the 30s circuit for a stale
+                        # session that cannot be recovered by stripping token.
+                        is_rate_limited = (
+                            not is_stale_session
+                            and (ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE)
+                        )
                         # Session expired — strip token and retry once
-                        if is_session_expired and not retried_without_token and context_token:
+                        if is_stale_session and not retried_without_token and context_token:
                             retried_without_token = True
                             context_token = None
                             self._token_store._cache.pop(
@@ -1802,10 +1811,6 @@ class WeixinAdapter(BasePlatformAdapter):
                             )
                             continue
                         # Rate limit (-2) — backoff and retry
-                        is_rate_limited = (
-                            ret == RATE_LIMIT_ERRCODE
-                            or errcode == RATE_LIMIT_ERRCODE
-                        )
                         if is_rate_limited:
                             errmsg = resp.get("errmsg") or resp.get("msg") or "rate limited"
                             # Record the error so we raise a descriptive
@@ -1826,6 +1831,12 @@ class WeixinAdapter(BasePlatformAdapter):
                             )
                             await asyncio.sleep(wait)
                             continue
+                        if is_stale_session:
+                            errmsg = resp.get("errmsg") or resp.get("msg") or "unknown error"
+                            last_error = RuntimeError(
+                                f"iLink sendmessage stale session: ret={ret} errcode={errcode} errmsg={errmsg}"
+                            )
+                            break
                         errmsg = resp.get("errmsg") or resp.get("msg") or "unknown error"
                         raise RuntimeError(
                             f"iLink sendmessage error: ret={ret} errcode={errcode} errmsg={errmsg}"
@@ -1902,6 +1913,7 @@ class WeixinAdapter(BasePlatformAdapter):
 
             # Deliver text content.
             chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
+            send_started = time.monotonic()
             for idx, chunk in enumerate(chunks):
                 client_id = f"hermes-weixin-{uuid.uuid4().hex}"
                 await self._send_text_chunk(
@@ -1913,6 +1925,12 @@ class WeixinAdapter(BasePlatformAdapter):
                 last_message_id = client_id
                 if idx < len(chunks) - 1 and self._send_chunk_delay_seconds > 0:
                     await asyncio.sleep(self._send_chunk_delay_seconds)
+            logger.info(
+                "[%s] text send completed in %.3fs (%d chunk(s))",
+                self.name,
+                time.monotonic() - send_started,
+                len(chunks),
+            )
             return SendResult(success=True, message_id=last_message_id)
         except Exception as exc:
             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
