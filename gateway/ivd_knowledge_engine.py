@@ -414,6 +414,18 @@ class IVDKnowledgeEngine:
                     ep = _norm(entry.get("product"))
                     if pl and ep and (pl in ep or ep in pl):
                         results.append(entry)
+                if results:
+                    title_tokens = [
+                        t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
+                        if t not in ("sop",) and t not in _norm(product_line)
+                    ]
+                    if title_tokens:
+                        filtered = [
+                            entry for entry in results
+                            if any(t in _norm(entry.get("title")) or t in _norm(entry.get("document")) for t in title_tokens)
+                        ]
+                        if filtered:
+                            results = filtered
             if not results:
                 tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n) if t != "sop"]
                 for entry in all_entries:
