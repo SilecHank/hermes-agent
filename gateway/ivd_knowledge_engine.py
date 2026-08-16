@@ -501,7 +501,18 @@ class IVDKnowledgeEngine:
         if matched_subs:
             candidates = [g for g in candidates if g.get("sub_project") in matched_subs]
         if matched_methods:
-            candidates = [g for g in candidates if g.get("method") in matched_methods]
+            method_filtered = [g for g in candidates if g.get("method") in matched_methods]
+            if method_filtered:
+                candidates = method_filtered
+            else:
+                distinct_methods = sorted({str(g.get("method") or "未标注") for g in candidates})
+                scope = " · ".join(filter(None, [matched_subs[0] if matched_subs else "", matched_platforms[0] if matched_platforms else ""]))
+                clarification = (
+                    "Workflow: equipment-reagent-selection.md\n\n"
+                    f"该产品（{scope}）没有与“{method_tokens[0] if method_tokens else ''}”匹配的实验方式，实际可选方式如下：\n\n"
+                    + "\n".join(f"- {m}" for m in distinct_methods)
+                )
+                return ExecutionResult(clarification, "clarification", "clarification", 0, 0, 0, 0, None, ())
         if not candidates:
             return None
         if len(candidates) > 8:
