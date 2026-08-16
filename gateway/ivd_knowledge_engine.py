@@ -597,7 +597,7 @@ class IVDKnowledgeEngine:
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
-        sop_doc = self._sop_path_lookup(normalized, product_line)
+        sop_doc = self._sop_path_lookup(normalized, product_line) if knowledge_type not in ("file", "operation") else None
         if sop_doc is not None:
             return sop_doc
         hit = self._exact_registry(
