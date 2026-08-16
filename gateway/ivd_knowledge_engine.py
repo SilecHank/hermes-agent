@@ -380,6 +380,8 @@ class IVDKnowledgeEngine:
         methods = sorted({str(g.get("method") or "") for g in groups if isinstance(g, dict) and g.get("method")})
         n = normalized.casefold()
         matched_platforms = [p for p in platforms if p and p.casefold() in n]
+        if matched_platforms:
+            matched_platforms = [max(matched_platforms, key=len)]
         matched_subs = [s for s in sub_projects if s and s.casefold() in n]
         if matched_subs:
             longest = max(matched_subs, key=len)
