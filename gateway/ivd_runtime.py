@@ -27,6 +27,13 @@ from gateway.ivd_knowledge_engine import IVDKnowledgeEngine
 logger = logging.getLogger(__name__)
 
 
+def _strip_gateway_internal_prefix(question: str) -> str:
+    """Remove the gateway sender-identity prefix from the engine question."""
+    if not isinstance(question, str):
+        return str(question or "")
+    return re.sub(r"^\[Gateway[^\]]*\]\s*", "", question).strip()
+
+
 @dataclass(frozen=True)
 class ExclusiveIVDResult:
     """One fully validated package answer selected by one dispatch."""
@@ -208,7 +215,7 @@ def execute_exclusive_ivd_turn(
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
-            question=question,
+            question=_strip_gateway_internal_prefix(question),
             context=recent_context,
             evidence=evidence,
         )
