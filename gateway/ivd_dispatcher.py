@@ -335,6 +335,17 @@ class IVDDispatcher:
             routing_text,
             excluded_scopes=self._platform_scopes if operation is not None else frozenset(),
         )
+        if product_conflict:
+            current_line, current_variant, _ = self._match_product(
+                text,
+                excluded_scopes=self._platform_scopes if operation is not None else frozenset(),
+            )
+            if current_line is not None:
+                product_line, product_variant, product_conflict = (
+                    current_line,
+                    current_variant,
+                    False,
+                )
         semantic = self._match_intent(text, self._semantics) or self._match_intent(
             routing_text, self._semantics
         )
