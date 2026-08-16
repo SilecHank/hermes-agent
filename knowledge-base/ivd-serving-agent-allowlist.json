@@ -60,6 +60,7 @@
     "gateway/ivd_receipt_sink.py",
     "gateway/ivd_renderer.py",
     "gateway/ivd_runtime.py",
+    "gateway/ivd_route_epoch.py",
     "gateway/kanban_watchers.py",
     "gateway/pairing.py",
     "gateway/platform_registry.py",
