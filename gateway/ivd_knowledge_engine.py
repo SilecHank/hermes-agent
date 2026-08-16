@@ -377,17 +377,40 @@ class IVDKnowledgeEngine:
 
         platforms = sorted({str(g.get("platform") or "") for g in groups if isinstance(g, dict) and g.get("platform")})
         sub_projects = sorted({str(g.get("sub_project") or "") for g in groups if isinstance(g, dict) and g.get("sub_project")})
+        methods = sorted({str(g.get("method") or "") for g in groups if isinstance(g, dict) and g.get("method")})
         n = normalized.casefold()
         matched_platforms = [p for p in platforms if p and p.casefold() in n]
         matched_subs = [s for s in sub_projects if s and s.casefold() in n]
+        if matched_subs:
+            longest = max(matched_subs, key=len)
+            matched_subs = [longest]
+        method_tokens = [
+            token for token in re.split(r"[\s,，、]+", normalized)
+            if token and any(k in token for k in ("提取", "建库", "杂交", "富集", "自动化", "纳磁", "磁珠", "PCR", "手动", "单纯化", "板式", "单管"))
+        ]
+        matched_methods = [
+            m for m in methods
+            if m and m != "未标注" and all(token.casefold() in m.casefold() for token in method_tokens)
+        ] if method_tokens else []
 
         candidates = [g for g in groups if isinstance(g, dict)]
         if matched_platforms:
             candidates = [g for g in candidates if g.get("platform") in matched_platforms]
         if matched_subs:
             candidates = [g for g in candidates if g.get("sub_project") in matched_subs]
-        if not candidates or len(candidates) > 8:
+        if matched_methods:
+            candidates = [g for g in candidates if g.get("method") in matched_methods]
+        if not candidates:
             return None
+        if len(candidates) > 8:
+            distinct_methods = sorted({str(g.get("method") or "未标注") for g in candidates})
+            scope = " · ".join(filter(None, [matched_subs[0] if matched_subs else "", matched_platforms[0] if matched_platforms else ""]))
+            clarification = (
+                "Workflow: equipment-reagent-selection.md\n\n"
+                f"该产品（{scope}）存在多种实验方式，请先确认要哪一种：\n\n"
+                + "\n".join(f"- {m}" for m in distinct_methods)
+            )
+            return ExecutionResult(clarification, "clarification", "clarification", 0, 0, 0, 0, None, ())
 
         want_equipment = any(k in normalized for k in ("设备",))
         want_reagent = any(k in normalized for k in ("试剂", "耗材"))
