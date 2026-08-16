@@ -410,9 +410,23 @@ class IVDKnowledgeEngine:
                 return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").casefold())
             if product_line:
                 pl = _norm(product_line)
+                index_candidates = {pl}
+                for alias, target in {
+                    "cnv": "cnv-str",
+                    "康孕": "cnv-str",
+                    "新筛": "新生儿筛查",
+                    "携带者": "携带者筛查",
+                    "地贫": "地贫",
+                    "地中海贫血": "地贫",
+                    "肿瘤": "肿瘤检测",
+                    "肿瘤建库": "肿瘤检测",
+                }.items():
+                    na = _norm(alias)
+                    if pl == na or pl in na or na in pl:
+                        index_candidates.add(_norm(target))
                 for entry in all_entries:
                     ep = _norm(entry.get("product"))
-                    if pl and ep and (pl in ep or ep in pl):
+                    if ep and any(cp and (cp in ep or ep in cp) for cp in index_candidates):
                         results.append(entry)
                 if results:
                     title_tokens = [
