@@ -99,6 +99,10 @@ class IVDKnowledgeEngine:
         _er_relative = "indexes/equipment-reagent-index.json"
         if _er_relative in members:
             self._equipment_reagent_index = self._read_json(_er_relative)
+        self._sop_path_index: dict[str, object] | None = None
+        _sop_relative = "indexes/sop-path-index.json"
+        if _sop_relative in members:
+            self._sop_path_index = self._read_json(_sop_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -365,6 +369,79 @@ class IVDKnowledgeEngine:
             "source_ids": match.get("formal_source_ids", []),
         }
 
+    def _sop_path_lookup(self, normalized: str, product_line: str) -> "ExecutionResult | None":
+        index = self._sop_path_index
+        if not isinstance(index, dict):
+            return None
+        products = index.get("products")
+        if not isinstance(products, dict) or not products:
+            return None
+        has_sop_hint = (
+            "SOP" in normalized
+            or "sop" in normalized
+            or "标准作业" in normalized
+            or "作业指导" in normalized
+        )
+        sop_match = re.search(r"SOP[-_]?[A-Za-z]+[-_]?\d+", normalized, re.IGNORECASE)
+        if not has_sop_hint and sop_match is None:
+            return None
+
+        all_entries: list[dict[str, object]] = []
+        for product, entries in products.items():
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        all_entries.append({"product": product, **entry})
+        if not all_entries:
+            return None
+
+        results: list[dict[str, object]] = []
+        if sop_match is not None:
+            doc = re.sub(r"[^A-Za-z0-9]", "", sop_match.group(0)).upper()
+            doc_hyphen = re.sub(r"_", "-", sop_match.group(0)).upper()
+            for entry in all_entries:
+                edoc = re.sub(r"[^A-Za-z0-9]", "", str(entry.get("document") or "")).upper()
+                if edoc and (edoc == doc or str(entry.get("document") or "").upper() == doc_hyphen):
+                    results.append(entry)
+
+        if not results:
+            n = normalized.casefold()
+            for entry in all_entries:
+                title = str(entry.get("title") or "").casefold()
+                doc = str(entry.get("document") or "").casefold()
+                product = str(entry.get("product") or "").casefold()
+                if product_line:
+                    pl = product_line.casefold()
+                    if pl in product or product in pl:
+                        results.append(entry)
+                        continue
+                # keyword match: any meaningful token of question appears in title
+                tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n) if t not in ("sop",)]
+                if tokens and any(t in title or t in doc for t in tokens):
+                    results.append(entry)
+
+        # de-duplicate by document+title+path
+        seen = set()
+        unique = []
+        for entry in results:
+            key = (entry.get("document"), entry.get("title"), entry.get("path"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(entry)
+        if not unique:
+            return None
+
+        lines = ["Workflow: sop-path-index", "", "## SOP 文档", ""]
+        lines.append("| SOP编号 | 版本 | 标题 | 路径 |")
+        lines.append("|------|------|------|------|")
+        for entry in unique[:20]:
+            lines.append(
+                f"| {entry.get('document') or '-'} | {entry.get('version') or '-'} "
+                f"| {entry.get('title') or '-'} | {entry.get('path') or '-'} |"
+            )
+        return ExecutionResult("\n".join(lines), "answer", "answer", 0, 0, 0, 0, None, ())
+
     def _equipment_reagent_lookup(self, normalized: str) -> "ExecutionResult | None":
         index = self._equipment_reagent_index
         if not isinstance(index, dict):
@@ -506,6 +583,9 @@ class IVDKnowledgeEngine:
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
+        sop_doc = self._sop_path_lookup(normalized, product_line)
+        if sop_doc is not None:
+            return sop_doc
         hit = self._exact_registry(
             normalized,
             product_line,
