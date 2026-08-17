@@ -391,7 +391,7 @@ class IVDDispatcher:
         result = engine.execute(
             question=question,
             product_line=envelope.product_line or "",
-            product_variant=envelope.product_variant or "",
+            product_variant=envelope.product_variant,
             workflow_stage=envelope.workflow_stage or "",
             knowledge_type=envelope.knowledge_type,
             answer_shape=envelope.answer_shape,
