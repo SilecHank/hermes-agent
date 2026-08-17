@@ -411,6 +411,56 @@ class TestWeixinChunkDelivery:
         assert first_try["text"] == retry["text"]
         assert first_try["client_id"] == retry["client_id"]
 
+    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
+    def test_stale_session_without_token_fails_fast_without_opening_circuit(self, send_message_mock):
+        adapter = self._connected_adapter()
+        adapter._token_store.get = lambda account_id, chat_id: None
+        adapter._send_chunk_retries = 4
+        adapter._rate_limit_circuit_threshold = 1
+        adapter._rate_limit_circuit_open_seconds = 60
+
+        send_message_mock.return_value = {
+            "ret": weixin.RATE_LIMIT_ERRCODE,
+            "errcode": weixin.RATE_LIMIT_ERRCODE,
+            "errmsg": "unknown error",
+        }
+
+        result = asyncio.run(adapter.send("wxid_test123", "hello"))
+
+        assert result.success is False
+        assert "stale session" in (result.error or "")
+        assert "cooldown" not in (result.error or "")
+        # A stale session is not a rate limit: no breaker and no retry backoff.
+        assert adapter._rate_limit_circuit_until == 0.0
+        assert adapter._rate_limit_events == []
+        send_message_mock.assert_awaited_once()
+
+    @patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
+    def test_stale_session_retries_without_token_then_fails_fast(self, send_message_mock, sleep_mock):
+        adapter = self._connected_adapter()
+        adapter._send_chunk_retries = 4
+        adapter._rate_limit_circuit_threshold = 1
+        adapter._rate_limit_circuit_open_seconds = 60
+
+        send_message_mock.return_value = {
+            "ret": weixin.RATE_LIMIT_ERRCODE,
+            "errcode": weixin.RATE_LIMIT_ERRCODE,
+            "errmsg": "unknown error",
+        }
+
+        result = asyncio.run(adapter.send("wxid_test123", "hello"))
+
+        assert result.success is False
+        assert "stale session" in (result.error or "")
+        assert "cooldown" not in (result.error or "")
+        assert adapter._rate_limit_circuit_until == 0.0
+        assert adapter._rate_limit_events == []
+        # First attempt has a context token and strips it; the tokenless retry
+        # then fails fast instead of opening the rate-limit circuit.
+        assert send_message_mock.await_count == 2
+        sleep_mock.assert_not_awaited()
+
     @patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock)
     @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
     def test_repeated_rate_limits_open_circuit_for_followup_sends(self, send_message_mock, sleep_mock):
@@ -1035,7 +1085,7 @@ class TestWeixinTextDebounce:
 
     def test_batch_delays_default_from_config(self):
         adapter = _make_adapter()
-        assert adapter._text_batch_delay_seconds == 3.0
+        assert adapter._text_batch_delay_seconds == 0.6
         assert adapter._text_batch_split_delay_seconds == 5.0
 
     def test_batch_delays_overridden_via_config_extra(self):
@@ -1065,7 +1115,7 @@ class TestWeixinTextDebounce:
                 },
             )
         )
-        assert adapter._text_batch_delay_seconds == 3.0
+        assert adapter._text_batch_delay_seconds == 0.6
         assert adapter._text_batch_split_delay_seconds == 5.0
 
     def test_rapid_texts_collapse_into_single_dispatch(self):

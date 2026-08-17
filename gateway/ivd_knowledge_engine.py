@@ -95,6 +95,14 @@ class IVDKnowledgeEngine:
 
         self._graph = self._read_json("indexes/diagnostic-graph.json")
         self._renderer = IVDRenderer(self._read_json("renders/render-policy.json"))
+        self._equipment_reagent_index: dict[str, object] | None = None
+        _er_relative = "indexes/equipment-reagent-index.json"
+        if _er_relative in members:
+            self._equipment_reagent_index = self._read_json(_er_relative)
+        self._sop_path_index: dict[str, object] | None = None
+        _sop_relative = "indexes/sop-path-index.json"
+        if _sop_relative in members:
+            self._sop_path_index = self._read_json(_sop_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -361,6 +369,219 @@ class IVDKnowledgeEngine:
             "source_ids": match.get("formal_source_ids", []),
         }
 
+    def _sop_path_lookup(self, normalized: str, product_line: str) -> "ExecutionResult | None":
+        index = self._sop_path_index
+        if not isinstance(index, dict):
+            return None
+        products = index.get("products")
+        if not isinstance(products, dict) or not products:
+            return None
+        has_sop_hint = (
+            "SOP" in normalized
+            or "sop" in normalized
+            or "标准作业" in normalized
+            or "作业指导" in normalized
+        )
+        sop_match = re.search(r"SOP[-_]?[A-Za-z]+[-_]?\d+", normalized, re.IGNORECASE)
+        if not has_sop_hint and sop_match is None:
+            return None
+
+        all_entries: list[dict[str, object]] = []
+        for product, entries in products.items():
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        all_entries.append({"product": product, **entry})
+        if not all_entries:
+            return None
+
+        results: list[dict[str, object]] = []
+        if sop_match is not None:
+            doc = re.sub(r"[^A-Za-z0-9]", "", sop_match.group(0)).upper()
+            doc_hyphen = re.sub(r"_", "-", sop_match.group(0)).upper()
+            for entry in all_entries:
+                edoc = re.sub(r"[^A-Za-z0-9]", "", str(entry.get("document") or "")).upper()
+                if edoc and (edoc == doc or str(entry.get("document") or "").upper() == doc_hyphen):
+                    results.append(entry)
+
+        if not results:
+            n = normalized.casefold()
+            def _norm(value: object) -> str:
+                return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").casefold())
+            if product_line:
+                pl = _norm(product_line)
+                index_candidates = {pl}
+                for alias, target in {
+                    "cnv": "cnv-str",
+                    "康孕": "cnv-str",
+                    "新筛": "新生儿筛查",
+                    "携带者": "携带者筛查",
+                    "地贫": "地贫",
+                    "地中海贫血": "地贫",
+                    "肿瘤": "肿瘤检测",
+                    "肿瘤建库": "肿瘤检测",
+                }.items():
+                    na = _norm(alias)
+                    if pl == na or pl in na or na in pl:
+                        index_candidates.add(_norm(target))
+                for entry in all_entries:
+                    ep = _norm(entry.get("product"))
+                    if ep and any(cp and (cp in ep or ep in cp) for cp in index_candidates):
+                        results.append(entry)
+                if results:
+                    title_tokens = [
+                        t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
+                        if t not in ("sop",) and t not in _norm(product_line)
+                    ]
+                    if title_tokens:
+                        filtered = [
+                            entry for entry in results
+                            if any(t in _norm(entry.get("title")) or t in _norm(entry.get("document")) for t in title_tokens)
+                        ]
+                        if filtered:
+                            results = filtered
+            if not results:
+                tokens = [t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n) if t != "sop"]
+                for entry in all_entries:
+                    title = _norm(entry.get("title"))
+                    doc = _norm(entry.get("document"))
+                    if tokens and any(t in title or t in doc for t in tokens):
+                        results.append(entry)
+
+        # de-duplicate by document+title+path
+        seen = set()
+        unique = []
+        for entry in results:
+            key = (entry.get("document"), entry.get("title"), entry.get("path"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(entry)
+        if not unique:
+            return None
+
+        lines = ["Workflow: sop-path-index", "", "## SOP 文档", ""]
+        lines.append("| SOP编号 | 版本 | 标题 | 路径 |")
+        lines.append("|------|------|------|------|")
+        for entry in unique[:20]:
+            lines.append(
+                f"| {entry.get('document') or '-'} | {entry.get('version') or '-'} "
+                f"| {entry.get('title') or '-'} | {entry.get('path') or '-'} |"
+            )
+        return ExecutionResult("\n".join(lines), "answer", "answer", 0, 0, 0, 0, None, ())
+
+    def _equipment_reagent_lookup(self, normalized: str) -> "ExecutionResult | None":
+        index = self._equipment_reagent_index
+        if not isinstance(index, dict):
+            return None
+        groups = index.get("groups")
+        if not isinstance(groups, list) or not groups:
+            return None
+        if not any(key in normalized for key in ("设备", "试剂", "耗材", "清单")):
+            return None
+
+        platforms = sorted({str(g.get("platform") or "") for g in groups if isinstance(g, dict) and g.get("platform")})
+        sub_projects = sorted({str(g.get("sub_project") or "") for g in groups if isinstance(g, dict) and g.get("sub_project")})
+        methods = sorted({str(g.get("method") or "") for g in groups if isinstance(g, dict) and g.get("method")})
+        n = normalized.casefold()
+        matched_platforms = [p for p in platforms if p and p.casefold() in n]
+        if matched_platforms:
+            matched_platforms = [max(matched_platforms, key=len)]
+        matched_subs = [s for s in sub_projects if s and s.casefold() in n]
+        if matched_subs and len(matched_subs) > 1:
+            longest = max(matched_subs, key=len)
+            matched_subs = [longest]
+        elif not matched_subs:
+            for token in re.findall(r"[a-zA-Z0-9\u4e00-\u9fff]+", normalized):
+                token_l = token.casefold()
+                if len(token_l) < 2:
+                    continue
+                prefix_matches = [s for s in sub_projects if s and s.casefold().startswith(token_l)]
+                if prefix_matches:
+                    matched_subs = prefix_matches
+                    break
+        method_tokens = [
+            token for token in re.split(r"[\s,，、]+", normalized)
+            if token and any(k in token for k in ("提取", "建库", "杂交", "富集", "自动化", "纳磁", "磁珠", "PCR", "手动", "单纯化", "板式", "单管"))
+        ]
+        matched_methods = [
+            m for m in methods
+            if m and m != "未标注" and all(token.casefold() in m.casefold() for token in method_tokens)
+        ] if method_tokens else []
+
+        candidates = [g for g in groups if isinstance(g, dict)]
+        if matched_platforms:
+            candidates = [g for g in candidates if g.get("platform") in matched_platforms]
+        if matched_subs:
+            candidates = [g for g in candidates if g.get("sub_project") in matched_subs]
+        if matched_methods:
+            method_filtered = [g for g in candidates if g.get("method") in matched_methods]
+            if method_filtered:
+                candidates = method_filtered
+            else:
+                distinct_methods = sorted({str(g.get("method") or "未标注") for g in candidates})
+                scope = " · ".join(filter(None, [matched_subs[0] if matched_subs else "", matched_platforms[0] if matched_platforms else ""]))
+                clarification = (
+                    "Workflow: equipment-reagent-selection.md\n\n"
+                    f"该产品（{scope}）没有与“{method_tokens[0] if method_tokens else ''}”匹配的实验方式，实际可选方式如下：\n\n"
+                    + "\n".join(f"- {m}" for m in distinct_methods)
+                )
+                return ExecutionResult(clarification, "clarification", "clarification", 0, 0, 0, 0, None, ())
+        if not candidates:
+            return None
+        if len(candidates) > 8:
+            distinct_methods = sorted({str(g.get("method") or "未标注") for g in candidates})
+            scope = " · ".join(filter(None, [matched_subs[0] if matched_subs else "", matched_platforms[0] if matched_platforms else ""]))
+            clarification = (
+                "Workflow: equipment-reagent-selection.md\n\n"
+                f"该产品（{scope}）存在多种实验方式，请先确认要哪一种：\n\n"
+                + "\n".join(f"- {m}" for m in distinct_methods)
+            )
+            return ExecutionResult(clarification, "clarification", "clarification", 0, 0, 0, 0, None, ())
+
+        want_equipment = any(k in normalized for k in ("设备",))
+        want_reagent = any(k in normalized for k in ("试剂", "耗材"))
+        if not want_equipment and not want_reagent:
+            want_equipment = want_reagent = True
+
+        lines = ["Workflow: equipment-reagent-selection.md", ""]
+        for group in candidates:
+            lines.append(f"## {group.get('sub_project')} · {group.get('platform')} · {group.get('method')}")
+            lines.append("")
+            if want_equipment:
+                equip = group.get("equipment") if isinstance(group.get("equipment"), list) else []
+                if equip:
+                    lines.append("### 设备清单")
+                    lines.append("")
+                    lines.append("| 实验区 | 设备名称 | 参数要求 | 品牌/型号 | 数量 | 必选性 | 物料编码(SAP) |")
+                    lines.append("|------|------|------|------|-----|------|------|")
+                    for item in equip:
+                        lines.append(
+                            f"| {item.get('workflow_step') or '-'} | {item.get('item_name') or '-'} "
+                            f"| {item.get('specification') or '-'} | {item.get('brand') or '-'} {item.get('model') or ''} "
+                            f"| {item.get('quantity') or '-'} | {item.get('required_level') or '-'} "
+                            f"| {item.get('sap_code') or '-'} |"
+                        )
+                    lines.append("")
+            if want_reagent:
+                reagents = group.get("reagents") if isinstance(group.get("reagents"), list) else []
+                if reagents:
+                    lines.append("### 试剂耗材清单")
+                    lines.append("")
+                    lines.append("| 物料名称 | 规格 | 单个样本使用量 | 单位 | SAP物料编码 | RM编码 |")
+                    lines.append("|------|------|------|------|------|------|")
+                    for item in reagents:
+                        lines.append(
+                            f"| {item.get('item_name') or '-'} | {item.get('specification') or '-'} "
+                            f"| {item.get('quantity') or '-'} | {item.get('unit') or '-'} "
+                            f"| {item.get('sap_code') or '-'} | {item.get('material_code') or '-'} |"
+                        )
+                    lines.append("")
+        text = "\n".join(lines).strip()
+        if not text:
+            return None
+        return ExecutionResult(text, "answer", "answer", 0, 0, 0, 0, None, ())
+
     def execute(
         self,
         *,
@@ -401,6 +622,9 @@ class IVDKnowledgeEngine:
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
+        sop_doc = self._sop_path_lookup(normalized, product_line) if knowledge_type not in ("file", "operation") else None
+        if sop_doc is not None:
+            return sop_doc
         hit = self._exact_registry(
             normalized,
             product_line,
@@ -475,6 +699,10 @@ class IVDKnowledgeEngine:
                 0, 0, 0, int(diagnostic.get("effect_count") or 0),
                 sources[0] if len(sources) == 1 else None, sources,
             )
+
+        equipment_reagent = self._equipment_reagent_lookup(normalized)
+        if equipment_reagent is not None:
+            return equipment_reagent
 
         fuzzy = None
         if allow_index_transaction:

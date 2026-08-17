@@ -3584,11 +3584,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
         prepared = prepared_contracts.get(normalized_platform)
         if ivd_engine_mode(config, platform=normalized_platform) == "package":
-            return prepared, execute_exclusive_ivd_turn(
+            exclusive = execute_exclusive_ivd_turn(
                 prepared,
                 question=message,
                 history=history,
             )
+            if getattr(exclusive, "answer_shape", None) not in (
+                "fallback_request", "clarification"
+            ):
+                return prepared, exclusive
+            return prepared, None
 
         session_db = getattr(self, "_session_db", None)
         turn = prepare_after_sales_turn(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import queue
 import re
@@ -22,6 +23,15 @@ from gateway.ivd_execution_contract import (
 )
 from gateway.ivd_dispatcher import IVDDispatcher
 from gateway.ivd_knowledge_engine import IVDKnowledgeEngine
+
+logger = logging.getLogger(__name__)
+
+
+def _strip_gateway_internal_prefix(question: str) -> str:
+    """Remove the gateway sender-identity prefix from the engine question."""
+    if not isinstance(question, str):
+        return str(question or "")
+    return re.sub(r"^\[Gateway[^\]]*\]\s*", "", question).strip()
 
 
 @dataclass(frozen=True)
@@ -205,9 +215,23 @@ def execute_exclusive_ivd_turn(
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
-            question=question,
+            question=_strip_gateway_internal_prefix(question),
             context=recent_context,
             evidence=evidence,
+        )
+        logger.info(
+            "IVD dispatch diagnostic: question=%r context=%r intent=%s product=%s "
+            "variant=%s stage=%s knowledge=%s shape=%s ambiguities=%s budget=%s",
+            question,
+            recent_context,
+            outcome.envelope.intent,
+            outcome.envelope.product_line,
+            outcome.envelope.product_variant,
+            outcome.envelope.workflow_stage,
+            outcome.envelope.knowledge_type,
+            outcome.envelope.answer_shape,
+            outcome.envelope.ambiguities,
+            outcome.envelope.indexed_retrieval_budget,
         )
         result = outcome.result
         if result is None:

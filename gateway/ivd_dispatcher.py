@@ -311,6 +311,11 @@ class IVDDispatcher:
             for item in matches
         }
         if len(identities) > 1:
+            product_lines = {pl for pl, _variant in identities}
+            if len(product_lines) == 1:
+                specific = [(pl, variant) for pl, variant in identities if variant]
+                if len(specific) == 1:
+                    return specific[0][0], specific[0][1], False
             return None, None, True
         if not matches:
             return None, None, False
@@ -386,7 +391,7 @@ class IVDDispatcher:
         result = engine.execute(
             question=question,
             product_line=envelope.product_line or "",
-            product_variant=envelope.product_variant or "",
+            product_variant=envelope.product_variant,
             workflow_stage=envelope.workflow_stage or "",
             knowledge_type=envelope.knowledge_type,
             answer_shape=envelope.answer_shape,
