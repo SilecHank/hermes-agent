@@ -311,6 +311,11 @@ class IVDDispatcher:
             for item in matches
         }
         if len(identities) > 1:
+            product_lines = {pl for pl, _variant in identities}
+            if len(product_lines) == 1:
+                specific = [(pl, variant) for pl, variant in identities if variant]
+                if len(specific) == 1:
+                    return specific[0][0], specific[0][1], False
             return None, None, True
         if not matches:
             return None, None, False
