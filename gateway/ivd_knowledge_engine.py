@@ -557,8 +557,8 @@ class IVDKnowledgeEngine:
                 if not hit_kws:
                     continue
                 score = len(hit_kws)
-                if re.search(r"\d", line):
-                    score += 3  # prefer numeric/volume lines
+                digit_groups = len(re.findall(r"\d+(?:\.\d+)?", line))
+                score += digit_groups * 3  # prefer numeric/volume lines
                 if score > best_score:
                     best_score = score
                     best_line = line.strip()
