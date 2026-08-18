@@ -437,10 +437,25 @@ class IVDKnowledgeEngine:
                         t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
                         if t not in ("sop",) and t not in _norm(product_line)
                     ]
+                    expanded_tokens = list(title_tokens)
+                    for t in title_tokens:
+                        if len(t) > 2 and all("\u4e00" <= c <= "\u9fff" for c in t):
+                            for i in range(len(t) - 1):
+                                bigram = t[i : i + 2]
+                                if bigram not in expanded_tokens and bigram != _norm(product_line):
+                                    expanded_tokens.append(bigram)
+                    for t in list(expanded_tokens):
+                        if t == "建库":
+                            expanded_tokens.append("文库构建")
+                        elif t == "文库构建":
+                            expanded_tokens.append("建库")
                     if title_tokens:
                         filtered = [
                             entry for entry in results
-                            if any(t in _norm(entry.get("title")) or t in _norm(entry.get("document")) for t in title_tokens)
+                            if any(
+                                t in _norm(entry.get("title")) or t in _norm(entry.get("document"))
+                                for t in expanded_tokens
+                            )
                         ]
                         if filtered:
                             results = filtered
