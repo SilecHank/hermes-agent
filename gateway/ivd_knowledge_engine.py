@@ -596,8 +596,9 @@ class IVDKnowledgeEngine:
             contact_keywords = {"研发", "负责人", "联系人", "对接人", "矩阵"}
             if any(kw in contact_keywords for kw in keywords):
                 path_low = str(entry.get("path") or "").casefold()
-                if "product-contact-matrix-202607" in path_low and path_low.endswith(".csv"):
-                    score += 1_000_000
+                contact_match = re.search(r"product-contact-matrix-(\d{6})\.csv", path_low)
+                if contact_match:
+                    score += 1_000_000 + int(contact_match.group(1))
             # 带 SOP/标准作业/作业指导 语义的查询，应优先返回正式 SOP 文档，
             # 而不是 reference 目录下的 FAQ/速查卡。
             if "sop" in n or "标准作业" in n or "作业指导" in n:
