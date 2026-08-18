@@ -491,6 +491,20 @@ class IVDKnowledgeEngine:
         if not keywords:
             return None
 
+        expansions = {
+            "温度": ("温度", "℃", "°c", "° c", "度"),
+            "时间": ("时间", "min", "分钟", "秒", "小时", "h"),
+            "浓度": ("浓度", "ng/ul", "ng/μl", "ng", "合格"),
+            "体积": ("体积", "μl", "ul", "ml", "用量", "体积"),
+            "多少": ("多少",),
+        }
+
+        def kw_matches(kw: str, text: str) -> bool:
+            for alt in expansions.get(kw, (kw,)):
+                if alt in text:
+                    return True
+            return False
+
         scored = []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -500,12 +514,14 @@ class IVDKnowledgeEngine:
             distinct = 0
             total = 0
             for kw in keywords:
-                c = content.count(kw)
-                if c:
+                matched = kw_matches(kw, content)
+                if matched:
                     distinct += 1
-                    total += c
+                    # count occurrences across expansion alternatives
+                    for alt in expansions.get(kw, (kw,)):
+                        total += content.count(alt)
             # title match is a strong signal
-            title_hits = sum(1 for kw in keywords if kw in title)
+            title_hits = sum(1 for kw in keywords if kw_matches(kw, title))
             if distinct == 0 and title_hits == 0:
                 continue
             score = distinct * 100 + total + title_hits * 200
@@ -525,7 +541,7 @@ class IVDKnowledgeEngine:
             snippet = ""
             for line in content.splitlines():
                 low = line.casefold()
-                if any(kw in low for kw in keywords):
+                if any(kw_matches(kw, low) for kw in keywords):
                     snippet = line.strip()[:120]
                     break
             lines.append(f"**{title}**")
