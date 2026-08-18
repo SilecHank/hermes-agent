@@ -806,6 +806,7 @@ class IVDKnowledgeEngine:
 
         lines = ["Workflow: original-document-delivery", ""]
         media_lines: list[str] = []
+        sources: list[SourceReference] = []
         for doc in candidates[:6]:
             rel = str(doc.get("physical_path") or "")
             name = Path(rel).name if rel else str(doc.get("document_id") or "")
@@ -813,9 +814,22 @@ class IVDKnowledgeEngine:
             if absolute:
                 media_lines.append(f"MEDIA:{absolute}")
             lines.append(f"- {name}")
+            sources.append(
+                SourceReference(
+                    document=str(doc.get("document_id") or "original"),
+                    version=str(doc.get("version") or "V1"),
+                    locator=rel,
+                    path=rel,
+                    sha256=str(doc.get("physical_sha256") or ""),
+                    record_digest=str(doc.get("physical_sha256") or ""),
+                )
+            )
         if media_lines:
             lines.insert(1, "\n".join(media_lines))
-        return ExecutionResult("\n".join(lines).strip(), "file", "answer", 0, 0, 0, 0, None, ())
+        return ExecutionResult(
+            "\n".join(lines).strip(), "file", "answer", 0, 0, 0, 0,
+            sources[0] if len(sources) == 1 else None, tuple(sources),
+        )
 
     def execute(
         self,
