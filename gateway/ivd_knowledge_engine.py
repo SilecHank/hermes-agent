@@ -787,13 +787,35 @@ class IVDKnowledgeEngine:
                 if doc_id and doc_id == want and doc.get("original_available") is True:
                     candidates.append(doc)
         else:
-            pl = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(product_line or "").casefold())
+            # 清单/说明书按 document_id（文件名 stem）做关键词重叠匹配，
+            # 因为拆分清单文件名里带产品/平台/实验方式，比目录更细。
+            raw_tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
+            query_tokens: list[str] = []
+            for t in raw_tokens:
+                if t not in query_tokens:
+                    query_tokens.append(t)
+                if len(t) > 2 and all("\u4e00" <= c <= "\u9fff" for c in t):
+                    for i in range(len(t) - 1):
+                        bigram = t[i : i + 2]
+                        if bigram not in query_tokens:
+                            query_tokens.append(bigram)
+            query_tokens = [
+                t for t in query_tokens
+                if t not in ("发", "清单", "设备", "试剂", "耗材", "说明书", "手册", "xlsx", "给我", "一下", "原件", "原文件")
+            ]
+            scored: list[tuple[int, dict[str, object]]] = []
             for doc in documents:
                 if not isinstance(doc, dict) or doc.get("kind") != kind:
                     continue
-                dpl = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(doc.get("product_line") or "").casefold())
-                if pl and dpl and (pl in dpl or dpl in pl) and doc.get("original_available") is True:
-                    candidates.append(doc)
+                if doc.get("original_available") is not True:
+                    continue
+                hay = str(doc.get("document_id") or "").casefold()
+                hits = sum(1 for t in query_tokens if t in hay)
+                if hits:
+                    scored.append((hits, doc))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            best = scored[0][0] if scored else 0
+            candidates = [doc for score, doc in scored if score == best]
 
         if not candidates:
             return None
