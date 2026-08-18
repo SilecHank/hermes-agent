@@ -526,7 +526,11 @@ class IVDKnowledgeEngine:
                 entry for entry in entries
                 if isinstance(entry, dict)
                 and any(
-                    cp and (cp in _norm_product(entry.get("product")) or _norm_product(entry.get("product")) in cp)
+                    cp and (
+                        _norm_product(entry.get("product")) == "reference"
+                        or cp in _norm_product(entry.get("product"))
+                        or _norm_product(entry.get("product")) in cp
+                    )
                     for cp in index_candidates
                 )
             ]
@@ -537,6 +541,10 @@ class IVDKnowledgeEngine:
             "浓度": ("浓度", "ng/ul", "ng/μl", "ng", "合格"),
             "体积": ("体积", "μl", "ul", "ml", "用量", "体积"),
             "多少": ("多少",),
+            "联系人": ("联系人", "对接人", "负责人"),
+            "负责人": ("负责人", "对接人", "联系人"),
+            "对接人": ("对接人", "联系人", "负责人"),
+            "矩阵": ("矩阵", "对接人", "售后流程"),
         }
 
         def kw_matches(kw: str, text: str) -> bool:
