@@ -484,10 +484,20 @@ class IVDKnowledgeEngine:
 
         n = normalized.casefold()
         # extract meaningful keywords (Chinese 2+ chars, alnum 3+)
-        keywords = [
+        raw_tokens = [
             t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
             if t not in ("sop",)
         ]
+        keywords: list[str] = []
+        for t in raw_tokens:
+            if t not in keywords:
+                keywords.append(t)
+            # add Chinese 2-char bigrams for contiguous phrases
+            if len(t) > 2 and all("\u4e00" <= c <= "\u9fff" for c in t):
+                for i in range(len(t) - 1):
+                    bigram = t[i : i + 2]
+                    if bigram not in keywords:
+                        keywords.append(bigram)
         if not keywords:
             return None
 
