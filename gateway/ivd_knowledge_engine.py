@@ -549,11 +549,20 @@ class IVDKnowledgeEngine:
             content = str(entry.get("content") or "")
             # first matching snippet line
             snippet = ""
+            best_line = ""
+            best_score = -1
             for line in content.splitlines():
                 low = line.casefold()
-                if any(kw_matches(kw, low) for kw in keywords):
-                    snippet = line.strip()[:120]
-                    break
+                hit_kws = [kw for kw in keywords if kw_matches(kw, low)]
+                if not hit_kws:
+                    continue
+                score = len(hit_kws)
+                if re.search(r"\d", line):
+                    score += 3  # prefer numeric/volume lines
+                if score > best_score:
+                    best_score = score
+                    best_line = line.strip()
+            snippet = best_line[:120]
             lines.append(f"**{title}**")
             lines.append(f"- 来源：`{path}`")
             if snippet:
