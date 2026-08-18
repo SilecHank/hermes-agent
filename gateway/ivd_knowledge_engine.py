@@ -474,7 +474,7 @@ class IVDKnowledgeEngine:
             )
         return ExecutionResult("\n".join(lines), "answer", "answer", 0, 0, 0, 0, None, ())
 
-    def _sop_content_search(self, normalized: str) -> "ExecutionResult | None":
+    def _sop_content_search(self, normalized: str, product_line: str) -> "ExecutionResult | None":
         index = self._sop_content_index
         if not isinstance(index, dict):
             return None
@@ -500,6 +500,36 @@ class IVDKnowledgeEngine:
                         keywords.append(bigram)
         if not keywords:
             return None
+
+        # product scope filter (avoid cross-product contamination)
+        def _norm_product(value: object) -> str:
+            return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").casefold())
+
+        if product_line:
+            pl = _norm_product(product_line)
+            index_candidates = {pl}
+            for alias, target in {
+                "cnv": "cnv-str",
+                "康孕": "cnv-str",
+                "新筛": "新生儿筛查",
+                "携带者": "携带者筛查",
+                "地贫": "地贫",
+                "地中海贫血": "地贫",
+                "肿瘤": "肿瘤检测",
+                "遗传性肿瘤": "肿瘤检测",
+                "遗传性基因检测": "肿瘤检测",
+            }.items():
+                na = _norm_product(alias)
+                if pl == na or pl in na or na in pl:
+                    index_candidates.add(_norm_product(target))
+            entries = [
+                entry for entry in entries
+                if isinstance(entry, dict)
+                and any(
+                    cp and (cp in _norm_product(entry.get("product")) or _norm_product(entry.get("product")) in cp)
+                    for cp in index_candidates
+                )
+            ]
 
         expansions = {
             "温度": ("温度", "℃", "°c", "° c", "度"),
@@ -836,7 +866,7 @@ class IVDKnowledgeEngine:
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,
                 rendered.source, (rendered.source,) if rendered.source else (),
             )
-        sop_content = self._sop_content_search(normalized)
+        sop_content = self._sop_content_search(normalized, product_line)
         if sop_content is not None:
             return sop_content
         fallback = self._renderer.render_fallback()
