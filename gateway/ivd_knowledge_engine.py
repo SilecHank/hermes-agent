@@ -544,6 +544,9 @@ class IVDKnowledgeEngine:
             "联系人": ("联系人", "对接人", "负责人"),
             "负责人": ("负责人", "对接人", "联系人"),
             "对接人": ("对接人", "联系人", "负责人"),
+            "研发": ("研发", "研发pm", "负责人", "对接人"),
+            "建库": ("建库", "文库构建", "文库"),
+            "文库构建": ("文库构建", "建库", "文库"),
             "矩阵": ("矩阵", "对接人", "售后流程"),
         }
 
@@ -573,6 +576,19 @@ class IVDKnowledgeEngine:
             if distinct == 0 and title_hits == 0:
                 continue
             score = distinct * 100 + total + title_hits * 200
+            # 研发/负责人/联系人/对接人/矩阵 查询必须优先命中权威联系人矩阵，
+            # 避免被 FAQ 或普通 SOP 正文抢走排名。
+            contact_keywords = {"研发", "负责人", "联系人", "对接人", "矩阵"}
+            if any(kw in contact_keywords for kw in keywords):
+                path_low = str(entry.get("path") or "").casefold()
+                if "product-contact-matrix-202607" in path_low and path_low.endswith(".csv"):
+                    score += 1_000_000
+            # 带 SOP/标准作业/作业指导 语义的查询，应优先返回正式 SOP 文档，
+            # 而不是 reference 目录下的 FAQ/速查卡。
+            if "sop" in n or "标准作业" in n or "作业指导" in n:
+                path_low = str(entry.get("path") or "").casefold()
+                if "/protocols/" in path_low or "/01_标准作业指导书_sop/" in path_low:
+                    score += 5_000
             scored.append((score, entry))
 
         if not scored:
