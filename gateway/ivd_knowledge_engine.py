@@ -103,6 +103,10 @@ class IVDKnowledgeEngine:
         _sop_relative = "indexes/sop-path-index.json"
         if _sop_relative in members:
             self._sop_path_index = self._read_json(_sop_relative)
+        self._sop_content_index: dict[str, object] | None = None
+        _sop_content_relative = "indexes/sop-content-index.json"
+        if _sop_content_relative in members:
+            self._sop_content_index = self._read_json(_sop_content_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -470,6 +474,67 @@ class IVDKnowledgeEngine:
             )
         return ExecutionResult("\n".join(lines), "answer", "answer", 0, 0, 0, 0, None, ())
 
+    def _sop_content_search(self, normalized: str) -> "ExecutionResult | None":
+        index = self._sop_content_index
+        if not isinstance(index, dict):
+            return None
+        entries = index.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        n = normalized.casefold()
+        # extract meaningful keywords (Chinese 2+ chars, alnum 3+)
+        keywords = [
+            t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
+            if t not in ("sop",)
+        ]
+        if not keywords:
+            return None
+
+        scored = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").casefold()
+            content = str(entry.get("content") or "").casefold()
+            distinct = 0
+            total = 0
+            for kw in keywords:
+                c = content.count(kw)
+                if c:
+                    distinct += 1
+                    total += c
+            # title match is a strong signal
+            title_hits = sum(1 for kw in keywords if kw in title)
+            if distinct == 0 and title_hits == 0:
+                continue
+            score = distinct * 100 + total + title_hits * 200
+            scored.append((score, entry))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top = scored[:5]
+
+        lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
+        for score, entry in top:
+            title = entry.get("title") or "-"
+            path = entry.get("path") or "-"
+            content = str(entry.get("content") or "")
+            # first matching snippet line
+            snippet = ""
+            for line in content.splitlines():
+                low = line.casefold()
+                if any(kw in low for kw in keywords):
+                    snippet = line.strip()[:120]
+                    break
+            lines.append(f"**{title}**")
+            lines.append(f"- 来源：`{path}`")
+            if snippet:
+                lines.append(f"- 命中片段：{snippet}")
+            lines.append("")
+        return ExecutionResult("\n".join(lines).strip(), "answer", "answer", 0, 0, 0, 0, None, ())
+
     def _equipment_reagent_lookup(self, normalized: str) -> "ExecutionResult | None":
         index = self._equipment_reagent_index
         if not isinstance(index, dict):
@@ -736,6 +801,9 @@ class IVDKnowledgeEngine:
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,
                 rendered.source, (rendered.source,) if rendered.source else (),
             )
+        sop_content = self._sop_content_search(normalized)
+        if sop_content is not None:
+            return sop_content
         fallback = self._renderer.render_fallback()
         return ExecutionResult(
             fallback.text, fallback.answer_shape, "fallback_request", 0,
