@@ -107,6 +107,10 @@ class IVDKnowledgeEngine:
         _sop_content_relative = "indexes/sop-content-index.json"
         if _sop_content_relative in members:
             self._sop_content_index = self._read_json(_sop_content_relative)
+        self._original_document_map: dict[str, object] | None = None
+        _original_map_relative = "indexes/original-document-map.json"
+        if _original_map_relative in members:
+            self._original_document_map = self._read_json(_original_map_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -752,6 +756,67 @@ class IVDKnowledgeEngine:
             return None
         return ExecutionResult(text, "answer", "answer", 0, 0, 0, 0, None, ())
 
+    def _original_document_lookup(self, normalized: str, product_line: str) -> "ExecutionResult | None":
+        data = self._original_document_map
+        if not isinstance(data, dict):
+            return None
+        documents = data.get("documents")
+        if not isinstance(documents, list) or not documents:
+            return None
+        source_root = str(data.get("source_root") or "").rstrip("/")
+
+        n = normalized.casefold()
+        has_hint = any(k in n for k in ("原件", "原文件", "pdf", "清单", "xlsx", "说明书", "手册", "发一下", "发我", "给我"))
+        if not has_hint:
+            return None
+
+        kind = "sop"
+        if any(k in n for k in ("清单", "xlsx", "拆分")):
+            kind = "list"
+        elif any(k in n for k in ("说明书", "手册")):
+            kind = "manual"
+
+        candidates: list[dict[str, object]] = []
+        sop_match = re.search(r"SOP[-_]?[A-Za-z]+[-_]?\d+", normalized, re.IGNORECASE)
+        if kind == "sop" and sop_match:
+            want = re.sub(r"[^A-Za-z0-9]", "", sop_match.group(0)).upper()
+            for doc in documents:
+                if not isinstance(doc, dict) or doc.get("kind") != "sop":
+                    continue
+                doc_id = re.sub(r"[^A-Za-z0-9]", "", str(doc.get("document_id") or "")).upper()
+                if doc_id and doc_id == want and doc.get("original_available") is True:
+                    candidates.append(doc)
+        else:
+            pl = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(product_line or "").casefold())
+            for doc in documents:
+                if not isinstance(doc, dict) or doc.get("kind") != kind:
+                    continue
+                dpl = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(doc.get("product_line") or "").casefold())
+                if pl and dpl and (pl in dpl or dpl in pl) and doc.get("original_available") is True:
+                    candidates.append(doc)
+
+        if not candidates:
+            return None
+        if len(candidates) > 12:
+            names = [str(c.get("document_id") or Path(str(c.get("physical_path") or "")).name) for c in candidates]
+            return ExecutionResult(
+                "该产品存在多个可投递原件，请进一步指明 SOP 编号或清单/说明书名称：\n" + "\n".join(f"- {x}" for x in sorted(set(names))),
+                "clarification", "clarification", 0, 0, 0, 0, None, ()
+            )
+
+        lines = ["Workflow: original-document-delivery", ""]
+        media_lines: list[str] = []
+        for doc in candidates[:6]:
+            rel = str(doc.get("physical_path") or "")
+            name = Path(rel).name if rel else str(doc.get("document_id") or "")
+            absolute = f"{source_root}/{rel}" if source_root and rel else ""
+            if absolute:
+                media_lines.append(f"MEDIA:{absolute}")
+            lines.append(f"- {name}")
+        if media_lines:
+            lines.insert(1, "\n".join(media_lines))
+        return ExecutionResult("\n".join(lines).strip(), "file", "answer", 0, 0, 0, 0, None, ())
+
     def execute(
         self,
         *,
@@ -792,6 +857,9 @@ class IVDKnowledgeEngine:
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
+        original_delivery = self._original_document_lookup(normalized, product_line)
+        if original_delivery is not None:
+            return original_delivery
         sop_doc = self._sop_path_lookup(normalized, product_line) if knowledge_type not in ("file", "operation") else None
         if sop_doc is not None:
             return sop_doc
