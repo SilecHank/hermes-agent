@@ -2281,6 +2281,45 @@ def _final_validation_status(agent: Any, turn: Any) -> str:
     return str(getattr(validator, "validation_status", "not_applicable"))
 
 
+def _looks_like_title_only_answer(text: str) -> bool:
+    """Detect sop-content-search "document directory" answers that are mostly titles.
+
+    run.py-layer defense: even after the package engine tightens strong-hit
+    gating, treat a nearly-body-less ``answer`` as a weak hit and route it to
+    expert mode / general agent instead of answering with a title directory.
+    """
+    if not text:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    title_lines = [
+        ln for ln in lines
+        if ln.startswith("**") and ln.endswith("**") and len(ln) > 4
+    ]
+    body_lines: list[str] = []
+    for ln in lines:
+        if ln.startswith("- 命中片段："):
+            snippet = ln[len("- 命中片段："):].strip()
+            if not snippet:
+                continue
+            if snippet.startswith("#"):
+                continue
+            if snippet.startswith("|") and any(
+                k in snippet
+                for k in ("编号", "版本", "标题", "路径", "名称", "规格", "单位", "参数", "数量", "型号")
+            ):
+                continue
+            if len(snippet) >= 15:
+                body_lines.append(snippet)
+            continue
+        if ln.startswith(("Workflow:", "##", "- 来源", "- 命中")):
+            continue
+        if ln.startswith("**"):
+            continue
+        if len(ln) >= 15:
+            body_lines.append(ln)
+    return len(title_lines) >= 2 and not body_lines
+
+
 def _prepare_gateway_ivd_boundary(
     config: dict[str, Any],
     *,
@@ -3590,10 +3629,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 question=message,
                 history=history,
             )
-            if getattr(exclusive, "answer_shape", None) not in (
-                "fallback_request", "clarification"
-            ):
-                return prepared, exclusive
+            shape = getattr(exclusive, "answer_shape", None)
+            if shape not in ("fallback_request", "clarification"):
+                # 防御：包引擎返回的 answer 若几乎只有 **标题 行、无正文，
+                # 二次降级为 fallback（专家模式/通用 agent），避免 0 API 答非所问。
+                if shape != "answer" or not _looks_like_title_only_answer(
+                    getattr(exclusive, "text", "") or ""
+                ):
+                    return prepared, exclusive
             # 弱命中/未命中 → 继续走专家模式（workflow card 覆盖）或通用 agent
 
         from gateway.after_sales_guard import prepare_after_sales_turn

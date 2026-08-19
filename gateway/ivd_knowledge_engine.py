@@ -581,38 +581,41 @@ class IVDKnowledgeEngine:
                 continue
             title = str(entry.get("title") or "").casefold()
             content = str(entry.get("content") or "").casefold()
-            distinct = 0
+            # strong 判定只用整词 raw_tokens（子串匹配），避免 bigram 扩散把
+            # 通用词算作 distinct；排序/入选仍保留 bigram 计数，避免"地贫的研发
+            # 是谁"这类多词查询因 raw_token 无整串命中而把联系矩阵外的条目
+            # 全部误排除（golden 回归面）。
+            distinct_raw = sum(1 for kw in raw_tokens if kw_matches(kw, content))
+            title_hits_raw = sum(1 for kw in raw_tokens if kw_matches(kw, title))
+            distinct = sum(1 for kw in keywords if kw_matches(kw, content))
+            title_hits = sum(1 for kw in keywords if kw_matches(kw, title))
             total = 0
             for kw in keywords:
-                matched = kw_matches(kw, content)
-                if matched:
-                    distinct += 1
-                    # count occurrences across expansion alternatives
-                    for alt in expansions.get(kw, (kw,)):
-                        total += content.count(alt)
-            # title match is a strong signal
-            title_hits = sum(1 for kw in keywords if kw_matches(kw, title))
-            if distinct == 0 and title_hits == 0:
-                continue
-            score = distinct * 100 + total + title_hits * 200
-            strong = title_hits >= 1 and distinct >= 2
+                for alt in expansions.get(kw, (kw,)):
+                    total += content.count(alt)
             # 研发/负责人/联系人/对接人/矩阵 查询必须优先命中权威联系人矩阵，
-            # 避免被 FAQ 或普通 SOP 正文抢走排名。
+            # 避免被 FAQ 或普通 SOP 正文抢走排名。此 boost 必须在 distinct==0
+            # 早退之前计算，否则整词化后"地贫的研发是谁"这类多词中文查询会因
+            # raw_token 无整串命中而被误跳过。
+            contact_boost = 0
             contact_keywords = {"研发", "负责人", "联系人", "对接人", "矩阵"}
-            if any(kw in contact_keywords for kw in keywords):
+            if any(kw in n for kw in contact_keywords):
                 path_low = str(entry.get("path") or "").casefold()
                 contact_match = re.search(r"product-contact-matrix-(\d{6})\.csv", path_low)
                 if contact_match:
-                    score += 1_000_000 + int(contact_match.group(1))
-                    strong = True
+                    contact_boost = 1_000_000 + int(contact_match.group(1))
             # 带 SOP/标准作业/作业指导 语义的查询，应优先返回正式 SOP 文档，
             # 而不是 reference 目录下的 FAQ/速查卡。
+            sop_boost = 0
             if "sop" in n or "标准作业" in n or "作业指导" in n:
                 path_low = str(entry.get("path") or "").casefold()
                 if "/protocols/" in path_low or "/01_标准作业指导书_sop/" in path_low:
-                    score += 5_000
-                    strong = True
-            scored.append((score, strong, distinct, title_hits, entry))
+                    sop_boost = 5_000
+            if distinct == 0 and title_hits == 0 and not contact_boost and not sop_boost:
+                continue
+            score = distinct * 100 + total + title_hits * 200 + contact_boost + sop_boost
+            strong = (title_hits_raw >= 1 and distinct_raw >= 2) or bool(contact_boost) or bool(sop_boost)
+            scored.append((score, strong, distinct_raw, title_hits_raw, entry))
 
         if not scored:
             return None
@@ -622,13 +625,57 @@ class IVDKnowledgeEngine:
             return None
         top = scored[:5]
 
-        lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
+        # ── 片段质量门 + 意图感知实体门 ─────────────────────────────
+        # 强命中不能只靠"撞了几个词"，必须至少一条命中行是真实答案行
+        # （不是标题/表格头，且清理后长度 ≥15），否则视为答非所问 → 降级。
+        def _is_header_line(s: str) -> bool:
+            s = s.strip()
+            if not s:
+                return True
+            if s.startswith("#"):
+                return True
+            if s.startswith("- 来源") or s.startswith("- 命中") or s.startswith("Workflow:"):
+                return True
+            if s.startswith("|"):
+                cells = [c.strip() for c in s.strip("|").split("|")]
+                if all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
+                    return True
+                if any(k in s for k in ("编号", "版本", "标题", "路径", "名称", "规格", "单位", "参数", "数量", "型号")):
+                    return True
+            return False
+
+        def _clean_len(s: str) -> int:
+            return len(re.sub(r"[#*|\s\-`]", "", s))
+
+        # 查询意图 → 答案实体词（含枚举意图但片段无答案实体 → 降级）
+        intent_gates = (
+            (
+                re.compile(r"样本类型|能做的样本|什么样本|哪些样本|哪种样本|什么标本|哪些标本"),
+                re.compile(r"全血|血浆|干血片|羊水|绒毛|血清"),
+            ),
+            (
+                re.compile(r"多少|要求|阈值|数据量|投入量|浓度|体积|用量"),
+                re.compile(r"ng|μl|μg|ul|ml"),
+            ),
+            (
+                re.compile(r"可以|能做|不报|能否|是否能|能不能"),
+                re.compile(r"可以|不可以|不能|建议|不报"),
+            ),
+            (
+                re.compile(r"质控|质量控制"),
+                re.compile(r"合格|不合格|阈值|限值|标准|浓度|ng|μl|μg|ul|ml|荧光|信号|复检|复测|重抽|重建|重取样|质控品|阳性|阴性|空白|通过|不通过|cv"),
+            ),
+        )
+        active_intents = [entity_re for intent_re, entity_re in intent_gates if intent_re.search(n)]
+
+        good_snippets = 0
+        intent_satisfied = (len(active_intents) == 0)
+
+        rendered: list[tuple[str, str, str]] = []
         for score, strong, distinct, title_hits, entry in top:
             title = entry.get("title") or "-"
             path = entry.get("path") or "-"
             content = str(entry.get("content") or "")
-            # first matching snippet line
-            snippet = ""
             best_line = ""
             best_score = -1
             for line in content.splitlines():
@@ -644,15 +691,31 @@ class IVDKnowledgeEngine:
                             covered.add(kw[i : i + 2])
                 effective = [kw for kw in hit_kws if kw not in covered]
                 # ASCII 编号/缩略词（del、22q11、SOP-JL-xxx）比中文 bigram 更具特异性
-                score = sum(
+                line_score = sum(
                     3 if re.fullmatch(r"[a-z0-9]+", kw) else 1
                     for kw in effective
                 )
-                # 数字密度不再单独加权，避免多数字行压过关键词更相关的行
-                if score > best_score:
-                    best_score = score
+                if line_score > best_score:
+                    best_score = line_score
                     best_line = line.strip()
             snippet = best_line[:120]
+            is_good = bool(best_line) and not _is_header_line(best_line) and _clean_len(best_line) >= 15
+            if is_good:
+                good_snippets += 1
+                snippet_low = best_line.casefold()
+                if active_intents and all(entity_re.search(snippet_low) for entity_re in active_intents):
+                    intent_satisfied = True
+            rendered.append((title, path, snippet))
+
+        # 没有真实答案行 → 降级（走专家模式/通用 agent）
+        if good_snippets == 0:
+            return None
+        # 查询含枚举意图但片段无答案实体 → 降级
+        if active_intents and not intent_satisfied:
+            return None
+
+        lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
+        for title, path, snippet in rendered:
             lines.append(f"**{title}**")
             lines.append(f"- 来源：`{path}`")
             if snippet:
