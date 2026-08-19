@@ -446,6 +446,29 @@ def _render_answer_experience_context(
         return ""
 
 
+def _is_formal_source_path(path: str) -> bool:
+    """True when a path lives inside a formal/controlled source tree.
+
+    Used by the numeric-claim trust model: a read_file call that read a
+    controlled knowledge source (serving package, source vault, KB checkout,
+    or the material library mirrors) is trusted evidence for numeric claims,
+    even when that file was discovered dynamically (search_files) rather than
+    listed in the turn's pre-injected source_paths. This prevents the common
+    "document directory" pattern where the LLM locates the right formal doc at
+    runtime but its numbers are then rejected by an empty whitelist, forcing
+    the answer to be stripped of all concrete values.
+    """
+    normalized = str(path).replace("\\", "/")
+    markers = (
+        "/serving-package/",
+        "/source-vault/",
+        "/knowledge-base/",
+        "/mnt/d/iCloud/iCloudDrive/Workspace/文件材料库",
+        "/mnt/d/FileServer/文件材料库",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _trusted_tool_numeric_evidence(
     messages: list[dict[str, Any]],
     source_paths: Any,
@@ -467,8 +490,6 @@ def _trusted_tool_numeric_evidence_details(
         for path in source_paths
         if path
     }
-    if not trusted_paths:
-        return (), False, {}
 
     trusted_call_ids: dict[str, str] = {}
     for message in messages:
@@ -487,7 +508,9 @@ def _trusted_tool_numeric_evidence_details(
             if not isinstance(arguments, dict) or not arguments.get("path"):
                 continue
             candidate = str(Path(str(arguments["path"])).expanduser().resolve())
-            if candidate in trusted_paths:
+            # Trust either the pre-injected source list or any formal source
+            # path the agent actually read (dynamically discovered docs).
+            if candidate in trusted_paths or _is_formal_source_path(candidate):
                 call_id = call.get("id") or call.get("call_id")
                 if call_id:
                     trusted_call_ids[str(call_id)] = candidate
