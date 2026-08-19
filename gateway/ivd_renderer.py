@@ -59,7 +59,7 @@ class IVDRenderer:
     def fallback_request(self) -> str:
         return str(
             self._policy.get("fallback_request")
-            or "当前正式知识包未收录该问题，请补充产品名称、版本或SOP编号。"
+            or ""
         )
 
     def render_registry_hit(self, hit: object) -> RenderedAnswer:

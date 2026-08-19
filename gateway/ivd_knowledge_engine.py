@@ -595,6 +595,7 @@ class IVDKnowledgeEngine:
             if distinct == 0 and title_hits == 0:
                 continue
             score = distinct * 100 + total + title_hits * 200
+            strong = title_hits >= 1 and distinct >= 2
             # 研发/负责人/联系人/对接人/矩阵 查询必须优先命中权威联系人矩阵，
             # 避免被 FAQ 或普通 SOP 正文抢走排名。
             contact_keywords = {"研发", "负责人", "联系人", "对接人", "矩阵"}
@@ -603,24 +604,26 @@ class IVDKnowledgeEngine:
                 contact_match = re.search(r"product-contact-matrix-(\d{6})\.csv", path_low)
                 if contact_match:
                     score += 1_000_000 + int(contact_match.group(1))
+                    strong = True
             # 带 SOP/标准作业/作业指导 语义的查询，应优先返回正式 SOP 文档，
             # 而不是 reference 目录下的 FAQ/速查卡。
             if "sop" in n or "标准作业" in n or "作业指导" in n:
                 path_low = str(entry.get("path") or "").casefold()
                 if "/protocols/" in path_low or "/01_标准作业指导书_sop/" in path_low:
                     score += 5_000
-            scored.append((score, distinct, title_hits, entry))
+                    strong = True
+            scored.append((score, strong, distinct, title_hits, entry))
 
         if not scored:
             return None
         scored.sort(key=lambda item: item[0], reverse=True)
-        # 弱命中兜底：最优结果若只撞到 1 个关键词、且标题未命中，视为未收录。
-        if scored[0][1] < 2 and scored[0][2] == 0:
+        # 弱命中/部分命中 → 走 LLM 专家模式（fallback），不在引擎内硬答。
+        if not scored[0][1]:
             return None
         top = scored[:5]
 
         lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
-        for score, distinct, title_hits, entry in top:
+        for score, strong, distinct, title_hits, entry in top:
             title = entry.get("title") or "-"
             path = entry.get("path") or "-"
             content = str(entry.get("content") or "")
