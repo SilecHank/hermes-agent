@@ -26,7 +26,6 @@ _MANIFEST_FIELDS = {
 _FILE_FIELDS = {"path", "sha256", "size", "executable"}
 _MANDATORY_FORBIDDEN_PATHS = (
     ".git",
-    "gateway/after_sales_guard.py",
     "skills",
     "tests",
 )
