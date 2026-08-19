@@ -625,16 +625,24 @@ class IVDKnowledgeEngine:
             snippet = ""
             best_line = ""
             best_score = -1
-            # 用原始短语（不含汉字 bigram）选片段，避免"无创基础版"被拆成多个词虚高
-            snippet_keywords = raw_tokens
             for line in content.splitlines():
                 low = line.casefold()
-                hit_kws = [kw for kw in snippet_keywords if kw_matches(kw, low)]
+                hit_kws = [kw for kw in keywords if kw_matches(kw, low)]
                 if not hit_kws:
                     continue
-                score = len(hit_kws) * 10
-                digit_groups = len(re.findall(r"\d+(?:\.\d+)?", line))
-                score += digit_groups  # 关键词命中优先，数字只做同命中时的次级排序
+                # 长汉字短语命中时，其内部 bigram 不再重复计分，避免"无创基础版"虚高
+                covered: set[str] = set()
+                for kw in hit_kws:
+                    if len(kw) >= 3 and all("\u4e00" <= c <= "\u9fff" for c in kw):
+                        for i in range(len(kw) - 1):
+                            covered.add(kw[i : i + 2])
+                effective = [kw for kw in hit_kws if kw not in covered]
+                # ASCII 编号/缩略词（del、22q11、SOP-JL-xxx）比中文 bigram 更具特异性
+                score = sum(
+                    3 if re.fullmatch(r"[a-z0-9]+", kw) else 1
+                    for kw in effective
+                )
+                # 数字密度不再单独加权，避免多数字行压过关键词更相关的行
                 if score > best_score:
                     best_score = score
                     best_line = line.strip()
