@@ -625,14 +625,16 @@ class IVDKnowledgeEngine:
             snippet = ""
             best_line = ""
             best_score = -1
+            # 用原始短语（不含汉字 bigram）选片段，避免"无创基础版"被拆成多个词虚高
+            snippet_keywords = raw_tokens
             for line in content.splitlines():
                 low = line.casefold()
-                hit_kws = [kw for kw in keywords if kw_matches(kw, low)]
+                hit_kws = [kw for kw in snippet_keywords if kw_matches(kw, low)]
                 if not hit_kws:
                     continue
-                score = len(hit_kws)
+                score = len(hit_kws) * 10
                 digit_groups = len(re.findall(r"\d+(?:\.\d+)?", line))
-                score += digit_groups * 3  # prefer numeric/volume lines
+                score += digit_groups  # 关键词命中优先，数字只做同命中时的次级排序
                 if score > best_score:
                     best_score = score
                     best_line = line.strip()
