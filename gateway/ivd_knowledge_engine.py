@@ -763,8 +763,6 @@ class IVDKnowledgeEngine:
         documents = data.get("documents")
         if not isinstance(documents, list) or not documents:
             return None
-        source_root = str(data.get("source_root") or "").rstrip("/")
-
         n = normalized.casefold()
         has_hint = any(k in n for k in ("原件", "原文件", "pdf", "清单", "xlsx", "说明书", "手册", "发一下", "发我", "给我"))
         if not has_hint:
@@ -819,6 +817,13 @@ class IVDKnowledgeEngine:
 
         if not candidates:
             return None
+        # 清单/说明书多候选必须先澄清，避免一次投递多个文件。
+        if kind in ("list", "manual") and len(candidates) > 1:
+            names = [str(c.get("document_id") or Path(str(c.get("physical_path") or "")).name) for c in candidates]
+            return ExecutionResult(
+                "该查询命中多个清单/说明书原件，请进一步指明名称或版本：\n" + "\n".join(f"- {x}" for x in sorted(set(names))),
+                "clarification", "clarification", 0, 0, 0, 0, None, ()
+            )
         if len(candidates) > 12:
             names = [str(c.get("document_id") or Path(str(c.get("physical_path") or "")).name) for c in candidates]
             return ExecutionResult(
@@ -832,7 +837,7 @@ class IVDKnowledgeEngine:
         for doc in candidates[:6]:
             rel = str(doc.get("physical_path") or "")
             name = Path(rel).name if rel else str(doc.get("document_id") or "")
-            absolute = f"{source_root}/{rel}" if source_root and rel else ""
+            absolute = rel
             if absolute:
                 media_lines.append(f"MEDIA:{absolute}")
             lines.append(f"- {name}")
