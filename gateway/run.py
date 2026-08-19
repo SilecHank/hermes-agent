@@ -23416,7 +23416,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "IVD task checkpoint write skipped: %s",
                                 _checkpoint_write_exc,
                             )
-                    from gateway.after_sales_telemetry import build_runtime_event
+                    from gateway.after_sales_telemetry import (
+                        append_runtime_event,
+                        build_runtime_event,
+                        default_runtime_event_path,
+                    )
 
                     _event = build_runtime_event(
                         platform=platform_key,
