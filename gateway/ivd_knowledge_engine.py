@@ -609,15 +609,18 @@ class IVDKnowledgeEngine:
                 path_low = str(entry.get("path") or "").casefold()
                 if "/protocols/" in path_low or "/01_标准作业指导书_sop/" in path_low:
                     score += 5_000
-            scored.append((score, entry))
+            scored.append((score, distinct, title_hits, entry))
 
         if not scored:
             return None
         scored.sort(key=lambda item: item[0], reverse=True)
+        # 弱命中兜底：最优结果若只撞到 1 个关键词、且标题未命中，视为未收录。
+        if scored[0][1] < 2 and scored[0][2] == 0:
+            return None
         top = scored[:5]
 
         lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
-        for score, entry in top:
+        for score, distinct, title_hits, entry in top:
             title = entry.get("title") or "-"
             path = entry.get("path") or "-"
             content = str(entry.get("content") or "")
