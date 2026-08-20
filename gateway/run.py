@@ -2335,12 +2335,32 @@ def _prepare_gateway_ivd_boundary(
     )
 
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
-    if ivd_engine_mode(config, platform=platform) == "package":
+    mode = ivd_engine_mode(config, platform=platform)
+    if mode == "package":
         return prepared, execute_exclusive_ivd_turn(
             prepared,
             question=message,
             history=history,
         )
+    if mode == "hybrid":
+        from gateway.ivd_hybrid_router import decide_hybrid_route
+
+        try:
+            exclusive = execute_exclusive_ivd_turn(
+                prepared,
+                question=message,
+                history=history,
+            )
+        except Exception:
+            exclusive = None
+        if exclusive is not None:
+            decision = decide_hybrid_route(
+                message,
+                envelope=exclusive,
+                result=exclusive,
+            )
+            if decision.mode == "package_scalar":
+                return prepared, exclusive
     from gateway.after_sales_guard import prepare_after_sales_turn
 
     turn = prepare_after_sales_turn(
@@ -3631,7 +3651,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         normalized_platform = str(platform or "").strip().lower()
         prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
         prepared = prepared_contracts.get(normalized_platform)
-        if ivd_engine_mode(config, platform=normalized_platform) == "package":
+        mode = ivd_engine_mode(config, platform=normalized_platform)
+        if mode == "package":
             exclusive = execute_exclusive_ivd_turn(
                 prepared,
                 question=message,
@@ -3646,6 +3667,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ):
                     return prepared, exclusive
             # 弱命中/未命中 → 继续走专家模式（workflow card 覆盖）或通用 agent
+        elif mode == "hybrid":
+            from gateway.ivd_hybrid_router import decide_hybrid_route
+
+            try:
+                exclusive = execute_exclusive_ivd_turn(
+                    prepared,
+                    question=message,
+                    history=history,
+                )
+            except Exception:
+                exclusive = None
+            if exclusive is not None:
+                decision = decide_hybrid_route(
+                    message,
+                    envelope=exclusive,
+                    result=exclusive,
+                )
+                if decision.mode == "package_scalar":
+                    return prepared, exclusive
 
         from gateway.after_sales_guard import prepare_after_sales_turn
 

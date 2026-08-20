@@ -46,6 +46,10 @@ class ExclusiveIVDResult:
     filesystem_scans: int
     effect_count: int
     sources: tuple[object, ...]
+    intent: str = ""
+    product_line: str = ""
+    product_variant: str = ""
+    ambiguities: tuple[str, ...] = ()
     dispatch_count: int = 1
     final_validation_count: int = 1
 
@@ -178,7 +182,7 @@ def ivd_engine_mode(config: Mapping[str, Any], *, platform: str) -> str:
     if guard is None:
         return "disabled"
     mode = str(guard.get("engine_mode") or "compatibility").strip().lower()
-    if mode not in {"compatibility", "package"}:
+    if mode not in {"compatibility", "package", "hybrid"}:
         from gateway.ivd_execution_contract import IVDRuntimeConfigurationError
 
         raise IVDRuntimeConfigurationError("invalid IVD engine mode")
@@ -268,6 +272,10 @@ def execute_exclusive_ivd_turn(
             filesystem_scans=int(result.filesystem_scans),
             effect_count=int(result.effect_count),
             sources=tuple(result.sources),
+            intent=str(getattr(outcome.envelope, "intent", "") or ""),
+            product_line=str(getattr(outcome.envelope, "product_line", "") or ""),
+            product_variant=str(getattr(outcome.envelope, "product_variant", "") or ""),
+            ambiguities=tuple(getattr(outcome.envelope, "ambiguities", ()) or ()),
         )
 
 

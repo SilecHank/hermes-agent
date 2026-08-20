@@ -65,6 +65,7 @@
     "gateway/ivd_renderer.py",
     "gateway/ivd_route_epoch.py",
     "gateway/ivd_runtime.py",
+    "gateway/ivd_hybrid_router.py",
     "gateway/ivd_verified_facts.py",
     "gateway/kanban_watchers.py",
     "gateway/pairing.py",
