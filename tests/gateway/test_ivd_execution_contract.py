@@ -101,6 +101,26 @@ def test_loader_accepts_release_schema_and_keeps_only_serving_identity(tmp_path)
         prepared.execution_contract = None
 
 
+def test_loader_accepts_compiler_manifest_envelope(tmp_path):
+    manifest = _write_release(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "reason": "release_manifest_ready",
+                "manifest": payload,
+                "digest": payload["manifest_digest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    projection = load_serving_projection(manifest)
+
+    assert projection.package_digest == PACKAGE_DIGEST
+
+
 def test_only_prepared_execution_contract_can_issue_file_delivery_grant(tmp_path):
     prepared = prepare_ivd_turn(load_serving_projection(_write_release(tmp_path)))
     contract = prepared.execution_contract

@@ -57,6 +57,23 @@ _FILE_GRANT_ISSUER = object()
 _FILE_GRANT_SECRET = os.urandom(32)
 
 
+def _release_manifest_payload(raw: object) -> dict[str, Any] | None:
+    """Unwrap the compiler envelope while retaining legacy direct manifests."""
+    if not isinstance(raw, dict):
+        return None
+    if {"status", "reason", "manifest", "digest"} <= set(raw):
+        manifest = raw.get("manifest")
+        if (
+            raw.get("status") != "ready"
+            or raw.get("reason") != "release_manifest_ready"
+            or not isinstance(manifest, dict)
+            or raw.get("digest") != manifest.get("manifest_digest")
+        ):
+            return None
+        return manifest
+    return raw
+
+
 class IVDRuntimeConfigurationError(RuntimeError):
     """The managed IVD runtime cannot establish a serving contract."""
 
@@ -364,7 +381,8 @@ def load_serving_projection(
             raise IVDRuntimeConfigurationError(
                 f"cannot load IVD serving projection: {path}"
             ) from error
-        if not isinstance(payload, dict):
+        payload = _release_manifest_payload(payload)
+        if payload is None:
             raise IVDRuntimeConfigurationError("IVD projection envelope must be an object")
         if set(payload) != _MANIFEST_FIELDS:
             raise IVDRuntimeConfigurationError("IVD release manifest fields are invalid")
