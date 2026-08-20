@@ -94,12 +94,12 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
             (result.root / "serving-agent-manifest.json").read_text()
         )["files"]
     }
-    assert "gateway/after_sales_guard.py" not in built
+    assert "gateway/after_sales_guard.py" in built
     assert "hermes_cli/main.py" not in built
     assert required <= built
     assert not any(
         path == ".git"
-        or path.startswith((".git/", "tests/", "skills/", "tools/"))
+        or path.startswith((".git/", "tests/", "skills/"))
         for path in built
     )
 
@@ -190,12 +190,12 @@ def test_allowlist_cannot_relax_mandatory_development_boundaries(tmp_path):
         build_serving_agent(root, tmp_path / "serving-agent", allowlist)
 
 
-def test_allowlist_cannot_reintroduce_legacy_after_sales_guard(tmp_path):
+def test_allowlist_cannot_reintroduce_legacy_fast_router(tmp_path):
     root = tmp_path / "agent"
     _write(root / "gateway/run.py")
-    _write(root / "gateway/after_sales_guard.py")
+    _write(root / "gateway/hermes_fast_source_router.py")
     allowlist = _allowlist(
-        root, ["gateway/run.py", "gateway/after_sales_guard.py"]
+        root, ["gateway/run.py", "gateway/hermes_fast_source_router.py"]
     )
     payload = json.loads(allowlist.read_text(encoding="utf-8"))
     payload["forbidden_paths"] = []

@@ -14,6 +14,7 @@
     "agent/credential_pool.py",
     "agent/display.py",
     "agent/error_classifier.py",
+    "agent/final_response_validation.py",
     "agent/file_safety.py",
     "agent/i18n.py",
     "agent/iteration_budget.py",

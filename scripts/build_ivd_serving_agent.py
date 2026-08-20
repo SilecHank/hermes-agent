@@ -26,6 +26,7 @@ _MANIFEST_FIELDS = {
 _FILE_FIELDS = {"path", "sha256", "size", "executable"}
 _MANDATORY_FORBIDDEN_PATHS = (
     ".git",
+    "gateway/hermes_fast_source_router.py",
     "skills",
     "tests",
 )
