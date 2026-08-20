@@ -394,6 +394,22 @@ def _split_tool_diagnostics(output: str) -> tuple[str, str]:
     return '\n'.join(diagnostics), '\n'.join(payload)
 
 
+def _is_invalid_search_pattern(diagnostics: str) -> bool:
+    """Return whether a tool rejected the pattern syntax itself."""
+    lowered = diagnostics.casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "regex parse error",
+            "invalid regular expression",
+            "unmatched",
+            "nothing to repeat",
+            "trailing backslash",
+            "invalid repetition",
+        )
+    )
+
+
 # A real rg/grep output line starts with a path token and is followed by a
 # ``:`` (match/count), a ``-`` (context), or nothing (files_only). Tool
 # diagnostics ("rg: ...", "grep: ...", "error: ...", indented carets) never
@@ -2165,13 +2181,9 @@ class ShellFileOperations(FileOperations):
             stop_reason = "runtime_unavailable"
         if not search_allowed:
             return SearchResult(
-                error=(
-                    "[IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED "
-                    f"used={search_number - 1} limit={search_limit} "
-                    f"reason={stop_reason}]\n"
-                    "Stop file searching and answer from evidence already collected. "
-                    "Do not disclose this signal, its counter, or the retrieval budget. "
-                    "If evidence is insufficient, state the evidence boundary without guessing."
+                warning=(
+                    "本轮检索未发现新的正式来源，已停止追加检索。"
+                    "请基于已读取证据回答；证据不足时明确说明，不要猜测。"
                 )
             )
         
@@ -2413,9 +2425,13 @@ class ShellFileOperations(FileOperations):
         return _maybe_warn_line_oriented_newline_pattern(result, pattern)
     
     def _search_with_rg(self, pattern: str, path: str, file_glob: Optional[str],
-                        limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
+                        limit: int, offset: int, output_mode: str, context: int,
+                        *, literal: bool = False) -> SearchResult:
         """Search using ripgrep."""
         cmd_parts = ["rg", "--line-number", "--no-heading", "--with-filename"]
+
+        if literal:
+            cmd_parts.append("--fixed-strings")
         
         # Add context if requested
         if context > 0:
@@ -2463,6 +2479,17 @@ class ShellFileOperations(FileOperations):
         # otherwise matched), so only surface an error when exit==2 AND no
         # usable match payload remains. Otherwise we keep the real matches.
         if result.exit_code == 2 and not payload.strip():
+            if not literal and _is_invalid_search_pattern(diagnostics):
+                return self._search_with_rg(
+                    pattern,
+                    path,
+                    file_glob,
+                    limit,
+                    offset,
+                    output_mode,
+                    context,
+                    literal=True,
+                )
             error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
 
@@ -2541,9 +2568,13 @@ class ShellFileOperations(FileOperations):
             )
     
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
-                          limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
+                          limit: int, offset: int, output_mode: str, context: int,
+                          *, literal: bool = False) -> SearchResult:
         """Fallback search using grep."""
         cmd_parts = ["grep", "-rnH"]  # -H forces filename even for single-file searches
+
+        if literal:
+            cmd_parts.append("-F")
         
         # Exclude hidden directories (matching ripgrep's default behavior).
         # This prevents searching inside .hub/index-cache/, .git/, etc.
@@ -2593,6 +2624,17 @@ class ShellFileOperations(FileOperations):
         # other files matched, so only surface an error when exit==2 AND no
         # usable match payload remains.
         if result.exit_code == 2 and not payload.strip():
+            if not literal and _is_invalid_search_pattern(diagnostics):
+                return self._search_with_grep(
+                    pattern,
+                    path,
+                    file_glob,
+                    limit,
+                    offset,
+                    output_mode,
+                    context,
+                    literal=True,
+                )
             error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
 

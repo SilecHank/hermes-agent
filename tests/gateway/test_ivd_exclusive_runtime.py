@@ -106,6 +106,50 @@ def test_active_package_turn_never_invokes_legacy_router(tmp_path, monkeypatch):
     assert [call[0] for call in calls] == ["dispatcher", "engine", "dispatch"]
 
 
+def test_package_turn_accepts_minimal_envelope_for_diagnostics(tmp_path, monkeypatch):
+    prepared = _prepared_package_turn(tmp_path)
+
+    class Result:
+        text = "200 uL."
+        answer_shape = "scalar"
+        outcome = "answer"
+        model_calls = 0
+        index_transactions = 0
+        filesystem_scans = 0
+        effect_count = 0
+        sources = ()
+
+    class Engine:
+        def __init__(self, _root, *, expected_package_digest):
+            assert expected_package_digest == "a" * 64
+
+        def close(self):
+            pass
+
+    class Dispatcher:
+        def __init__(self, _root):
+            pass
+
+        def execute(self, _engine, *, question, context="", evidence=None):
+            return SimpleNamespace(
+                envelope=SimpleNamespace(
+                    clarifying_questions=(),
+                    model_call_budget=0,
+                    indexed_retrieval_budget=0,
+                ),
+                result=Result(),
+            )
+
+    monkeypatch.setattr("gateway.ivd_runtime.IVDDispatcher", Dispatcher)
+    monkeypatch.setattr("gateway.ivd_runtime.IVDKnowledgeEngine", Engine)
+
+    from gateway.ivd_runtime import execute_exclusive_ivd_turn
+
+    result = execute_exclusive_ivd_turn(prepared, question="问题")
+
+    assert result.text == "200 uL."
+
+
 def test_package_turn_caps_recent_context_to_compiled_budget(tmp_path, monkeypatch):
     prepared = _prepared_package_turn(tmp_path)
     observed = {}

@@ -2414,6 +2414,14 @@ def _enqueue_gateway_ivd_receipt(
     return final_response
 
 
+def _resolve_runtime_event_path(config: Mapping[str, Any] | None) -> str:
+    """Resolve the mutable telemetry destination without branch-local imports."""
+    from gateway.after_sales_telemetry import default_runtime_event_path
+
+    configured = config.get("runtime_events_path") if isinstance(config, dict) else None
+    return str(configured or default_runtime_event_path())
+
+
 def _append_ivd_turn_telemetry(
     validation_status: str,
     *,
@@ -21921,7 +21929,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         from gateway.after_sales_telemetry import (
                             append_runtime_event,
                             build_runtime_event,
-                            default_runtime_event_path,
                         )
 
                         _blocked_result = build_preflight_block_result(
@@ -21947,9 +21954,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 preflight_issues=_after_sales_turn.preflight_issues,
                             )
                             _guard_config = user_config.get("after_sales_guard") or {}
-                            _telemetry_path = _guard_config.get("runtime_events_path") or (
-                                default_runtime_event_path()
-                            )
+                            _telemetry_path = _resolve_runtime_event_path(_guard_config)
                             append_runtime_event(_telemetry_path, _blocked_event)
                         except Exception as _blocked_telemetry_exc:
                             logger.warning(
@@ -21977,7 +21982,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         from gateway.after_sales_telemetry import (
                             append_runtime_event,
                             build_runtime_event,
-                            default_runtime_event_path,
                         )
 
                         _direct_result = build_direct_fact_result(
@@ -22003,8 +22007,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                             _guard_config = user_config.get("after_sales_guard") or {}
                             append_runtime_event(
-                                _guard_config.get("runtime_events_path")
-                                or default_runtime_event_path(),
+                                _resolve_runtime_event_path(_guard_config),
                                 _direct_event,
                             )
                         except Exception as _direct_telemetry_exc:
@@ -23469,7 +23472,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     from gateway.after_sales_telemetry import (
                         append_runtime_event,
                         build_runtime_event,
-                        default_runtime_event_path,
                     )
 
                     _event = build_runtime_event(
@@ -23536,9 +23538,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         ),
                         skill_snapshot=_ivd_skill_snapshot,
                     )
-                    _telemetry_path = _after_sales_config.get("runtime_events_path") or (
-                        default_runtime_event_path()
-                    )
+                    _telemetry_path = _resolve_runtime_event_path(_after_sales_config)
                     append_runtime_event(_telemetry_path, _event)
                 except Exception as _telemetry_exc:
                     logger.warning("IVD runtime telemetry skipped: %s", _telemetry_exc)

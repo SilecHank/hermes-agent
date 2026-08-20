@@ -846,7 +846,7 @@ class TestIVDKnowledgeSearchBoundary:
 
         assert {match.path for match in result.matches} == {str(files["extracted"])}
 
-    def test_answer_mode_returns_internal_budget_signal(self, tmp_path):
+    def test_answer_mode_returns_non_error_budget_warning(self, tmp_path):
         from gateway.ivd_runtime import (
             INDEX_FALLBACK_POLICY,
             begin_ivd_answer_turn,
@@ -866,9 +866,9 @@ class TestIVDKnowledgeSearchBoundary:
 
         assert snapshot["formal_source_count"] == 1
         assert snapshot["stop_reason"] == "formal_source_found"
-        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in blocked.error
-        assert "do not disclose" in blocked.error.lower()
-        assert "检索预算已用完" not in blocked.error
+        assert blocked.error is None
+        assert blocked.warning
+        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" not in blocked.warning
 
     def test_direct_profile_blocks_first_real_file_search(self, tmp_path):
         from gateway.ivd_runtime import (
@@ -886,7 +886,8 @@ class TestIVDKnowledgeSearchBoundary:
         finally:
             end_ivd_answer_turn(token)
 
-        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in blocked.error
+        assert blocked.error is None
+        assert blocked.warning
         assert snapshot["searches"] == 0
         assert snapshot["stop_reason"] == "direct"
 
@@ -911,7 +912,8 @@ class TestIVDKnowledgeSearchBoundary:
             end_ivd_answer_turn(token)
 
         assert first.error is None
-        assert "IVD_INTERNAL_RETRIEVAL_BUDGET_EXHAUSTED" in repeated.error
+        assert repeated.error is None
+        assert repeated.warning
         assert snapshot["searches"] == 1
         assert snapshot["formal_source_count"] == 1
         assert snapshot["stop_reason"] == "duplicate"

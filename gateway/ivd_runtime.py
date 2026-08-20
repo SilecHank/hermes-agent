@@ -224,14 +224,14 @@ def execute_exclusive_ivd_turn(
             "variant=%s stage=%s knowledge=%s shape=%s ambiguities=%s budget=%s",
             question,
             recent_context,
-            outcome.envelope.intent,
-            outcome.envelope.product_line,
-            outcome.envelope.product_variant,
-            outcome.envelope.workflow_stage,
-            outcome.envelope.knowledge_type,
-            outcome.envelope.answer_shape,
-            outcome.envelope.ambiguities,
-            outcome.envelope.indexed_retrieval_budget,
+            getattr(outcome.envelope, "intent", ""),
+            getattr(outcome.envelope, "product_line", ""),
+            getattr(outcome.envelope, "product_variant", ""),
+            getattr(outcome.envelope, "workflow_stage", ""),
+            getattr(outcome.envelope, "knowledge_type", ""),
+            getattr(outcome.envelope, "answer_shape", ""),
+            getattr(outcome.envelope, "ambiguities", ()),
+            getattr(outcome.envelope, "indexed_retrieval_budget", 0),
         )
         result = outcome.result
         if result is None:

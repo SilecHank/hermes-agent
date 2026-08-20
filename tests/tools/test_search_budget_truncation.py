@@ -131,3 +131,42 @@ def test_real_rg_error_still_hard_fails(ops, monkeypatch):
 
     assert result.error == "Search failed: rg: regex parse error:"
     assert result.limit_reason is None
+
+
+def test_invalid_regex_retries_once_as_literal_search(ops, monkeypatch):
+    calls = []
+
+    def execute(command, **kwargs):
+        if "test -e" in command:
+            return {"output": "exists", "returncode": 0}
+        calls.append(command)
+        if len(calls) == 1:
+            return {"output": "grep: Unmatched \\{", "returncode": 2}
+        return {"output": "/big/reference.md:4:literal { value", "returncode": 0}
+
+    ops.env.execute.side_effect = execute
+    monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == "grep")
+
+    result = ops.search(r"\\{", path="/big", target="content")
+
+    assert result.error is None
+    assert [match.path for match in result.matches] == ["/big/reference.md"]
+    assert "-F" in calls[1]
+
+
+def test_retrieval_budget_stop_is_a_warning_not_a_tool_error(ops, monkeypatch):
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.consume_ivd_search",
+        lambda **_: (False, 3, 2),
+    )
+    monkeypatch.setattr(
+        "gateway.ivd_runtime.get_ivd_retrieval_snapshot",
+        lambda: {"stop_reason": "no_gain"},
+    )
+
+    result = ops.search("known", path="/big", target="content")
+
+    assert result.error is None
+    assert result.total_count == 0
+    assert result.warning
+    assert "IVD_INTERNAL" not in result.warning
