@@ -632,6 +632,7 @@ def prepare_after_sales_turn(
                 answer_contract=dict(fast_result.get("answer_contract") or {}),
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
+                direct_response=str(fast_result.get("direct_response") or ""),
                 fact_key=str(fast_result.get("fact_key") or ""),
                 expected_scalar_claims=tuple(
                     str(item) for item in fast_result.get("expected_scalar_claims") or ()
@@ -891,6 +892,11 @@ def _render_fast_response_context(
         lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
     fast_path = plan.get("fast_path") or {}
     answer_shape = plan.get("answer_shape") or {}
+    contact_fact = plan.get("contact_fact") or fast_path.get("contact_fact") or {}
+    direct_response = ""
+    if contact_fact.get("status") == "resolved":
+        direct_response = str(contact_fact.get("answer") or "")
+        lines.append("已解析联系人事实卡，直接采用卡内当前值，不再全文检索或自行推测。")
     return {
         "context": "\n".join(lines),
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
@@ -908,6 +914,7 @@ def _render_fast_response_context(
         "answer_contract": answer_contract,
         "source_location": source_location,
         "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
+        "direct_response": direct_response,
         "fact_key": str(plan.get("fact_key") or ""),
         "expected_scalar_claims": tuple(
             str(item) for item in plan.get("expected_scalar_claims") or ()
