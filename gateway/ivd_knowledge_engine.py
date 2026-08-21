@@ -103,6 +103,10 @@ class IVDKnowledgeEngine:
         _sop_relative = "indexes/sop-path-index.json"
         if _sop_relative in members:
             self._sop_path_index = self._read_json(_sop_relative)
+        self._sop_content_index: dict[str, object] | None = None
+        _sop_content_relative = "indexes/sop-content-index.json"
+        if _sop_content_relative in members:
+            self._sop_content_index = self._read_json(_sop_content_relative)
         database = self._member_path("database/registry.sqlite")
         uri = f"file:{quote(str(database.resolve()))}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
@@ -470,6 +474,140 @@ class IVDKnowledgeEngine:
             )
         return ExecutionResult("\n".join(lines), "answer", "answer", 0, 0, 0, 0, None, ())
 
+    def _sop_content_search(self, normalized: str, product_line: str) -> "ExecutionResult | None":
+        index = self._sop_content_index
+        if not isinstance(index, dict):
+            return None
+        entries = index.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        n = normalized.casefold()
+        # extract meaningful keywords (Chinese 2+ chars, alnum 3+)
+        raw_tokens = [
+            t for t in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", n)
+            if t not in ("sop",)
+        ]
+        keywords: list[str] = []
+        for t in raw_tokens:
+            if t not in keywords:
+                keywords.append(t)
+            # add Chinese 2-char bigrams for contiguous phrases
+            if len(t) > 2 and all("\u4e00" <= c <= "\u9fff" for c in t):
+                for i in range(len(t) - 1):
+                    bigram = t[i : i + 2]
+                    if bigram not in keywords:
+                        keywords.append(bigram)
+        if not keywords:
+            return None
+
+        # product scope filter (avoid cross-product contamination)
+        def _norm_product(value: object) -> str:
+            return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").casefold())
+
+        if product_line:
+            pl = _norm_product(product_line)
+            index_candidates = {pl}
+            for alias, target in {
+                "cnv": "cnv-str",
+                "康孕": "cnv-str",
+                "新筛": "新生儿筛查",
+                "携带者": "携带者筛查",
+                "地贫": "地贫",
+                "地中海贫血": "地贫",
+                "肿瘤": "肿瘤检测",
+                "遗传性肿瘤": "肿瘤检测",
+                "遗传性基因检测": "肿瘤检测",
+            }.items():
+                na = _norm_product(alias)
+                if pl == na or pl in na or na in pl:
+                    index_candidates.add(_norm_product(target))
+            entries = [
+                entry for entry in entries
+                if isinstance(entry, dict)
+                and any(
+                    cp and (
+                        _norm_product(entry.get("product")) == "reference"
+                        or cp in _norm_product(entry.get("product"))
+                        or _norm_product(entry.get("product")) in cp
+                    )
+                    for cp in index_candidates
+                )
+            ]
+
+        expansions = {
+            "温度": ("温度", "℃", "°c", "° c", "度"),
+            "时间": ("时间", "min", "分钟", "秒", "小时", "h"),
+            "浓度": ("浓度", "ng/ul", "ng/μl", "ng", "合格"),
+            "体积": ("体积", "μl", "ul", "ml", "用量", "体积"),
+            "多少": ("多少",),
+            "联系人": ("联系人", "对接人", "负责人"),
+            "负责人": ("负责人", "对接人", "联系人"),
+            "对接人": ("对接人", "联系人", "负责人"),
+            "矩阵": ("矩阵", "对接人", "售后流程"),
+        }
+
+        def kw_matches(kw: str, text: str) -> bool:
+            for alt in expansions.get(kw, (kw,)):
+                if alt in text:
+                    return True
+            return False
+
+        scored = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").casefold()
+            content = str(entry.get("content") or "").casefold()
+            distinct = 0
+            total = 0
+            for kw in keywords:
+                matched = kw_matches(kw, content)
+                if matched:
+                    distinct += 1
+                    # count occurrences across expansion alternatives
+                    for alt in expansions.get(kw, (kw,)):
+                        total += content.count(alt)
+            # title match is a strong signal
+            title_hits = sum(1 for kw in keywords if kw_matches(kw, title))
+            if distinct == 0 and title_hits == 0:
+                continue
+            score = distinct * 100 + total + title_hits * 200
+            scored.append((score, entry))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top = scored[:5]
+
+        lines = ["Workflow: sop-content-search", "", "## SOP 正文匹配", ""]
+        for score, entry in top:
+            title = entry.get("title") or "-"
+            path = entry.get("path") or "-"
+            content = str(entry.get("content") or "")
+            # first matching snippet line
+            snippet = ""
+            best_line = ""
+            best_score = -1
+            for line in content.splitlines():
+                low = line.casefold()
+                hit_kws = [kw for kw in keywords if kw_matches(kw, low)]
+                if not hit_kws:
+                    continue
+                score = len(hit_kws)
+                digit_groups = len(re.findall(r"\d+(?:\.\d+)?", line))
+                score += digit_groups * 3  # prefer numeric/volume lines
+                if score > best_score:
+                    best_score = score
+                    best_line = line.strip()
+            snippet = best_line[:120]
+            lines.append(f"**{title}**")
+            lines.append(f"- 来源：`{path}`")
+            if snippet:
+                lines.append(f"- 命中片段：{snippet}")
+            lines.append("")
+        return ExecutionResult("\n".join(lines).strip(), "answer", "answer", 0, 0, 0, 0, None, ())
+
     def _equipment_reagent_lookup(self, normalized: str) -> "ExecutionResult | None":
         index = self._equipment_reagent_index
         if not isinstance(index, dict):
@@ -736,6 +874,9 @@ class IVDKnowledgeEngine:
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,
                 rendered.source, (rendered.source,) if rendered.source else (),
             )
+        sop_content = self._sop_content_search(normalized, product_line)
+        if sop_content is not None:
+            return sop_content
         fallback = self._renderer.render_fallback()
         return ExecutionResult(
             fallback.text, fallback.answer_shape, "fallback_request", 0,
