@@ -44,6 +44,9 @@ def build_fast_response_plan(question, question_type='general'):
 
     assert turn is not None
     assert turn.direct_response == "新生儿基因筛查、新生儿质谱筛查（新筛）的产品经理是蓝丽萍。"
+    assert turn.resolved_answer is not None
+    assert turn.resolved_answer.text == turn.direct_response
+    assert turn.resolved_answer.source_kind == "contact"
 
 
 def test_resolved_contact_fact_survives_existing_workflow_match(tmp_path):
@@ -110,3 +113,6 @@ def extract_numeric_claims(text):
 
     assert turn is not None
     assert turn.direct_response == "无创基础版&全因的产品经理是王阳。"
+    assert turn.resolved_answer is not None
+    assert turn.resolved_answer.text == turn.direct_response
+    assert turn.resolved_answer.source_kind == "contact"

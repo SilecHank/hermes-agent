@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from gateway.ivd_evidence import build_runtime_evidence_id
 from gateway.ivd_verified_facts import VerifiedFactService
+from gateway.resolved_answer import ResolvedAnswer
 
 
 MEASUREMENT_VALUE_RE = re.compile(
@@ -60,12 +61,30 @@ class AfterSalesTurn:
     verified_fact_hit: bool = False
     verified_fact_status: str = "off"
     direct_response: str = ""
+    resolved_answer: ResolvedAnswer | None = None
     direct_evidence_ids: tuple[str, ...] = ()
     fact_key: str = ""
     expected_scalar_claims: tuple[str, ...] = ()
     source_locator: str = ""
     source_revisions: dict[str, str] = field(default_factory=dict)
     evidence_sidecar_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if self.resolved_answer is None and self.direct_response:
+            object.__setattr__(
+                self,
+                "resolved_answer",
+                ResolvedAnswer(
+                    text=self.direct_response,
+                    source_kind="legacy_direct_response",
+                    answer_shape=self.answer_shape,
+                    product_scope=self.product_scope,
+                    product_variant=self.product_variant,
+                    evidence_ids=self.direct_evidence_ids,
+                ),
+            )
+        elif self.resolved_answer is not None and not self.direct_response:
+            object.__setattr__(self, "direct_response", self.resolved_answer.text)
 
     @property
     def blocks_answer_generation(self) -> bool:
@@ -633,6 +652,7 @@ def prepare_after_sales_turn(
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
                 direct_response=str(fast_result.get("direct_response") or ""),
+                resolved_answer=ResolvedAnswer.from_fast_result(fast_result),
                 fact_key=str(fast_result.get("fact_key") or ""),
                 expected_scalar_claims=tuple(
                     str(item) for item in fast_result.get("expected_scalar_claims") or ()
@@ -680,6 +700,7 @@ def prepare_after_sales_turn(
         product_variant=str(fast_result.get("product_variant") or ""),
         fast_path=bool(fast_context),
         direct_response=str(fast_result.get("direct_response") or ""),
+        resolved_answer=ResolvedAnswer.from_fast_result(fast_result),
         route_id=str(fast_result.get("route_id") or match["facts"].get("workflow_id") or "facts"),
         route_version=str(fast_result.get("route_version") or ""),
         source_paths=tuple(
@@ -771,6 +792,19 @@ def _attach_verified_fact(
         verified_fact_hit=True,
         verified_fact_status="active",
         direct_response=rendered_answer if mode == "active" else "",
+        resolved_answer=(
+            ResolvedAnswer(
+                text=rendered_answer,
+                source_kind="verified_fact",
+                card_id=turn.fact_key,
+                answer_shape=turn.answer_shape,
+                product_scope=turn.product_scope,
+                product_variant=turn.product_variant,
+                evidence_ids=evidence_ids,
+            )
+            if mode == "active"
+            else None
+        ),
         direct_evidence_ids=evidence_ids,
     )
 
@@ -894,13 +928,19 @@ def _render_fast_response_context(
     fast_path = plan.get("fast_path") or {}
     answer_shape = plan.get("answer_shape") or {}
     contact_fact = plan.get("contact_fact") or fast_path.get("contact_fact") or {}
-    direct_response = ""
+    direct_response = str(fast_path.get("direct_response") or "")
+    answer_card = fast_path.get("answer_card") or {}
+    if not direct_response and answer_card.get("stop_after_fast_path"):
+        direct_response = str(answer_card.get("answer_text") or "")
     if contact_fact.get("status") == "resolved":
         direct_response = str(contact_fact.get("answer") or "")
         lines.append("已解析联系人事实卡，直接采用卡内当前值，不再全文检索或自行推测。")
+    elif direct_response and answer_card:
+        lines.append("已解析正式答案卡，直接采用卡内当前值，不再重复检索或调用模型。")
     return {
         "context": "\n".join(lines),
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
+        "route_source": str(fast_path.get("route_source") or ""),
         "route_version": runtime_preflight.get("route_version", ""),
         "source_paths": tuple(initial_files),
         "product_scope": str(product_identity.get("product_scope") or "")
@@ -916,6 +956,8 @@ def _render_fast_response_context(
         "source_location": source_location,
         "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
         "direct_response": direct_response,
+        "answer_card": dict(answer_card) if isinstance(answer_card, dict) else {},
+        "contact_fact": dict(contact_fact) if isinstance(contact_fact, dict) else {},
         "fact_key": str(plan.get("fact_key") or ""),
         "expected_scalar_claims": tuple(
             str(item) for item in plan.get("expected_scalar_claims") or ()
