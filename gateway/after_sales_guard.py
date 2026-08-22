@@ -679,6 +679,7 @@ def prepare_after_sales_turn(
         ),
         product_variant=str(fast_result.get("product_variant") or ""),
         fast_path=bool(fast_context),
+        direct_response=str(fast_result.get("direct_response") or ""),
         route_id=str(fast_result.get("route_id") or match["facts"].get("workflow_id") or "facts"),
         route_version=str(fast_result.get("route_version") or ""),
         source_paths=tuple(
