@@ -45,6 +45,7 @@
     "gateway/active_host_fence.py",
     "gateway/after_sales_telemetry.py",
     "gateway/after_sales_guard.py",
+    "gateway/resolved_answer.py",
     "gateway/authz_mixin.py",
     "gateway/channel_directory.py",
     "gateway/config.py",
