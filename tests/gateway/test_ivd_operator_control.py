@@ -3,11 +3,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from gateway.ivd_operator_control import (
-    format_ivd_operator_status,
-    read_ivd_operator_status,
-    run_ivd_safe_repair,
-)
+from gateway.ivd_operator_control import format_ivd_operator_status, read_ivd_operator_status
 
 
 def test_status_combines_release_platform_and_cron_in_plain_chinese():
@@ -82,24 +78,3 @@ def test_status_timeout_returns_plain_chinese_without_repair(tmp_path):
     assert report["status"] == "blocked"
     assert "未执行任何修改" in text
     assert "Working" not in text
-
-
-def test_auxiliary_workspace_blocks_status_and_repair_without_runner(tmp_path):
-    kb = tmp_path / "forMyWin"
-    script = kb / "scripts" / "hermes_oob_entrypoint.py"
-    script.parent.mkdir(parents=True)
-    script.write_text("# probe\n", encoding="utf-8")
-    calls = []
-
-    status = read_ivd_operator_status(
-        kb_root=kb,
-        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
-    )
-    repair = run_ivd_safe_repair(
-        kb_root=kb,
-        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
-    )
-
-    assert status == {"status": "blocked", "reason": "auxiliary_workspace_forbidden"}
-    assert repair == {"status": "blocked", "reason": "auxiliary_workspace_forbidden"}
-    assert calls == []

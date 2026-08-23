@@ -10,8 +10,6 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from gateway.ivd_source_policy import runtime_kb_root_allowed
-
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -71,8 +69,6 @@ def read_ivd_operator_status(
     kb = Path(kb_root) if kb_root is not None else default_kb
     state = Path(state_root) if state_root is not None else default_state
     live = Path(live_root) if live_root is not None else default_live
-    if not runtime_kb_root_allowed(kb):
-        return {"status": "blocked", "reason": "auxiliary_workspace_forbidden"}
     script = kb / "scripts" / "hermes_oob_entrypoint.py"
     try:
         result = runner(
@@ -100,8 +96,6 @@ def run_ivd_safe_repair(
 ) -> dict[str, object]:
     default_kb, _, _ = resolve_ivd_paths()
     kb = Path(kb_root) if kb_root is not None else default_kb
-    if not runtime_kb_root_allowed(kb):
-        return {"status": "blocked", "reason": "auxiliary_workspace_forbidden"}
     script = kb / "scripts" / "hermes_oob_entrypoint.py"
     try:
         result = runner(

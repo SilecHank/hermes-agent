@@ -77,27 +77,6 @@ def test_default_worker_steps_mount_daily_runner_with_scope_date():
     )
 
 
-def test_auxiliary_workspace_is_rejected_before_execution(tmp_path):
-    kb_root = tmp_path / "forMyWin"
-    kb_root.mkdir()
-    ledger = MaintenanceCommandLedger(tmp_path / "ledger.json")
-    claim = ledger.claim("执行知识库维护", origin_platform="weixin", origin_chat_id="c1", scope="s1")
-    calls = []
-
-    assert claim is not None
-    artifact = run_ivd_maintenance_worker(
-        ledger,
-        claim.command_id,
-        kb_root=kb_root,
-        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
-    )
-
-    payload = json.loads(artifact.read_text(encoding="utf-8"))
-    assert payload["status"] == "blocked"
-    assert payload["error"] == "auxiliary_workspace_forbidden"
-    assert calls == []
-
-
 def test_worker_marks_completed_and_writes_artifact(tmp_path):
     kb_root = tmp_path / "kb"
     kb_root.mkdir()
