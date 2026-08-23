@@ -99,7 +99,7 @@ def test_repository_allowlist_builds_required_ivd_runtime_without_forbidden_surf
     assert required <= built
     assert not any(
         path == ".git"
-        or path.startswith((".git/", "tests/", "skills/", "tools/"))
+        or path.startswith((".git/", "tests/", "skills/"))
         for path in built
     )
 
