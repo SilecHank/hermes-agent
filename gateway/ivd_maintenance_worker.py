@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
 from gateway.maintenance_command_bus import MaintenanceCommandLedger
+from gateway.ivd_source_policy import runtime_kb_root_allowed
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,14 @@ def run_ivd_maintenance_worker(
         "status": "running",
         "steps": [],
     }
+
+    if not runtime_kb_root_allowed(root):
+        payload["finished_at"] = _utc_now()
+        payload["status"] = "blocked"
+        payload["error"] = "auxiliary_workspace_forbidden"
+        artifact.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        ledger.mark_failed(command_id, error="auxiliary_workspace_forbidden", artifact=str(artifact))
+        return artifact
 
     status = "completed"
     error = ""
