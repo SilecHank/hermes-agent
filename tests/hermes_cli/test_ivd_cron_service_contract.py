@@ -210,6 +210,17 @@ def test_launchd_install_ignores_malformed_unrelated_plist(monkeypatch, tmp_path
     assert target.exists()
 
 
+def test_launchd_install_ignores_unreadable_unrelated_symlink(monkeypatch, tmp_path):
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    (target.parent / "com.apple.example.plist").symlink_to("missing.plist")
+    _launchd_mocks(monkeypatch, target)
+
+    gateway_cli.launchd_install(force=True)
+
+    assert target.exists()
+
+
 def test_launchd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
     from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 

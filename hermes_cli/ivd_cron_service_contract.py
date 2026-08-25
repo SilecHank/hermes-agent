@@ -2059,9 +2059,11 @@ def _scan_service_scope(
                     raise OSError("service_definition_reader_invalid")
             except OSError as exc:
                 if kind == "launchd":
-                    raise IvdCronServiceDiscoveryError(
-                        "launchd_plist_unreadable", path
-                    ) from exc
+                    if _has_explicit_ivd_identity(name):
+                        raise IvdCronServiceDiscoveryError(
+                            "launchd_plist_unreadable", path
+                        ) from exc
+                    continue
                 if _suspicious_ivd_cron_name(name):
                     raise IndependentIvdCronServiceError(path)
                 continue
