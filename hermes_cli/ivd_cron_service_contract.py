@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import time
+from xml.parsers.expat import ExpatError
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,7 +116,7 @@ def _systemd_definition_is_independent_ivd_cron(name: str, text: str) -> bool:
 def _launchd_payload(name: str, text: str | bytes) -> dict[object, object]:
     try:
         payload = plistlib.loads(text.encode("utf-8") if isinstance(text, str) else text)
-    except (ValueError, TypeError, IndexError, plistlib.InvalidFileException) as exc:
+    except (ValueError, TypeError, IndexError, plistlib.InvalidFileException, ExpatError) as exc:
         raise IvdCronServiceDiscoveryError("launchd_plist_invalid", name) from exc
     if not isinstance(payload, dict):
         raise IvdCronServiceDiscoveryError("launchd_plist_invalid", name)
