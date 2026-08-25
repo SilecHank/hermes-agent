@@ -17479,6 +17479,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _profile = self._profile_name_for_source(context.source)
             except Exception:
                 _profile = ""
+        # A standalone profile gateway does not use multiplex profile routes,
+        # so ``_profile_name_for_source`` intentionally returns no route.  The
+        # process still has an authoritative active profile (for example the
+        # Telegram launchd instance runs with HERMES_HOME for profile
+        # ``telegram``).  Preserve that identity for session-scoped policy
+        # checks; otherwise the Telegram admin bit is always cleared before
+        # governed maintenance tools run.
+        if not _profile and context.source.platform == Platform.TELEGRAM:
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+
+                _profile = get_active_profile_name() or ""
+            except Exception:
+                _profile = ""
         _slash_policy = policy_for_source(getattr(self, "config", None), context.source)
         _ivd_admin = bool(
             context.source.platform == Platform.TELEGRAM
