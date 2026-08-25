@@ -177,6 +177,28 @@ def test_launchd_install_blocks_existing_independent_ivd_cron(monkeypatch, tmp_p
     assert not target.exists()
 
 
+def test_launchd_install_allows_exact_telegram_release_sync(monkeypatch, tmp_path):
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    telegram_sync = {
+        "Label": "ai.hermes.telegram-release-sync",
+        "ProgramArguments": [
+            "/usr/bin/python3", "/safe/hermes-telegram-release-sync",
+            "--ivd-remote", "/safe/ivd-remote",
+        ],
+        "StartInterval": 300,
+    }
+    import plistlib
+    (target.parent / "ai.hermes.telegram-release-sync.plist").write_bytes(
+        plistlib.dumps(telegram_sync)
+    )
+    _launchd_mocks(monkeypatch, target)
+
+    gateway_cli.launchd_install(force=True)
+
+    assert target.exists()
+
+
 def test_launchd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):
     from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
 

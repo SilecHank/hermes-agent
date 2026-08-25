@@ -160,6 +160,11 @@ def _launchd_definition_is_independent_ivd_cron(name: str, text: str | bytes) ->
     identity = f"{name} {label} {command_text}".lower()
     if "gateway run" in command_text or "gateway serve" in command_text:
         return False
+    if (
+        label == "ai.hermes.telegram-release-sync"
+        and "hermes-telegram-release-sync" in command_text
+    ):
+        return False
     periodic = any(key in payload for key in _LAUNCHD_PERIODIC_KEYS)
     return periodic and _has_explicit_ivd_identity(identity)
 
