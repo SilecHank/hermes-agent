@@ -158,6 +158,34 @@ def test_gateway_binds_ivd_admin_for_active_telegram_profile_without_multiplexin
     runner._clear_session_env(tokens)
 
 
+def test_gateway_does_not_bind_ivd_admin_for_non_telegram_active_profile(monkeypatch):
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = SimpleNamespace(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                extra={"allow_admin_from": ["owner"]},
+            )
+        }
+    )
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "default")
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        profile="",
+        chat_id="owner",
+        chat_type="private",
+        user_id="owner",
+    )
+    context = SessionContext(source=source, connected_platforms=[], home_channels={})
+
+    tokens = runner._set_session_env(context)
+    assert get_session_env("HERMES_SESSION_PROFILE") == "default"
+    assert get_session_env("HERMES_SESSION_IVD_ADMIN") == ""
+    runner._clear_session_env(tokens)
+
+
 def test_clear_session_env_restores_previous_state(monkeypatch):
     """_clear_session_env should restore contextvars to their pre-handler values."""
     runner = object.__new__(GatewayRunner)
