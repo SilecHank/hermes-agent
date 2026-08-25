@@ -17922,6 +17922,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _profile = self._profile_name_for_source(context.source)
             except Exception:
                 _profile = ""
+        # A standalone profile gateway does not use multiplex profile routes,
+        # so the source can legitimately arrive without a profile name.  Keep
+        # Telegram's governed admin context bound to the active Hermes profile
+        # instead of silently treating the session as an untrusted root profile.
+        if not _profile and context.source.platform == Platform.TELEGRAM:
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+                _profile = get_active_profile_name() or ""
+            except Exception:
+                _profile = ""
         _slash_policy = policy_for_source(getattr(self, "config", None), context.source)
         _ivd_admin = bool(
             context.source.platform == Platform.TELEGRAM
