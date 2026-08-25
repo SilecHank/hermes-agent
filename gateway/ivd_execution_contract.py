@@ -152,6 +152,7 @@ class AppendOnlyReceiptSink:
         destination: str | Path,
         *,
         release_root: str | Path,
+        receipt_root: str | Path | None = None,
     ) -> "AppendOnlyReceiptSink":
         if fcntl is None:
             raise IVDRuntimeConfigurationError(
@@ -164,18 +165,48 @@ class AppendOnlyReceiptSink:
             )
         try:
             canonical_release_root = Path(release_root).resolve(strict=False)
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            canonical_parent = target.parent.resolve(strict=True)
-            observability_root = (
-                canonical_release_root / "observability"
-            ).resolve(strict=True)
+            if receipt_root is None:
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                canonical_parent = target.parent.resolve(strict=True)
+                observability_root = (
+                    canonical_release_root / "observability"
+                ).resolve(strict=True)
+                expected_target = None
+            else:
+                raw_receipt_root = Path(receipt_root)
+                if not raw_receipt_root.is_absolute() or raw_receipt_root.is_symlink():
+                    raise IVDRuntimeConfigurationError(
+                        "receipt root must be absolute"
+                    )
+                canonical_receipt_root = raw_receipt_root.resolve(strict=True)
+                if canonical_receipt_root != raw_receipt_root:
+                    raise IVDRuntimeConfigurationError(
+                        "receipt root must not contain symlinks"
+                    )
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                canonical_parent = target.parent.resolve(strict=True)
+                observability_root = (
+                    canonical_receipt_root / "observability"
+                ).resolve(strict=True)
+                expected_target = (
+                    observability_root / "receipts/turn-receipts.jsonl"
+                ).resolve(strict=False)
         except OSError as error:
             raise IVDRuntimeConfigurationError(
                 "cannot prepare IVD receipt destination"
             ) from error
         if (
-            not observability_root.is_relative_to(canonical_release_root)
-            or not canonical_parent.is_relative_to(observability_root)
+            receipt_root is None
+            and (
+                not observability_root.is_relative_to(canonical_release_root)
+                or not canonical_parent.is_relative_to(observability_root)
+            )
+        ) or (
+            receipt_root is not None
+            and (
+                canonical_parent != expected_target.parent
+                or target.name != expected_target.name
+            )
         ):
             raise IVDRuntimeConfigurationError(
                 "receipt destination must be inside release observability"
@@ -485,6 +516,7 @@ def load_serving_projection(
         receipt_sink = AppendOnlyReceiptSink.open(
             canonical_serving["receipt_destination"],
             release_root=package_path.parent,
+            receipt_root=os.environ.get("IVD_RECEIPT_ROOT") or None,
         )
         canonical_serving["receipt_destination"] = receipt_sink
 

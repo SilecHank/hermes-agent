@@ -101,6 +101,30 @@ def test_loader_accepts_release_schema_and_keeps_only_serving_identity(tmp_path)
         prepared.execution_contract = None
 
 
+def test_loader_accepts_exact_profile_receipt_root_and_rejects_other_external_paths(
+    monkeypatch, tmp_path
+):
+    release = tmp_path / "release"
+    release.mkdir()
+    receipt_root = tmp_path / "telegram-state"
+    receipt_root.mkdir()
+    serving = _serving_projection(release)
+    serving["receipt_destination"] = str(
+        receipt_root / "observability/receipts/turn-receipts.jsonl"
+    )
+    monkeypatch.setenv("IVD_RECEIPT_ROOT", str(receipt_root))
+
+    projection = load_serving_projection(_write_release(release, serving=serving))
+
+    assert projection.package_digest == PACKAGE_DIGEST
+    execution_contracts._CACHE.clear()
+    serving["receipt_destination"] = str(
+        tmp_path / "other/observability/receipts/turn-receipts.jsonl"
+    )
+    with pytest.raises(IVDRuntimeConfigurationError, match="receipt destination"):
+        load_serving_projection(_write_release(release, serving=serving))
+
+
 def test_loader_accepts_compiler_manifest_envelope(tmp_path):
     manifest = _write_release(tmp_path)
     payload = json.loads(manifest.read_text(encoding="utf-8"))
