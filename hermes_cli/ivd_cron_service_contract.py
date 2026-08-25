@@ -2065,7 +2065,14 @@ def _scan_service_scope(
                 if _suspicious_ivd_cron_name(name):
                     raise IndependentIvdCronServiceError(path)
                 continue
-            if _definition_is_independent_ivd_cron(kind, name, raw):
+            try:
+                independent = _definition_is_independent_ivd_cron(kind, name, raw)
+            except IvdCronServiceDiscoveryError:
+                identity = f"{name} {raw[:4096].decode('utf-8', errors='ignore')}"
+                if kind == "launchd" and not _has_explicit_ivd_identity(identity):
+                    continue
+                raise
+            if independent:
                 raise IndependentIvdCronServiceError(path)
     except (IndependentIvdCronServiceError, IvdCronServiceDiscoveryError):
         raise
