@@ -5374,8 +5374,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Render a clarify prompt with one inline button per choice.
 
         Multi-choice mode (``choices`` non-empty): renders one button per
-        option plus a final "✏️ Other (type answer)" button.  Picking the
-        "Other" button flips the entry into text-capture mode so the next
+        option plus a final "其他（自行输入）" button.  Picking that button
+        flips the entry into text-capture mode so the next
         message becomes the response.
 
         Open-ended mode (``choices`` empty): renders the question as plain
@@ -5386,7 +5386,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            text = f"❓ {_html.escape(question)}"
+            text = _html.escape(question)
             thread_id = self._metadata_thread_id(metadata)
 
             if choices:
@@ -5420,7 +5420,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     ])
                 rows.append([
                     InlineKeyboardButton(
-                        "✏️ Other (type answer)",
+                        "其他（自行输入）",
                         callback_data=f"cl:{clarify_id}:other",
                     )
                 ])

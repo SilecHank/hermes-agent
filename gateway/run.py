@@ -22799,7 +22799,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 wait_notice = safe_schedule_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
-                        "⏸️ 等待回复 — 请直接回答上方问题；收到后会继续原任务。",
+                        "等待回复：请直接回答上方问题，收到后会继续原任务。",
                         metadata=_non_conversational_metadata(
                             _status_thread_metadata,
                             platform=source.platform,

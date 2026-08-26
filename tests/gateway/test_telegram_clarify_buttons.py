@@ -77,6 +77,11 @@ class TestTelegramSendClarify:
     def setup_method(self):
         _clear_clarify_state()
 
+    def test_gateway_wait_notice_is_plain_chinese(self):
+        source = (_repo and Path(_repo) / "gateway" / "run.py").read_text(encoding="utf-8")
+        assert "等待回复：请直接回答上方问题，收到后会继续原任务。" in source
+        assert "⏸️ 等待回复" not in source
+
     @pytest.mark.asyncio
     async def test_multi_choice_renders_buttons_and_other(self):
         adapter = _make_adapter()
@@ -84,13 +89,23 @@ class TestTelegramSendClarify:
         mock_msg.message_id = 100
         adapter._bot.send_message = AsyncMock(return_value=mock_msg)
 
-        result = await adapter.send_clarify(
-            chat_id="12345",
-            question="Which option?",
-            choices=["alpha", "beta", "gamma"],
-            clarify_id="cid1",
-            session_key="sk1",
-        )
+        button_calls = []
+
+        def capture_button(text, **kwargs):
+            button_calls.append((text, kwargs))
+            return MagicMock()
+
+        with patch(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            side_effect=capture_button,
+        ):
+            result = await adapter.send_clarify(
+                chat_id="12345",
+                question="Which option?",
+                choices=["alpha", "beta", "gamma"],
+                clarify_id="cid1",
+                session_key="sk1",
+            )
 
         assert result.success is True
         assert result.message_id == "100"
@@ -102,6 +117,10 @@ class TestTelegramSendClarify:
         assert "1. alpha" in kwargs["text"]
         assert "2. beta" in kwargs["text"]
         assert "3. gamma" in kwargs["text"]
+        assert not kwargs["text"].startswith("❓")
+        assert button_calls[-1][0] == "其他（自行输入）"
+        assert "Other" not in button_calls[-1][0]
+        assert "✏️" not in button_calls[-1][0]
         # InlineKeyboardMarkup with N+1 buttons (3 choices + Other)
         markup = kwargs["reply_markup"]
         assert markup is not None
