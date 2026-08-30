@@ -725,6 +725,17 @@ class TestWeixinBlankMessagePrevention:
         )
         assert adapter._split_text("") == []
 
+    def test_short_cron_digest_stays_in_one_bubble(self):
+        adapter = _make_adapter()
+        content = (
+            "专家待确认周报 2026-08-24 至 2026-08-30\n"
+            "三平台 QA 42 条，待确认 0 条。\n"
+            "完整内容已保留在本地，未发送文件。\n"
+            "本周没有新的专家待确认条目。\n"
+            "以后有空回复通过/不通过/改成这样即可。"
+        )
+        assert adapter._split_text(content) == [content]
+
     @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
     def test_send_empty_content_does_not_call_send_message(self, send_message_mock):
         adapter = _make_adapter()
