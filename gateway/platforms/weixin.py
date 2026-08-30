@@ -850,6 +850,11 @@ def _should_split_short_chat_block_for_weixin(block: str) -> bool:
     lines = [line for line in block.splitlines() if line.strip()]
     if not 2 <= len(lines) <= 6:
         return False
+    # Scheduled reports and review digests are one logical payload, even
+    # when each line is short. Keep them in one bubble unless oversized.
+    report_markers = ("周报", "日报", "摘要", "知识沉淀", "待确认", "待审核")
+    if any(marker in lines[0] for marker in report_markers):
+        return False
     if _looks_like_heading_line_for_weixin(lines[0]):
         return False
     return all(_looks_like_chatty_line_for_weixin(line) for line in lines)
