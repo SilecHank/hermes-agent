@@ -209,6 +209,53 @@ def test_runner_valid_turn_validator_and_receipt_each_run_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_exclusive_zero_model_answer_returns_persistable_turn(monkeypatch):
+    config = {
+        "after_sales_guard": {
+            "enabled": True,
+            "platforms": ["wecom"],
+        }
+    }
+
+    class Agent:
+        def __init__(self, **kwargs):
+            raise AssertionError("exclusive package answer must not construct agent")
+
+    _install_runtime(monkeypatch, config, Agent)
+    runner = _runner()
+    exclusive = SimpleNamespace(
+        text="50 uL.",
+        dispatch_count=1,
+        final_validation_count=1,
+        model_calls=0,
+        answer_shape="scalar",
+        product_scope="WES",
+        product_variant="V5",
+        source_paths=(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_ivd_lifecycle",
+        lambda *_args, **_kwargs: (None, exclusive),
+    )
+
+    result = await runner._run_agent(
+        "WES文库纯化磁珠加多少？",
+        "",
+        [],
+        _source(Platform.WECOM),
+        "session",
+        session_key="agent:main:wecom:group:test",
+    )
+
+    assert result["messages"] == [
+        {"role": "user", "content": "WES文库纯化磁珠加多少？"},
+        {"role": "assistant", "content": "50 uL."},
+    ]
+    assert result["agent_persisted"] is False
+
+
+@pytest.mark.asyncio
 async def test_real_run_sync_blocks_missing_projection_before_agent(monkeypatch):
     class Agent:
         def __init__(self, **kwargs):

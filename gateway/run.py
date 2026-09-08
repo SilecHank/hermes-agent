@@ -21946,7 +21946,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 return {
                     "final_response": final_response,
-                    "messages": [],
+                    "messages": [
+                        {"role": "user", "content": str(message or "")},
+                        {"role": "assistant", "content": final_response},
+                    ],
+                    "history_offset": 0,
+                    "agent_persisted": False,
                     "completed": True,
                     "api_calls": _after_sales_turn.model_calls,
                     "tools": [],
