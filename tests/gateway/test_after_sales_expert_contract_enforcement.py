@@ -57,7 +57,7 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             self.assertEqual("block", result["preflight_decision"])
             self.assertEqual("stop_before_answer_generation", result["preflight_action"])
 
-    def test_pending_evidence_remains_available_for_controlled_retrieval(self):
+    def test_pending_evidence_also_stops_unverified_rendering(self):
         plan = {
             "runtime_preflight": {"eligible": True, "route_version": "test"},
             "answer_template": {"style": "short_first"},
@@ -85,8 +85,11 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
                 match=None,
             )
 
-        self.assertEqual("scalar_lookup", result["answer_shape"])
-        self.assertEqual("allow", result["preflight_decision"])
+        self.assertTrue(result["direct_response"])
+        self.assertIn("暂不输出未经核实的正式数值结论", result["direct_response"])
+        self.assertEqual("clarification", result["answer_shape"])
+        self.assertEqual("block", result["preflight_decision"])
+        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
 
 
 if __name__ == "__main__":

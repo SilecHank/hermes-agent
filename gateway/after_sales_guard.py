@@ -941,7 +941,7 @@ def _render_fast_response_context(
     contract_guarded = False
     contract_status = str(expert_contract.get("status") or "")
     if (
-        contract_status in {"clarification", "blocked"}
+        contract_status in {"clarification", "pending_evidence", "blocked"}
         and not expert_contract.get("formal_answer_allowed", False)
         and not expert_contract.get("bounded_expert_answer_allowed", False)
     ):
