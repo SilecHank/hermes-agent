@@ -203,7 +203,9 @@ class AfterSalesTurn:
             return {
                 "ok": False,
                 "reasons": ["scalar_claim_not_unique"],
-                "fallback": "当前问题需要唯一数值，但草稿中未形成唯一的已核实数值。",
+                "fallback": build_source_validation_fallback(
+                    self, "scalar_claim_not_unique"
+                ),
             }
         if self.expected_scalar_claims:
             expected = {
@@ -277,6 +279,13 @@ def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
         )
     if reason == "unsupported_numeric_claim":
         return "当前数值与已核实的正式来源不一致，已停止发送该数值结论。"
+    if reason == "scalar_claim_not_unique":
+        scope = turn.product_scope or "当前产品"
+        variant = f" {turn.product_variant}" if turn.product_variant else ""
+        return (
+            f"已读取{scope}{variant}的正式资料，但当前提问对应的数值还不能绑定到唯一的实验步骤。"
+            "请补充样本类型、提取或建库方法，以及具体步骤；我会按步骤重新核对后再给出一个数值。"
+        )
     return "当前未能完成正式来源核实，暂不提供未经核实的数值结论。"
 
 
@@ -937,6 +946,33 @@ def _render_fast_response_context(
         lines.append("已解析联系人事实卡，直接采用卡内当前值，不再全文检索或自行推测。")
     elif direct_response and answer_card:
         lines.append("已解析正式答案卡，直接采用卡内当前值，不再重复检索或调用模型。")
+    expert_contract = plan.get("expert_route_contract") or {}
+    contract_guarded = False
+    contract_status = str(expert_contract.get("status") or "")
+    if (
+        contract_status in {"clarification", "pending_evidence", "blocked"}
+        and not expert_contract.get("formal_answer_allowed", False)
+        and not expert_contract.get("bounded_expert_answer_allowed", False)
+    ):
+        # A contract that has not reached a serving-safe evidence tier must
+        # stop before the general model can turn retrieved draft text into a
+        # formal-looking numeric answer.
+        direct_response = (
+            "当前已进入专家检索，但该问题缺少可决定结论的上下文或正式证据，"
+            "暂不输出未经核实的正式数值结论。请补充产品版本、SOP编号及实验阶段，"
+            "例如首次建库/第一管还是重建库/复检。"
+        )
+        contract_guarded = True
+        answer_shape = {"answer_shape": "clarification"}
+        fast_path = {
+            **fast_path,
+            "direct_response": direct_response,
+            "answer_shape": "clarification",
+            "route_source": "expert_contract_guard",
+            "stop_after_fast_path": True,
+            "numeric_fast_answer_allowed": False,
+        }
+        lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
     return {
         "context": "\n".join(lines),
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
@@ -949,9 +985,18 @@ def _render_fast_response_context(
         "product_variant": str(product_identity.get("product_variant") or "")
         if product_identity.get("product_scope_confirmed")
         else "",
-        "preflight_decision": str(gate.get("decision") or ""),
-        "preflight_action": _canonical_preflight_action(gate),
-        "preflight_issues": tuple(str(item) for item in (gate.get("issues") or ())),
+        "preflight_decision": "block" if contract_guarded else str(gate.get("decision") or ""),
+        "preflight_action": (
+            "stop_before_answer_generation"
+            if contract_guarded
+            else _canonical_preflight_action(gate)
+        ),
+        "preflight_issues": tuple(
+            dict.fromkeys(
+                [str(item) for item in (gate.get("issues") or ())]
+                + (["expert_route_contract_not_ready"] if contract_guarded else [])
+            )
+        ),
         "answer_contract": answer_contract,
         "source_location": source_location,
         "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
