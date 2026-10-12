@@ -203,7 +203,9 @@ class AfterSalesTurn:
             return {
                 "ok": False,
                 "reasons": ["scalar_claim_not_unique"],
-                "fallback": "当前问题需要唯一数值，但草稿中未形成唯一的已核实数值。",
+                "fallback": build_source_validation_fallback(
+                    self, "scalar_claim_not_unique"
+                ),
             }
         if self.expected_scalar_claims:
             expected = {
@@ -277,6 +279,13 @@ def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
         )
     if reason == "unsupported_numeric_claim":
         return "当前数值与已核实的正式来源不一致，已停止发送该数值结论。"
+    if reason == "scalar_claim_not_unique":
+        scope = turn.product_scope or "当前产品"
+        variant = f" {turn.product_variant}" if turn.product_variant else ""
+        return (
+            f"已读取{scope}{variant}的正式资料，但当前提问对应的数值还不能绑定到唯一的实验步骤。"
+            "请补充样本类型、提取或建库方法，以及具体步骤；我会按步骤重新核对后再给出一个数值。"
+        )
     return "当前未能完成正式来源核实，暂不提供未经核实的数值结论。"
 
 
