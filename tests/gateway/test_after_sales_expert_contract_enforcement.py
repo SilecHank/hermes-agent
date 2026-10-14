@@ -91,6 +91,24 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         self.assertEqual("block", result["preflight_decision"])
         self.assertEqual("stop_before_answer_generation", result["preflight_action"])
 
+    def test_file_lookup_guard_does_not_ask_numeric_stage_or_known_version(self):
+        from tempfile import TemporaryDirectory
+        plan={"runtime_preflight":{"eligible":True},
+              "answer_shape":{"answer_shape":"direct_fact"},
+              "answer_contract":{"deliverable":"direct_answer"},
+              "context_envelope":{"product_line":"PMseq","product_version":"V5","workflow_step":"建库"},
+              "expert_route_contract":{"status":"clarification","formal_answer_allowed":False,
+                                        "bounded_expert_answer_allowed":False}}
+        with TemporaryDirectory() as root:
+            path=_load_fast_module(Path(root)/"scripts/hermes_fast_response_pipeline.py",plan)
+            result=_render_fast_response_context({"fast_response_module":str(path)},
+                       message="PMseq RNA V5 建库SOP在哪里",match=None)
+        self.assertEqual("block",result["preflight_decision"])
+        self.assertEqual("stop_before_answer_generation",result["preflight_action"])
+        self.assertNotIn("数值",result["direct_response"])
+        self.assertNotIn("请补充",result["direct_response"])
+        self.assertNotIn("首次建库",result["direct_response"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -472,3 +472,22 @@ def test_symlinked_member_ancestor_is_rejected(package: Path):
 
     with pytest.raises(PackageIntegrityError, match="package member invalid"):
         IVDKnowledgeEngine(package)
+
+
+def test_presentation_is_checked_by_the_existing_final_validator(package: Path):
+    engine = IVDKnowledgeEngine(package)
+    seen = []
+    def present(text,sources):
+        seen.append(sources)
+        return text + " 来源：" + sources[0].document
+    try:
+        result = engine.execute(question="无创提取需要多少血浆？",presentation_formatter=present)
+        assert result.text.startswith("200 uL.")
+        assert "SOP-JL-001" in result.text
+        assert len(seen)==1
+        assert result.model_calls==0
+        with pytest.raises(PackageIntegrityError,match="internal_instruction_leak"):
+            engine.execute(question="无创提取需要多少血浆？",
+                           presentation_formatter=lambda text,sources: text + " fast_path")
+    finally:
+        engine.close()
