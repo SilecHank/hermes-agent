@@ -491,3 +491,43 @@ def test_presentation_is_checked_by_the_existing_final_validator(package: Path):
                            presentation_formatter=lambda text,sources: text + " fast_path")
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize('lookup', ['exact', 'semantic'])
+def test_method_scoped_parameter_does_not_answer_unconfirmed_method(package, monkeypatch, lookup):
+    from types import SimpleNamespace
+    with IVDKnowledgeEngine(package) as engine:
+        hit = engine._exact_registry('无创提取需要多少血浆', 'NIFTY', '标准版', '', 'parameter')
+        hit.conditions_json = '{"method":"manual_extraction"}'
+        monkeypatch.setattr(engine, '_exact_registry', lambda *args: hit if lookup == 'exact' else None)
+        monkeypatch.setattr(engine, '_semantic_registry', lambda *args: hit)
+        result = engine.execute(question='无创提取需要多少血浆', product_line='NIFTY',
+            knowledge_type='parameter', answer_shape='scalar', allow_index_transaction=lookup=='semantic')
+        assert result.outcome == 'clarification'
+        assert '方法' in result.text
+        assert '200' not in result.text
+        assert result.model_calls == 0
+
+
+@pytest.mark.parametrize('lookup', ['exact', 'semantic'])
+def test_method_scoped_parameter_allows_explicit_matching_method(package, monkeypatch, lookup):
+    with IVDKnowledgeEngine(package) as engine:
+        hit = engine._exact_registry('无创提取需要多少血浆', 'NIFTY', '标准版', '', 'parameter')
+        hit.conditions_json = '{"method":"manual_extraction"}'
+        monkeypatch.setattr(engine, '_exact_registry', lambda *args: hit if lookup == 'exact' else None)
+        monkeypatch.setattr(engine, '_semantic_registry', lambda *args: hit)
+        result = engine.execute(question='无创手工提取需要多少血浆', product_line='NIFTY',
+            knowledge_type='parameter', answer_shape='scalar', allow_index_transaction=lookup=='semantic')
+        assert result.outcome == 'answer'
+        assert '200' in result.text
+        assert result.model_calls == 0
+
+
+def test_method_scope_rejection_does_not_hide_non_serving_hit(package, monkeypatch):
+    with IVDKnowledgeEngine(package) as engine:
+        hit = engine._exact_registry('无创提取需要多少血浆', 'NIFTY', '标准版', '', 'parameter')
+        hit.conditions_json = '{"method":"manual_extraction"}'
+        hit.effective_status = 'pending_verify'
+        monkeypatch.setattr(engine, '_exact_registry', lambda *args: hit)
+        with pytest.raises(PackageIntegrityError, match='non_serving_knowledge'):
+            engine.execute(question='无创提取需要多少血浆', product_line='NIFTY',knowledge_type='parameter',answer_shape='scalar')

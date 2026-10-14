@@ -17,3 +17,13 @@ Agent 同步修改普通/专家提示入口、package 直出及澄清、legacy �
 两个本地候选 worktree 分支均为 feat/expression-contract-20261014。没有 push、PR、merge、部署、正式知识晋升、阈值改动、主备切换或定时监听。后续产品审查通过后另行申请发布，走双仓库固定提交、完整 R6 发布门禁及既有回滚路径。48–72 小时仅为未来真实观察窗口，未创建自动任务。
 
 独立审查：expression_final_spec APPROVED；expression_final_quality 在修复旧展示 API 来源附加兼容问题后 APPROVED。审查结论覆盖代码，不等同业务效果验收。
+
+## 2026-10-15 产品追加审查：本地修正，验收仍未通过
+
+已修复前置阻断覆盖具体澄清，以及未确认方法却采用方法限定数值卡；Agent package exact/semantic 最终门禁同步隔离。补齐明确方法控制和未确认方法澄清回放，不改 SDK 样本答案。Agent 716 项通过；KB 相关 187 项通过，fixture 测试 18 项通过；产品路由 31/31、任务契约 16/16。完整 CI 149 项仍有 2 个发布审计失败；旧治理测试 3 项失败；3 个 WSL validator 依赖测试待验，不能自动豁免。
+
+原 10 组 SDK 输入确与前一候选固定提交一致；此次不重跑付费模型，第 6 组改为零模型澄清。未宣称生产错误或业务验收成功。方法匹配仍为词面家族，否定/不确定语义及跨轮已确认方法需后续审查。
+
+导航/附件/上下文先交诊断和范围选项，未实施权限或会话架构变化：hybrid 丢弃 SOP 导航结果；SOP501 有受管导航/原件元数据而非参数通行权；生育工作簿实际含 NIFTY 所需配置，静态工具及平台具有文件读取/生成基础和发送能力，原 SDK 能力否认不成立。legacy 缺 typed confirmed context 提供者，禁止从全历史猜产品。
+
+完整报告与证据位于 /Users/slim/IVD-maintenance-reports/2026-10-14/expression-product-review-followup-20261015.md。状态仍为本地 candidate_only、未发布。

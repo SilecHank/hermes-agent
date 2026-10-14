@@ -203,3 +203,12 @@ def test_compatible_card_without_new_display_api_keeps_valid_direct_answer(tmp_p
     assert result['final_response']=='200 uL.'
     assert not result['preflight_blocked']
     assert result['api_calls']==0
+
+
+def test_blocked_expert_contract_preserves_specific_clarification():
+    turn = AfterSalesTurn(context='', facts={}, validator=None, allowed_numeric_claims=(),
+        preflight_decision='block', preflight_issues=('expert_route_contract_not_ready',),
+        direct_response='已确认产品与版本；需要核对对应受控来源。')
+    result = build_preflight_block_result(turn, '已指定产品版本的问题')
+    assert result['final_response'] == turn.direct_response
+    assert result['api_calls'] == 0

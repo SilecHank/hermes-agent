@@ -309,6 +309,8 @@ def build_preflight_block_result(
         "当前检索计划包含待验证或非正式来源，暂不能据此给出结论。"
         "请补充产品名称、版本或SOP编号，我会改用正式来源继续核实。"
     )
+    if "expert_route_contract_not_ready" in turn.preflight_issues and turn.direct_response:
+        fallback = turn.direct_response
     present = getattr(turn, "present_text", None)
     fallback = present(fallback) if callable(present) else fallback
     return {

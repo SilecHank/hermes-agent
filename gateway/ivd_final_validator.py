@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
 from typing import Mapping
 
 
@@ -47,6 +49,26 @@ def validate_final_response(
         status = str(getattr(hit, "effective_status", "") or "").lower()
         if status != "active" or status in NON_SERVING_STATUSES:
             reasons.append("non_serving_knowledge")
+        if str(getattr(hit, "knowledge_kind", "")) == "parameter":
+            try:
+                conditions = json.loads(str(getattr(hit, "conditions_json", "{}")))
+            except (ValueError, TypeError):
+                conditions = None
+            if not isinstance(conditions, Mapping):
+                reasons.append("parameter_conditions_invalid")
+            else:
+                patterns = {
+                    "manual": r"手工|手动|\bmanual(?:_\w+)?\b",
+                    "automatic": r"自动(?:化)?|纳磁|\bautomatic(?:_\w+)?\b|\bautomated(?:_\w+)?\b",
+                }
+                required = {name for name, pattern in patterns.items()
+                            if re.search(pattern, str(conditions.get("method") or ""), re.I)}
+                requested = {name for name, pattern in patterns.items()
+                             if re.search(pattern, str(contract.get("question") or ""), re.I)}
+                if required and not requested:
+                    reasons.append("method_scope_required")
+                elif required and required != requested:
+                    reasons.append("method_scope_mismatch")
         if answer_shape == "scalar" and any(
             not str(getattr(hit, field, "") or "").strip() for field in SOURCE_FIELDS
         ):

@@ -1006,6 +1006,7 @@ class IVDKnowledgeEngine:
                       if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or hit.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 0,
@@ -1013,6 +1014,12 @@ class IVDKnowledgeEngine:
                 effect_receipt=receipt,
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        "请确认提取或实验方法；现有正式参数仅适用于来源所规定的方法。",
+                        "clarification", "clarification", 0,
+                        int(receipt.get("index_transactions") or 0), 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 0, 0, 0,
@@ -1085,6 +1092,7 @@ class IVDKnowledgeEngine:
                       if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or fuzzy.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 1,
@@ -1095,6 +1103,12 @@ class IVDKnowledgeEngine:
                 },
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        "请确认提取或实验方法；现有正式参数仅适用于来源所规定的方法。",
+                        "clarification", "clarification", 0,
+                        1, 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,
