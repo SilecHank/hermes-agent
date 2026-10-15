@@ -725,15 +725,23 @@ def _wrap_copy_friendly_lines_for_weixin(content: str) -> str:
             wrapped.append(line)
             continue
 
+        from gateway.platforms.helpers import protected_reference_spans
+        marker = "\ue000"
+        while marker in line:
+            marker += "\ue000"
+        protected = line
+        for start, end in reversed(protected_reference_spans(line)):
+            token = line[start:end].replace(" ", marker).replace("\t", marker + "t")
+            protected = protected[:start] + token + protected[end:]
         wrapped_lines = textwrap.wrap(
-            line,
+            protected,
             width=WEIXIN_COPY_LINE_WIDTH,
             break_long_words=False,
             break_on_hyphens=False,
             replace_whitespace=False,
             drop_whitespace=True,
         )
-        wrapped.extend(wrapped_lines or [line])
+        wrapped.extend(part.replace(marker + "t", "\t").replace(marker, " ") for part in (wrapped_lines or [line]))
 
     return "\n".join(wrapped).strip()
 

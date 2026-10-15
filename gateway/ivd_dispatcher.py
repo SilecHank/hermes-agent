@@ -10,7 +10,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 _VOCABULARY_MEMBER = "indexes/dispatch-vocabulary-v1.json"
@@ -384,10 +384,13 @@ class IVDDispatcher:
         question: str,
         context: str = "",
         evidence: Mapping[str, object] | None = None,
+        presentation_formatter: Callable[[str, tuple[object, ...]], str] | None = None,
     ) -> DispatchOutcome:
         envelope = self.dispatch(question, context=context)
         if envelope.clarifying_questions:
             return DispatchOutcome(envelope=envelope, result=None)
+        presentation_options = ({"presentation_formatter": presentation_formatter}
+                                if presentation_formatter is not None else {})
         result = engine.execute(
             question=question,
             product_line=envelope.product_line or "",
@@ -397,5 +400,6 @@ class IVDDispatcher:
             answer_shape=envelope.answer_shape,
             evidence=dict(evidence or {}),
             allow_index_transaction=envelope.indexed_retrieval_budget > 0,
+            **presentation_options,
         )
         return DispatchOutcome(envelope=envelope, result=result)

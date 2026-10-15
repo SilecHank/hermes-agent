@@ -2341,6 +2341,8 @@ def _prepare_gateway_ivd_boundary(
             prepared,
             question=message,
             history=history,
+            platform=platform,
+            fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
         )
     if mode == "hybrid":
         from gateway.ivd_hybrid_router import decide_hybrid_route
@@ -2350,6 +2352,8 @@ def _prepare_gateway_ivd_boundary(
                 prepared,
                 question=message,
                 history=history,
+                platform=platform,
+                fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
             )
         except Exception:
             exclusive = None
@@ -3657,6 +3661,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 prepared,
                 question=message,
                 history=history,
+                platform=platform,
+                fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
             )
             shape = getattr(exclusive, "answer_shape", None)
             if shape not in ("fallback_request", "clarification"):
@@ -3675,6 +3681,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     prepared,
                     question=message,
                     history=history,
+                    platform=platform,
+                    fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
                 )
             except Exception:
                 exclusive = None
@@ -22050,10 +22058,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 api_calls=0,
                                 tool_names=(),
                                 source_paths=_after_sales_turn.source_paths,
-                                validation_status="pass",
+                                validation_status="pass" if not _direct_result.get("preflight_blocked") else "preflight_blocked",
                                 question_text=_ivd_question_text,
                                 answer_shape=_after_sales_turn.answer_shape,
-                                verified_fact_reuse="active_hit",
+                                verified_fact_reuse="active_hit" if _direct_result.get("verified_fact_reused") else "off",
                             )
                             _guard_config = user_config.get("after_sales_guard") or {}
                             append_runtime_event(
@@ -23314,6 +23322,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            if _after_sales_turn is not None and hasattr(_after_sales_turn, "present_text"):
+                final_response = _after_sales_turn.present_text(str(final_response or ""))
+                result["final_response"] = final_response
             _validation_status = "not_applicable"
 
             # Extract actual token counts from the agent instance used for this run

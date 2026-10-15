@@ -11,7 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import quote
 from pathlib import PurePosixPath
 
@@ -948,6 +948,7 @@ class IVDKnowledgeEngine:
         answer_shape: str = "",
         evidence: Mapping[str, object] | None = None,
         allow_index_transaction: bool = False,
+        presentation_formatter: Callable[[str, tuple[SourceReference, ...]], str] | None = None,
     ) -> ExecutionResult:
         with self._lock:
             if self._closed:
@@ -961,6 +962,7 @@ class IVDKnowledgeEngine:
                 answer_shape=answer_shape,
                 evidence=evidence,
                 allow_index_transaction=allow_index_transaction,
+                presentation_formatter=presentation_formatter,
             )
 
     def _execute(
@@ -974,6 +976,7 @@ class IVDKnowledgeEngine:
         answer_shape: str = "",
         evidence: Mapping[str, object] | None = None,
         allow_index_transaction: bool = False,
+        presentation_formatter: Callable[[str, tuple[SourceReference, ...]], str] | None = None,
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
@@ -999,9 +1002,11 @@ class IVDKnowledgeEngine:
                 "filesystem_scans": 0,
             }
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, (rendered.source,) if rendered.source else ())
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or hit.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 0,
@@ -1009,6 +1014,12 @@ class IVDKnowledgeEngine:
                 effect_receipt=receipt,
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        "请确认提取或实验方法；现有正式参数仅适用于来源所规定的方法。",
+                        "clarification", "clarification", 0,
+                        int(receipt.get("index_transactions") or 0), 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 0, 0, 0,
@@ -1030,8 +1041,14 @@ class IVDKnowledgeEngine:
             rendered = self._renderer.render_diagnostic(diagnostic)
             if answer_shape and rendered.answer_shape != answer_shape:
                 raise PackageIntegrityError("answer_shape_mismatch")
+            sources = tuple(
+                source_reference_from_mapping(source)
+                for source in diagnostic["pattern"].get("formal_source_ids", [])
+                if isinstance(source, Mapping)
+            )
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, sources)
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or str(diagnostic["pattern"].get("product_line") or ""),
                     "known_product_lines": self._known_product_lines,
@@ -1047,11 +1064,6 @@ class IVDKnowledgeEngine:
             )
             if not decision.allowed:
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
-            sources = tuple(
-                source_reference_from_mapping(source)
-                for source in diagnostic["pattern"].get("formal_source_ids", [])
-                if isinstance(source, Mapping)
-            )
             return ExecutionResult(
                 decision.text, rendered.answer_shape, str(diagnostic["outcome"]),
                 0, 0, 0, int(diagnostic.get("effect_count") or 0),
@@ -1076,9 +1088,11 @@ class IVDKnowledgeEngine:
             if answer_shape and rendered.answer_shape != answer_shape:
                 raise PackageIntegrityError("answer_shape_mismatch")
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, (rendered.source,) if rendered.source else ())
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or fuzzy.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 1,
@@ -1089,6 +1103,12 @@ class IVDKnowledgeEngine:
                 },
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        "请确认提取或实验方法；现有正式参数仅适用于来源所规定的方法。",
+                        "clarification", "clarification", 0,
+                        1, 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,

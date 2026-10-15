@@ -52,6 +52,7 @@ class ExclusiveIVDResult:
     ambiguities: tuple[str, ...] = ()
     dispatch_count: int = 1
     final_validation_count: int = 1
+    presentation_contract: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -195,6 +196,8 @@ def execute_exclusive_ivd_turn(
     question: str,
     history: list[dict[str, Any]] | None = None,
     evidence: Mapping[str, object] | None = None,
+    platform: str = "generic",
+    fast_response_module: str = "",
 ) -> ExclusiveIVDResult:
     """Run the immutable package without constructing any legacy answer plane."""
     if prepared is None:
@@ -210,6 +213,18 @@ def execute_exclusive_ivd_turn(
     package_digest = str(
         getattr(prepared.execution_contract, "package_digest", "") or ""
     )
+    from gateway.after_sales_guard import _load_presentation_policy
+    presentation_module, presentation = _load_presentation_policy(
+        fast_response_module, platform=platform)
+
+    def present(text: str, sources=()) -> str:
+        policy = {**presentation, "verified_sources": [
+            {"document": getattr(source, "document", ""),
+             "version": getattr(source, "version", ""),
+             "locator": getattr(source, "locator", "")} for source in sources
+        ]}
+        return presentation_module.prepare_user_text(text, policy) if presentation_module else text
+
     dispatcher = IVDDispatcher(package_root)
     context_budget = int(projection.get("context_budget") or 0)
     recent_context = _bounded_user_context(
@@ -222,6 +237,7 @@ def execute_exclusive_ivd_turn(
             question=_strip_gateway_internal_prefix(question),
             context=recent_context,
             evidence=evidence,
+            **({"presentation_formatter": present} if presentation_module is not None else {}),
         )
         logger.info(
             "IVD dispatch diagnostic: question=%r context=%r intent=%s product=%s "
@@ -242,7 +258,8 @@ def execute_exclusive_ivd_turn(
             questions = tuple(outcome.envelope.clarifying_questions)
             text = questions[0] if questions else "请补充产品名称、版本或SOP编号。"
             return ExclusiveIVDResult(
-                text=text,
+                text=present(text),
+                presentation_contract=presentation,
                 answer_shape="clarification",
                 outcome="clarification",
                 model_calls=0,
@@ -264,7 +281,9 @@ def execute_exclusive_ivd_turn(
                 "IVD index-transaction budget exceeded"
             )
         return ExclusiveIVDResult(
-            text=str(result.text),
+            text=(str(result.text) if str(result.answer_shape) in {"scalar", "diagnostic", "process", "rule", "contact", "evidence"}
+                  else present(str(result.text))),
+            presentation_contract=presentation,
             answer_shape=str(result.answer_shape),
             outcome=str(result.outcome),
             model_calls=int(result.model_calls),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -68,6 +69,16 @@ class AfterSalesTurn:
     source_locator: str = ""
     source_revisions: dict[str, str] = field(default_factory=dict)
     evidence_sidecar_enabled: bool = False
+    presentation_contract: dict[str, Any] = field(default_factory=dict)
+    presentation_module_path: str = ""
+
+    def present_text(self, text: str) -> str:
+        if not self.presentation_module_path or not self.presentation_contract:
+            return text
+        path = Path(self.presentation_module_path)
+        module = _load_module(str(path), path.stat().st_mtime_ns)
+        return module.prepare_user_text(text, self.presentation_contract)
+
 
     def __post_init__(self) -> None:
         if self.resolved_answer is None and self.direct_response:
@@ -298,7 +309,12 @@ def build_preflight_block_result(
         "当前检索计划包含待验证或非正式来源，暂不能据此给出结论。"
         "请补充产品名称、版本或SOP编号，我会改用正式来源继续核实。"
     )
+    if "expert_route_contract_not_ready" in turn.preflight_issues and turn.direct_response:
+        fallback = turn.direct_response
+    present = getattr(turn, "present_text", None)
+    fallback = present(fallback) if callable(present) else fallback
     return {
+        "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
         "final_response": fallback,
         "messages": [
             {"role": "user", "content": str(message or "")},
@@ -320,11 +336,21 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
     """Build the standard zero-model result for an exact active fact hit."""
     if not turn.direct_response:
         raise ValueError("direct fact result requires a validated response")
+    present = getattr(turn, "present_text", None)
+    try:
+        text = present(turn.direct_response) if callable(present) else turn.direct_response
+        validation = _validate_direct_fact_presentation(turn, text)
+    except Exception:
+        validation = {"ok": False, "reasons": ["presentation_failed"]}
+        text = ""
+    if not validation["ok"]:
+        text = "当前回答的数值或来源未通过核对，暂不提供该结论。"
     return {
-        "final_response": turn.direct_response,
+        "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
+        "final_response": text,
         "messages": [
             {"role": "user", "content": str(message or "")},
-            {"role": "assistant", "content": turn.direct_response},
+            {"role": "assistant", "content": text},
         ],
         "api_calls": 0,
         "completed": True,
@@ -334,9 +360,47 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
         "history_offset": 0,
         "last_prompt_tokens": 0,
         "agent_persisted": False,
-        "verified_fact_reused": True,
+        "verified_fact_reused": bool(validation["ok"]),
+        "preflight_blocked": not validation["ok"],
+        "presentation_validation": validation,
         "evidence_ids": list(turn.direct_evidence_ids),
     }
+
+
+def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[str, Any]:
+    """Validate delivery text without inventing a tool-read receipt.
+
+    Source authority was checked by the card/verified-fact loader. Presentation
+    must preserve that checked body; the existing pure final gate also examines
+    the complete delivery text. Numeric claims use the existing KB extractor.
+    """
+    from gateway.ivd_final_validator import validate_final_response
+    original = str(turn.direct_response)
+    reasons = []
+    policy = getattr(turn, "presentation_contract", {}) or {}
+    if not text.startswith(original):
+        reasons.append("validated_body_changed")
+    if text != original and not policy.get("verified_sources"):
+        reasons.append("unverified_presentation_addition")
+    decision = validate_final_response(
+        text=text,
+        contract={"product_line": getattr(turn, "product_scope", ""),
+                  "answer_shape": getattr(turn, "answer_shape", ""),
+                  "max_index_transactions": 0},
+        effect_receipt={"model_calls": 0, "index_transactions": 0, "filesystem_scans": 0},
+    )
+    reasons.extend(decision.reasons)
+    validator = getattr(turn, "validator", None)
+    if validator is not None:
+        before = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(original)}
+        after = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(text)}
+        if before != after:
+            reasons.append("presentation_numeric_claims_changed")
+        if turn.facts and turn.has_validator:
+            existing = turn.validate(text)
+            if not existing.get("ok"):
+                reasons.extend(existing.get("reasons") or ())
+    return {"ok": not reasons, "reasons": list(dict.fromkeys(reasons))}
 
 
 def activate_validated_fact(
@@ -454,22 +518,44 @@ def _canonical_preflight_action(gate: dict[str, Any]) -> str:
     return str(gate.get("pipeline_action") or "")
 
 
-def _render_answer_experience_context(
-    guard: dict[str, Any],
-    *,
-    platform: str,
-) -> str:
-    """Load the shared IVD answer policy beside the configured KB pipeline."""
-    fast_response_path = Path(str(guard.get("fast_response_module") or ""))
-    if not fast_response_path.is_file():
+def _load_presentation_policy(
+    fast_response_module: str, *, platform: str, task_type: str = "general",
+    detail_requested: bool = False,
+) -> tuple[ModuleType | None, dict[str, Any]]:
+    """Load the canonical code beside the configured release-owned pipeline."""
+    if not fast_response_module or not Path(fast_response_module).is_file():
+        return None, {}
+    path = Path(fast_response_module).with_name("hermes_channel_presentation.py")
+    if not path.is_file():
+        return None, {}  # Compatibility with releases predating this contract.
+    try:
+        module = _load_module(str(path), path.stat().st_mtime_ns)
+        if not all(callable(getattr(module, name, None)) for name in (
+            "presentation_contract", "render_presentation_instructions", "prepare_user_text"
+        )):
+            return None, {}  # Old KB release: retain its existing guard/policy.
+        contract = module.presentation_contract(platform, task_type=task_type,
+                                                 detail_requested=detail_requested)
+        return module, dict(contract)
+    except Exception:
+        # Presentation loading must not discard the numeric/source guard.
+        return None, {}
+
+
+def _render_answer_experience_context(guard: dict[str, Any], *, platform: str) -> str:
+    module, contract = _load_presentation_policy(
+        str(guard.get("fast_response_module") or ""), platform=platform)
+    if module is not None:
+        return module.render_presentation_instructions(contract)
+    fast_path = Path(str(guard.get("fast_response_module") or ""))
+    if not fast_path.is_file():
         return ""
-    policy_path = fast_response_path.with_name("after_sales_platform_policy.py")
+    policy_path = fast_path.with_name("after_sales_platform_policy.py")
     if not policy_path.is_file():
         return ""
     try:
         module = _load_module(str(policy_path), policy_path.stat().st_mtime_ns)
-        render = getattr(module, "render_answer_experience_context")
-        return str(render(platform=platform) or "").strip()
+        return str(module.render_answer_experience_context(platform=platform) or "").strip()
     except Exception:
         return ""
 
@@ -604,6 +690,7 @@ def prepare_after_sales_turn(
     if normalized_platform not in enabled_platforms:
         return None
 
+    guard = {**guard, "_presentation_platform": normalized_platform}
     module_path = Path(str(guard.get("workflow_module") or ""))
     validator_path = Path(str(guard.get("validator_module") or ""))
     cards_dir = Path(str(guard.get("cards_dir") or ""))
@@ -618,7 +705,9 @@ def prepare_after_sales_turn(
         guard,
         platform=normalized_platform,
     )
-    fast_result = _render_fast_response_context(guard, message=message, match=match)
+    fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform)
+    if fast_result.get("presentation_contract"):
+        experience_context = ""
     fast_context = str(fast_result.get("context") or "")
     if match is None:
         combined_context = "\n\n".join(
@@ -657,6 +746,8 @@ def prepare_after_sales_turn(
                 preflight_decision=str(fast_result.get("preflight_decision") or ""),
                 preflight_action=str(fast_result.get("preflight_action") or ""),
                 preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+                presentation_contract=dict(fast_result.get("presentation_contract") or {}),
+                presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
                 answer_contract=dict(fast_result.get("answer_contract") or {}),
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
@@ -724,6 +815,8 @@ def prepare_after_sales_turn(
         preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
             prepared_ivd_turn=prepared_ivd_turn,
+            presentation_contract=dict(fast_result.get("presentation_contract") or {}),
+            presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
             answer_contract=dict(fast_result.get("answer_contract") or {}),
             source_location=dict(fast_result.get("source_location") or {}),
             answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
@@ -746,6 +839,15 @@ def _attach_verified_fact(
     question: str,
     session_db: Any | None,
 ) -> AfterSalesTurn:
+    if not turn.presentation_contract:
+        platform = str(guard.get("_presentation_platform") or "generic")
+        module, policy = _load_presentation_policy(
+            str(guard.get("fast_response_module") or ""), platform=platform,
+            task_type=str(turn.answer_contract.get("task_kind") or "general"),
+            detail_requested=turn.answer_contract.get("detail_level") == "detailed")
+        if module is not None:
+            turn = replace(turn, presentation_contract=policy,
+                           presentation_module_path=str(Path(module.__file__)))
     fact_key = str(turn.fact_key or _fact_key_for_question(question))
     source_revisions = _load_source_revisions(guard.get("knowledge_release_manifest"))
     turn = replace(
@@ -877,6 +979,7 @@ def _render_fast_response_context(
     *,
     message: str,
     match: dict[str, Any] | None,
+    platform: str = "generic",
 ) -> dict[str, Any]:
     module_path = Path(str(guard.get("fast_response_module") or ""))
     if not module_path.is_file():
@@ -887,7 +990,10 @@ def _render_fast_response_context(
             sys.path.insert(0, kb_root)
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         question_type = _question_type_from_match(match)
-        plan = module.build_fast_response_plan(message, question_type=question_type)
+        kwargs = {"question_type": question_type}
+        if "platform" in inspect.signature(module.build_fast_response_plan).parameters:
+            kwargs["platform"] = platform
+        plan = module.build_fast_response_plan(message, **kwargs)
     except Exception:
         return {}
     runtime_preflight = plan.get("runtime_preflight") or {}
@@ -931,6 +1037,12 @@ def _render_fast_response_context(
     if initial_files:
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
     answer_contract = dict(plan.get("answer_contract") or {})
+    presentation_module, presentation = _load_presentation_policy(
+        str(module_path), platform=platform,
+        task_type=str(answer_contract.get("task_kind") or "general"),
+        detail_requested=answer_contract.get("detail_level") == "detailed")
+    if presentation_module is not None:
+        lines.append(presentation_module.render_presentation_instructions(presentation))
     lines.extend(_render_answer_contract_lines(answer_contract))
     if not answer_contract:
         lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
@@ -957,11 +1069,21 @@ def _render_fast_response_context(
         # A contract that has not reached a serving-safe evidence tier must
         # stop before the general model can turn retrieved draft text into a
         # formal-looking numeric answer.
-        direct_response = (
-            "当前已进入专家检索，但该问题缺少可决定结论的上下文或正式证据，"
-            "暂不输出未经核实的正式数值结论。请补充产品版本、SOP编号及实验阶段，"
-            "例如首次建库/第一管还是重建库/复检。"
-        )
+        scalar_question = str(answer_shape.get("answer_shape") or "") in {
+            "scalar_lookup", "scoped_scalar", "ambiguous_scalar"
+        }
+        if scalar_question:
+            envelope = plan.get("context_envelope") or {}
+            labels = {"product_line": "产品名称", "product_version": "适用版本",
+                      "method": "实验方法", "workflow_step": "具体步骤", "sample_type": "样本类型"}
+            missing = [labels[key] for key in envelope.get("missing") or ()
+                       if key in labels and not envelope.get(key)]
+            if not envelope.get("product_line") and "产品名称" not in missing:
+                missing.insert(0, "产品名称")
+            request = "请确认" + "、".join(missing) + "。" if missing else "需要进一步核对对应正式来源。"
+            direct_response = "现有上下文或正式证据不足，暂不输出未经核实的正式数值结论。" + request
+        else:
+            direct_response = "当前尚未核实到足以支持此问题的正式来源，需要继续核对适用的受控文件。"
         contract_guarded = True
         answer_shape = {"answer_shape": "clarification"}
         fast_path = {
@@ -973,8 +1095,15 @@ def _render_fast_response_context(
             "numeric_fast_answer_allowed": False,
         }
         lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
+    if presentation_module is not None and answer_card and not contract_guarded and answer_card.get("source_document_id"):
+        presentation = {**presentation, "verified_sources": [{
+            "document": answer_card["source_document_id"],
+            "version": answer_card.get("source_version", ""),
+            "locator": answer_card.get("source_locator", ""),
+        }]}
     return {
         "context": "\n".join(lines),
+        "presentation_contract": presentation,
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
         "route_source": str(fast_path.get("route_source") or ""),
         "route_version": runtime_preflight.get("route_version", ""),
@@ -1018,8 +1147,8 @@ def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
         return []
     if contract.get("deliverable") == "scalar_value":
         return [
-            "当前交付物：只输出一个已核实数值及单位。",
-            "不要补充原因、建议、下一步或可见来源标签；内部证据校验照常执行。",
+            "当前交付物：先给已核实数值及单位，保留适用条件和就地可追溯依据。",
+            "不展开无关原因或完整SOP；不得省略会改变结论的条件、边界或来源，内部证据校验照常执行。",
         ]
     deliverable = {
         "difference_list": "只输出差异清单",
@@ -1048,7 +1177,7 @@ def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
             (
                 "正文第一行直接进入第1项差异；禁止前置“结论”“主要差异”“来源”等摘要段。",
                 "每项只写一个比较维度及对应版本差异，不重复汇总已列出的内容。",
-                "必要依据只在正文末尾用一行正式SOP编号或标题说明；不得输出材料库文件名、路径或内部 reference 标识。",
+                "依据贴近对应差异，说明正式SOP编号、标题及版本；不得输出材料库文件名、路径或内部 reference 标识。",
             )
         )
     selected_dimensions = [
