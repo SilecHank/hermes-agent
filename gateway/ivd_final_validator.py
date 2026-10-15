@@ -21,7 +21,7 @@ def confirmed_method_families(text: str) -> set[str]:
     uncertainty, alternative, or contradictory assertion fails closed.
     """
     text = str(text or "")
-    uncertainty = r"不确定|不清楚|不知道|不能确定|不能确认|无法确定|无法确认|未能确定|未能确认|没(?:有)?(?:确认|确定)|未确认|未确定|尚未确认|不一定|应该|疑似|似乎|可能|也许|大概|是否|能否|可否|是不是|能不能|可不可以|吗|么"
+    uncertainty = r"不确定|不清楚|不知道|不能确定|不能确认|无法确定|无法确认|未能确定|未能确认|没(?:有)?(?:确认|确定)|未确认|未确定|尚未确认|待(?:确认|确定)|不一定|应该|疑似|似乎|可能|也许|大概|是否|能否|可否|是不是|能不能|可不可以|吗|么"
     method_pattern = "(?:" + "|".join(pattern for pattern, _ in METHOD_TERMS) + ")"
     uncertainty_spans = list(re.finditer(uncertainty, text))
     resets = []

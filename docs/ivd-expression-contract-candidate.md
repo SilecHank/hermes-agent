@@ -35,3 +35,7 @@ Agent 同步修改普通/专家提示入口、package 直出及澄清、legacy �
 两项发布审计旧失败归属 Darwin FD 路径兼容；三项治理旧失败归属流程/上下文、澄清表示、产品分类契约；基线同样复现，未修改旧模块或断言。导航、xlsx、typed context 独立 backlog，不再全部绑定本轮实现。仍为本地 candidate_only、未发布；WSL/R6、真实客户端、业务及自然度验收未通过。
 
 完整收敛证据：/Users/slim/IVD-maintenance-reports/2026-10-14/expression-convergence-summary-20261015.md。
+
+## 2026-10-15 待确认状态定向修复
+
+方法待确认/待确定接入既有不确定与明确重置优先关系：后置待确认澄清，之后明确确认可恢复。KB numeric 11项、Agent engine/hybrid 106项通过；36句回放含原31句控制。独立spec/quality代码复核APPROVED。数值正文仍依赖问句承载方法与对象，出处仍为受控摘录行，不冒充原件章节。本地candidate_only未发布。证据：/Users/slim/IVD-maintenance-reports/2026-10-14/expression-pending-method-summary-20261015.md。
