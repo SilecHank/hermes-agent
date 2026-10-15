@@ -93,3 +93,37 @@ def test_equipment_list_is_not_a_parameter_task(real_package):
         assert result is not None
         assert result.answer_shape != "scalar"
         assert "30 uL" not in result.text
+
+@pytest.mark.parametrize("object_text,allowed",[
+    ("血浆样本", True),
+    ("不是血浆而是全血样本", False),
+    ("不是全血而是血浆样本", True),
+    ("血浆样本，改为全血样本", False),
+    ("全血样本，改为血浆样本", True),
+    ("不是血浆样本", False),
+    ("不含血浆样本", False),
+    ("是否改为血浆样本", False),
+    ("不是改为血浆样本", False),
+    ("是否血浆样本", False),
+    ("血浆或全血样本", False),
+    ("血浆和未知样本", False),
+    ("血浆样本，改为未知样本", False),
+])
+@pytest.mark.parametrize("entry", ["dispatcher", "engine"])
+def test_source_bound_object_assertion_controls_final_text(real_package, object_text, allowed, entry):
+    question=QUESTIONS[0].replace("血浆样本",object_text)
+    with IVDKnowledgeEngine(real_package) as engine:
+        if entry == "dispatcher":
+            result=IVDDispatcher(real_package).execute(engine,question=question).result
+        else:
+            result=engine.execute(question=question,knowledge_type="parameter",answer_shape="scalar")
+        assert result is not None
+        assert result.model_calls == result.index_transactions == 0
+        if allowed:
+            assert result.outcome == "answer"
+            assert result.text == "手工提取时，裂解步骤的血浆样本加入量为200 uL"
+            assert result.source.document == "SOP-JL-269"
+        else:
+            assert result.outcome == "clarification"
+            assert "200" not in result.text
+            assert not result.sources

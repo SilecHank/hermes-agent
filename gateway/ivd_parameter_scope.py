@@ -34,3 +34,32 @@ def condition_asserted(question, term):
         if token in clause and re.search(r"不是|并非|不用|未确认|不确定|是否|是不是|可能|或|不能确认|不采用|未采用|没有使用|未使用|不使用", clause):
             return False
     return True
+
+
+def parameter_object_asserted(question: str, parameter_object: str) -> bool:
+    """Confirm an object in the current assertion, not in a rejected alternative.
+
+    A final explicit correction replaces its preceding object scope. Within
+    that scope, denied, uncertain or alternative objects cannot select a hit.
+    Object names still come only from the governed candidate row.
+    """
+    corrections = list(re.finditer(r"而是|改为|改成|改用|实际是|确认是", question))
+    if corrections:
+        before = re.split(r"[，,。；;！!\n？?]", question[:corrections[-1].start()])[-1]
+        if re.search(r"是否|是不是|可能|不确定|无法确认|不能确认|不要|不能|尚未|没有|不是\s*$", before):
+            return False
+    current = question[corrections[-1].end():] if corrections else question
+    clauses = re.split(r"[，,。；;！!\n？?]", current)
+    found = False
+    for clause in clauses:
+        if parameter_object not in clause:
+            continue
+        prefix, _, suffix = clause.partition(parameter_object)
+        if re.search(r"不是|并非|不用|不采用|不使用|不加入|不含|不需要|无需|未使用|没有使用|未确认|不确定|是否|是不是|可能|无法确认|不能确认", prefix):
+            return False
+        if re.match(r"\s*(?:样本|标本)?\s*(?:不是|不适用|未确认|不确定)", suffix):
+            return False
+        if re.search(r"或|还是|及|和|与|/|、", prefix + suffix):
+            return False
+        found = True
+    return found

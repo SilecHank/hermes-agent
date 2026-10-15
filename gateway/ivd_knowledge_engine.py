@@ -16,7 +16,7 @@ from urllib.parse import quote
 from pathlib import PurePosixPath
 
 from gateway.ivd_final_validator import validate_final_response
-from gateway.ivd_parameter_scope import explicit_sop_input_request, sop_scope
+from gateway.ivd_parameter_scope import explicit_sop_input_request, sop_scope, parameter_object_asserted
 from gateway.ivd_renderer import IVDRenderer, SourceReference, source_reference_from_mapping
 
 
@@ -262,7 +262,7 @@ class IVDKnowledgeEngine:
                                re.findall(r"(?<![A-Za-z])([uµμm]L|ng|pg|ug|mg)(?![A-Za-z])", question, re.I)}
             if requested_units and requested_units != {str(row["unit"]).casefold()}:
                 continue
-            if sample and sample in question and row["unit"] in ("uL", "mL"):
+            if sample and parameter_object_asserted(question, sample) and row["unit"] in ("uL", "mL"):
                 # Alias duplicates may collapse; distinct formal assertions may not.
                 identity = tuple(row[key] for key in row.keys() if key != "matched_alias")
                 candidates[identity] = row
