@@ -27,3 +27,11 @@ Agent 同步修改普通/专家提示入口、package 直出及澄清、legacy �
 导航/附件/上下文先交诊断和范围选项，未实施权限或会话架构变化：hybrid 丢弃 SOP 导航结果；SOP501 有受管导航/原件元数据而非参数通行权；生育工作簿实际含 NIFTY 所需配置，静态工具及平台具有文件读取/生成基础和发送能力，原 SDK 能力否认不成立。legacy 缺 typed confirmed context 提供者，禁止从全历史猜产品。
 
 完整报告与证据位于 /Users/slim/IVD-maintenance-reports/2026-10-14/expression-product-review-followup-20261015.md。状态仍为本地 candidate_only、未发布。
+
+## 2026-10-15 收敛范围补充（替代前次宽泛绑定）
+
+本轮关闭方法否定/疑问/不确定/冲突误确认，并修复本次来源附加导致的单值 hybrid 路由退化；来源编号按完整绑定 ID 匹配。Agent 受影响 159 项、KB 111 项通过，31 句回放两端一致（21 澄清、9 手工数值、1 自动方法不套手工卡且未调用模型）。独立规格、质量审查 APPROVED，仅覆盖代码。
+
+两项发布审计旧失败归属 Darwin FD 路径兼容；三项治理旧失败归属流程/上下文、澄清表示、产品分类契约；基线同样复现，未修改旧模块或断言。导航、xlsx、typed context 独立 backlog，不再全部绑定本轮实现。仍为本地 candidate_only、未发布；WSL/R6、真实客户端、业务及自然度验收未通过。
+
+完整收敛证据：/Users/slim/IVD-maintenance-reports/2026-10-14/expression-convergence-summary-20261015.md。

@@ -1,5 +1,7 @@
 from types import MappingProxyType, SimpleNamespace
 
+import pytest
+
 from gateway.ivd_hybrid_router import decide_hybrid_route
 from gateway.run import _prepare_gateway_ivd_boundary
 
@@ -123,7 +125,8 @@ def test_hybrid_boundary_returns_expert_turn_for_reasoning_question(monkeypatch)
     assert result is legacy_turn
 
 
-def test_hybrid_boundary_returns_package_for_exact_scalar(monkeypatch):
+@pytest.mark.parametrize('with_attribution', [False, True])
+def test_hybrid_boundary_returns_package_for_exact_scalar(monkeypatch, with_attribution):
     prepared = _prepared()
     package_result = _result(
         text="200 uL。",
@@ -132,6 +135,9 @@ def test_hybrid_boundary_returns_package_for_exact_scalar(monkeypatch):
         product_variant="default",
         ambiguities=(),
     )
+    if with_attribution:
+        package_result.text = '200 uL。\n来源：SOP-JL-269 A5（受控摘录第173行）。'
+        package_result.sources = (SimpleNamespace(document='SOP-JL-269'),)
     monkeypatch.setattr(
         "gateway.ivd_runtime.prepare_enabled_ivd_turn",
         lambda *_args, **_kwargs: prepared,
@@ -194,3 +200,28 @@ def test_hybrid_probe_failure_falls_back_to_expert_turn(monkeypatch):
     )
 
     assert result is legacy_turn
+
+
+def test_verified_source_identifier_is_not_a_second_scalar():
+    result = _result(
+        text='200 uL。\n来源：SOP-JL-269 A5（受控摘录第173行）。',
+        sources=(SimpleNamespace(document='SOP-JL-269'),),
+    )
+    assert decide_hybrid_route('无创手工提取需要多少血浆', envelope=_envelope(), result=result).mode == 'package_scalar'
+
+
+def test_source_annotation_does_not_hide_additional_numeric_claims():
+    for text in (
+        '200 uL。\n来源：SOP-JL-269 A5，另需 900 uL。',
+        '200 uL。\n来源：SOP-JL-999 A5。',
+        '200 uL。\n来源：XSOP-JL-269 A5。',
+        '200 uL。\n来源：SOP-JL-269A A5。',
+        '200 uL。\n来源：SOP-JL-269-1 A5。',
+        '200 uL。\n来源：SOP-JL-269_A5 A5。',
+        '200 uL。另需 900 uL。\n来源：SOP-JL-269 A5。',
+        '200 uL。\n正文：SOP-JL-269 A5。',
+    ):
+        result = _result(text=text, sources=(SimpleNamespace(document='SOP-JL-269'),))
+        decision = decide_hybrid_route('无创手工提取需要多少血浆', envelope=_envelope(), result=result)
+        assert decision.mode == 'expert'
+        assert decision.reason == 'scalar_not_unique'

@@ -531,3 +531,62 @@ def test_method_scope_rejection_does_not_hide_non_serving_hit(package, monkeypat
         monkeypatch.setattr(engine, '_exact_registry', lambda *args: hit)
         with pytest.raises(PackageIntegrityError, match='non_serving_knowledge'):
             engine.execute(question='无创提取需要多少血浆', product_line='NIFTY',knowledge_type='parameter',answer_shape='scalar')
+
+
+@pytest.mark.parametrize('question,method', [
+    ('NIFTY不是手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY是否能手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY手工提取可以吗，需要多少血浆','manual_extraction'),
+    ('NIFTY不确定是不是自动化提取，需要多少血浆','automatic_extraction'),
+    ('NIFTY手工还是自动提取，需要多少血浆','manual_extraction'),
+    ('NIFTY不是手工或自动提取，需要多少血浆','automatic_extraction'),
+    ('NIFTY手工方法不适用，需要多少血浆','manual_extraction'),
+    ('无创提取需要多少血浆？手工？','manual_extraction'),
+    ('无创提取需要多少血浆，我不确定，手工提取','manual_extraction'),
+    ('我不确定。手工提取需要多少血浆','manual_extraction'),
+    ('不确定是手工提取，需要多少血浆','manual_extraction'),
+    ('未确认是手工提取，需要多少血浆','manual_extraction'),
+    ('无创提取需要多少血浆，不能确定是手工提取','manual_extraction'),
+    ('无创提取需要多少血浆不能确定是手工提取','manual_extraction'),
+    ('还没确定是手工提取需要多少血浆','manual_extraction'),
+    ('没有确认是手工提取需要多少血浆','manual_extraction'),
+    ('并非已确认手工提取，需要多少血浆','manual_extraction'),
+    ('不一定是手工提取，需要多少血浆','manual_extraction'),
+    ('应该是手工提取，需要多少血浆','manual_extraction'),
+    ('疑似手工提取，需要多少血浆','manual_extraction'),
+    ('似乎是手工提取，需要多少血浆','manual_extraction'),
+
+])
+@pytest.mark.parametrize('lookup', ['exact','semantic'])
+def test_uncertain_or_negated_method_is_not_parameter_confirmation(package,monkeypatch,question,method,lookup):
+    with IVDKnowledgeEngine(package) as engine:
+        hit=engine._exact_registry('无创提取需要多少血浆','NIFTY','标准版','','parameter')
+        hit.conditions_json=json.dumps({'method':method})
+        monkeypatch.setattr(engine,'_exact_registry',lambda *args: hit if lookup=='exact' else None)
+        monkeypatch.setattr(engine,'_semantic_registry',lambda *args: hit)
+        result=engine.execute(question=question,product_line='NIFTY',knowledge_type='parameter',answer_shape='scalar',allow_index_transaction=lookup=='semantic')
+        assert result.outcome=='clarification'
+        assert '200' not in result.text
+        assert result.model_calls==0
+
+@pytest.mark.parametrize('question,method', [
+    ('NIFTY已确认手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY不是自动，是手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY不是自动而是手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY从自动改成手工提取，需要多少血浆','manual_extraction'),
+    ('NIFTY不是手工，是自动化提取，需要多少血浆','automatic_extraction'),
+    ('之前不确定，现已确认手工提取，需要多少血浆','manual_extraction'),
+    ('无创手工提取需要多少血浆或多少毫升','manual_extraction'),
+    ('无创手工提取需要多少血浆，用uL或mL表示','manual_extraction'),
+    ('已确认手工提取，不确定需要多少血浆','manual_extraction'),
+    ('无创手工提取需要多少血浆，还是这个问题','manual_extraction'),
+])
+@pytest.mark.parametrize('lookup', ['exact','semantic'])
+def test_explicit_method_correction_is_accepted(package,monkeypatch,question,method,lookup):
+    with IVDKnowledgeEngine(package) as engine:
+        hit=engine._exact_registry('无创提取需要多少血浆','NIFTY','标准版','','parameter')
+        hit.conditions_json=json.dumps({'method':method})
+        monkeypatch.setattr(engine,'_exact_registry',lambda *args:hit if lookup=='exact' else None)
+        monkeypatch.setattr(engine,'_semantic_registry',lambda *args:hit)
+        result=engine.execute(question=question,product_line='NIFTY',knowledge_type='parameter',answer_shape='scalar',allow_index_transaction=lookup=='semantic')
+        assert result.outcome=='answer'
