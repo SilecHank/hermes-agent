@@ -39,3 +39,7 @@ Agent 同步修改普通/专家提示入口、package 直出及澄清、legacy �
 ## 2026-10-15 待确认状态定向修复
 
 方法待确认/待确定接入既有不确定与明确重置优先关系：后置待确认澄清，之后明确确认可恢复。KB numeric 11项、Agent engine/hybrid 106项通过；36句回放含原31句控制。独立spec/quality代码复核APPROVED。数值正文仍依赖问句承载方法与对象，出处仍为受控摘录行，不冒充原件章节。本地candidate_only未发布。证据：/Users/slim/IVD-maintenance-reports/2026-10-14/expression-pending-method-summary-20261015.md。
+
+## 2026-10-15 明确否定方法定向修复
+
+最新待确认修复版仍放行“未采用/不做/无须手工”，已仅补齐现有方法前缀否定规则；“尚待确认”原已澄清。后续明确确认正控保留，未扩方法词典/状态存储/来源授权。KB numeric11项、Agent engine/hybrid120项通过；43句本地回放含原受影响控制，不代表完整自然语言确认协议。当前独立部门复审由产品管理合并，前次APPROVED不背书此delta。仍本地candidate_only未发布，正文条件依赖问句、来源摘录定位限制不变。证据：/Users/slim/IVD-maintenance-reports/2026-10-14/expression-negated-method-summary-20261015.md。

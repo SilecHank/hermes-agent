@@ -77,7 +77,7 @@ def confirmed_method_families(text: str) -> set[str]:
                 return set()
             next_start = occurrences[index + 1][0] if index + 1 < len(occurrences) else len(clause)
             suffix = clause[end:next_start]
-            negated = bool(re.search(r"不是|并非|不采用|不使用|不用|不要|不能|非", prefix))
+            negated = bool(re.search(r"不是|并非|(?:不|未)(?:采用|使用|做)|无[须需]|不用|不要|不能|非", prefix))
             negated = negated or bool(re.match(r"\s*(?:方法|方式)?\s*(?:不是|不适用|不可用|不行|未确认)", suffix))
             replaced = index + 1 < len(occurrences) and bool(re.search(r"而是|改用|改为|改成", suffix))
             if negated:
