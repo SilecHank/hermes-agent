@@ -63,6 +63,8 @@ _GATE_COUNTS = ("tests", "passed", "failed", "errors", "skipped", "xfailed", "xp
 # and output path, independent of caller-supplied JUnit output options.
 _GATE_PLUGIN = """
 import json
+import os
+import sys
 from pathlib import Path
 counts = dict.fromkeys(('tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed'), 0)
 seen = set()
@@ -84,7 +86,7 @@ def pytest_collectreport(report):
     elif report.skipped:
         counts['skipped'] += 1
 def pytest_sessionfinish(session, exitstatus):
-    Path(OUTPUT).write_text(json.dumps(dict(counts, completed=True)), encoding='utf-8')
+    Path(OUTPUT).write_text(json.dumps(dict(counts, completed=True, interpreter=os.path.abspath(sys.executable))), encoding='utf-8')
 """
 
 
@@ -100,12 +102,12 @@ def _write_gate_report(destination: str, attempt: str, files: list[Path],
     totals = {key: sum(row.get(key, 0) for row in results) for key in _GATE_COUNTS}
     ready = bool(attempt and paths and len(set(paths)) == len(paths)
                  and sorted(row['path'] for row in results) == sorted(paths)
-                 and all(row.get('completed') and row.get('returncode') == 0
+                 and all(row.get('interpreter') == os.path.abspath(sys.executable) and row.get('completed') and row.get('returncode') == 0
                          and row.get('tests', 0) > 0
                          and row.get('tests') == row.get('passed') for row in results)
                  and all(totals[key] == 0 for key in ('failed', 'errors', 'skipped', 'xfailed', 'xpassed')))
     payload = dict(schema_version=1, kind='pytest_suite', attempt_id=attempt,
-                   status='ready' if ready else 'blocked', files=results, **totals)
+                   status='ready' if ready else 'blocked', interpreter=os.path.abspath(sys.executable), files=results, **totals)
     # Replace atomically: an interrupted write cannot look like completed evidence.
     target = Path(destination)
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,

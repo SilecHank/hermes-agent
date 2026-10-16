@@ -31,6 +31,7 @@ def test_machine_report(tmp_path, body, counts, ready):
     data = json.loads(report.read_text())
     assert data['schema_version'] == 1
     assert data['kind'] == 'pytest_suite'
+    assert data['interpreter'] == os.path.abspath(sys.executable)
     assert data['attempt_id'] == 'unique-attempt'
     assert (data['status'] == 'ready') is ready
     assert len(data['files']) == 1
@@ -90,3 +91,30 @@ def test_unfinished_requested_file_still_has_report_entry(tmp_path):
     assert data['files'] == [dict(path=missing.name, completed=False,
                                   returncode=None, tests=0, passed=0, failed=0,
                                   errors=0, skipped=0, xfailed=0, xpassed=0)]
+
+
+def test_gate_wrapper_uses_bound_python_despite_stale_home_venv(tmp_path):
+    from scripts.test_environment_safety import initialize_test_sandbox
+    repo = Path(__file__).resolve().parents[1]
+    home = tmp_path / 'bootstrap-home'
+    home.mkdir()
+    initialize_test_sandbox(home)
+    stale = home / '.hermes/hermes-agent/venv/bin'
+    stale.mkdir(parents=True)
+    (stale / 'activate').write_text('# deliberately stale fixture')
+    fake_python = stale / 'python'
+    fake_python.write_text('#!/bin/sh\nexit 99\n')
+    fake_python.chmod(0o700)
+    probe = tmp_path / 'test_bound.py'
+    probe.write_text('def test_bound(): pass\n')
+    report = tmp_path / 'bound-report.json'
+    env = dict(os.environ, HOME=str(home), HERMES_PYTHON=sys.executable,
+               HERMES_RELEASE_GATE_REPORT=str(report), HERMES_RELEASE_GATE_ATTEMPT='bound',
+               HERMES_TEST_DURATION_CACHE='0', PYTHONPYCACHEPREFIX=str(tmp_path / 'cache'))
+    proc = subprocess.run(['bash', str(repo / 'scripts/run_tests.sh'), '-j1', '-q', '--files', str(probe)],
+                          env=env, capture_output=True, text=True, timeout=40)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads(report.read_text())
+    assert data['status'] == 'ready'
+    assert data['interpreter'] == os.path.abspath(sys.executable)
+    assert data['files'][0]['interpreter'] == os.path.abspath(sys.executable)
