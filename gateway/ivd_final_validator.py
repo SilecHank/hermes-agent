@@ -8,6 +8,9 @@ import re
 from typing import Mapping
 
 
+from gateway.ivd_parameter_scope import condition_asserted
+
+
 METHOD_TERMS = (
     (r"手工|手动|\bmanual(?:_\w+)?\b", "manual"),
     (r"自动(?:化)?|纳磁|\bautomatic(?:_\w+)?\b|\bautomated(?:_\w+)?\b", "automatic"),
@@ -146,6 +149,9 @@ def validate_final_response(
                     reasons.append("method_scope_required")
                 elif required and required != requested:
                     reasons.append("method_scope_mismatch")
+                for key in ("platform", "reagent"):
+                    if conditions.get(key) and not condition_asserted(str(contract.get("question") or ""), str(conditions[key])):
+                        reasons.append("method_scope_required")
         if answer_shape == "scalar" and any(
             not str(getattr(hit, field, "") or "").strip() for field in SOURCE_FIELDS
         ):

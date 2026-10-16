@@ -13,6 +13,9 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
 
+from gateway.ivd_parameter_scope import explicit_sop_input_request
+
+
 _VOCABULARY_MEMBER = "indexes/dispatch-vocabulary-v1.json"
 _MANIFEST_MEMBER = "package-manifest.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -354,11 +357,14 @@ class IVDDispatcher:
         semantic = self._match_intent(text, self._semantics) or self._match_intent(
             routing_text, self._semantics
         )
+        source_bound_input = explicit_sop_input_request(text)
+        if source_bound_input and operation is None:
+            semantic = next((item for item in self._semantics if item["intent"] == "parameter"), semantic)
         selected = operation or semantic or next(
             item for item in self._semantics if item["intent"] == "product_fact"
         )
         intent = str(selected["intent"])
-        needs_product = intent in self._product_required and product_line is None
+        needs_product = intent in self._product_required and product_line is None and not source_bound_input
         ambiguous = product_conflict or needs_product
         return DecisionEnvelope(
             policy_version=self._policy_version,

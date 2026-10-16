@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -62,7 +63,7 @@ class IVDRenderer:
             or ""
         )
 
-    def render_registry_hit(self, hit: object) -> RenderedAnswer:
+    def render_registry_hit(self, hit: object, *, include_conditions: bool = False) -> RenderedAnswer:
         kind = str(getattr(hit, "knowledge_kind", ""))
         value = str(getattr(hit, "value", "") or "").strip()
         unit = str(getattr(hit, "unit", "") or "").strip()
@@ -79,6 +80,13 @@ class IVDRenderer:
         if shape == "scalar":
             template = str(self._policy.get("scalar_template") or "{value} {unit}.")
             text = template.format(value=value, unit=unit).replace("  ", " ").strip()
+            if include_conditions:
+                conditions = json.loads(str(getattr(hit, "conditions_json", "{}")))
+                sample = conditions.get("sample_object")
+                if sample and conditions.get("platform") and conditions.get("reagent"):
+                    text = f"{conditions['platform']}配{conditions['reagent']}提取，{sample}样本加入量为{value} {unit}"
+                elif sample and conditions.get("method") == "manual_extraction" and conditions.get("step_label"):
+                    text = f"手工提取时，{conditions['step_label']}的{sample}样本加入量为{value} {unit}"
         else:
             text = value
         return RenderedAnswer(text=text, answer_shape=shape, source=source_reference(hit))
