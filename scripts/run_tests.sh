@@ -49,7 +49,13 @@ for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agen
   fi
 done
 
-if [ -n "$VENV" ]; then
+if [ -n "${HERMES_RELEASE_GATE_REPORT:-}" ]; then
+  if [ -z "${HERMES_RELEASE_GATE_ATTEMPT:-}" ] || [ -z "${HERMES_PYTHON:-}" ] || [ ! -x "$HERMES_PYTHON" ] || ! "$HERMES_PYTHON" -c 'import pytest' >/dev/null 2>&1; then
+    echo "error: release gate requires its bound Python with pytest" >&2
+    exit 1
+  fi
+  PYTHON="$HERMES_PYTHON"
+elif [ -n "$VENV" ]; then
   PYTHON="$VENV/bin/python"
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
     && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
@@ -107,6 +113,8 @@ env -i \
   PYTHONHASHSEED=0 \
   ${PYTHONPYCACHEPREFIX:+PYTHONPYCACHEPREFIX="$PYTHONPYCACHEPREFIX"} \
   ${IVD_KB_ROOT:+IVD_KB_ROOT="$IVD_KB_ROOT"} \
+  ${HERMES_RELEASE_GATE_REPORT:+HERMES_RELEASE_GATE_REPORT="$HERMES_RELEASE_GATE_REPORT"} \
+  ${HERMES_RELEASE_GATE_ATTEMPT:+HERMES_RELEASE_GATE_ATTEMPT="$HERMES_RELEASE_GATE_ATTEMPT"} \
   ${HERMES_TEST_PASS_FDS:+HERMES_TEST_PASS_FDS="$HERMES_TEST_PASS_FDS"} \
   ${HERMES_GATEWAY_GUARD_CACHE_DIR:+HERMES_GATEWAY_GUARD_CACHE_DIR="$HERMES_GATEWAY_GUARD_CACHE_DIR"} \
   ${HERMES_TEST_DURATION_CACHE:+HERMES_TEST_DURATION_CACHE="$HERMES_TEST_DURATION_CACHE"} \
