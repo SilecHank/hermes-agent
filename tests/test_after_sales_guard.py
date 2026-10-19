@@ -111,6 +111,7 @@ def _verified_fact_fixture(
     mode="active",
     manifest_revision="rev-a",
     value="200",
+    fact_key=None,
 ):
     db = SessionDB(db_path=tmp_path / "state.db")
     service = VerifiedFactService(db)
@@ -120,7 +121,7 @@ def _verified_fact_fixture(
             "product_scope": "NIFTY",
             "product_variant": "",
             "question_type": "scalar_lookup",
-            "fact_key": "volume",
+            "fact_key": fact_key or _parameter_card()["fact_key"],
             "value": value,
             "unit": "μL",
             "conditions": [],
@@ -708,13 +709,14 @@ def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
 
     assert turn is not None
     assert turn.answer_shape == "scalar_lookup"
+    assert turn.verified_fact_hit is True
     assert turn.direct_response == "200 μL。"
     assert result["api_calls"] == 0
     assert result["final_response"] == turn.present_text("200 μL。")
 
 
 def test_active_fact_with_old_scalar_value_does_not_bypass_current_route(tmp_path):
-    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240")
+    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240", fact_key="volume")
 
     turn = prepare_after_sales_turn(
         config,
@@ -752,6 +754,7 @@ def test_stale_source_revision_disables_direct_fact_reuse(tmp_path):
         mode="active",
         manifest_revision="rev-b",
         value="777",
+        fact_key="volume",
     )
 
     turn = prepare_after_sales_turn(
@@ -781,7 +784,7 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
         "ok": True,
         "adopted_claims": [
             {
-                "fact_key": "volume",
+                "fact_key": _parameter_card()["fact_key"],
                 "value": "200",
                 "unit": "μL",
                 "conditions": [],
@@ -802,7 +805,7 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
     match = VerifiedFactService(db).lookup(
         product_scope="NIFTY",
         product_variant="",
-        fact_key="volume",
+        fact_key=_parameter_card()["fact_key"],
         conditions=[],
         source_revisions={NIFTY_SOURCE_REL: "rev-a"},
     )
@@ -827,7 +830,7 @@ def test_fact_activation_rejects_value_outside_current_scalar_contract(tmp_path)
             "ok": True,
             "adopted_claims": [
                 {
-                    "fact_key": "volume",
+                    "fact_key": _parameter_card()["fact_key"],
                     "value": "100",
                     "unit": "μL",
                     "conditions": [],
@@ -886,7 +889,7 @@ def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path, vali
     turn = prepare_after_sales_turn(
         config, platform="weixin", message=SCALAR_QUESTION, history=[], session_db=db,
     )
-    claim = {"fact_key": "volume", "value": "200", "unit": "μL",
+    claim = {"fact_key": _parameter_card()["fact_key"], "value": "200", "unit": "μL",
              "conditions": [], "evidence_id": "ev-multi", "source_path": NIFTY_SOURCE_REL,
              "source_revision": "rev-a"}
     validation = {
@@ -896,7 +899,7 @@ def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path, vali
     }[validation_case]
     assert activate_validated_fact(db, turn, question=SCALAR_QUESTION, validation=validation) is False
     match = VerifiedFactService(db).lookup(
-        product_scope="NIFTY", product_variant="", fact_key="volume", conditions=[],
+        product_scope="NIFTY", product_variant="", fact_key=_parameter_card()["fact_key"], conditions=[],
         source_revisions={NIFTY_SOURCE_REL: "rev-a"},
     )
     assert match["rendered_answer"] == "200 μL。"
