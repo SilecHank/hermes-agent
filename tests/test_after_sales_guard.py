@@ -26,6 +26,58 @@ from gateway.after_sales_guard import _load_module
 LOCAL_KB_COMMIT = "2daf036d4044ee91d7c60c2c3ad538c5c530c584"
 
 
+def _local_git(root, *args, input=None):
+    # Process-local protocol policy works on Git 2.43, including lazy fetches.
+    # Do not inherit repository/config injection through GIT_* environment vars.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_ALLOW_PROTOCOL="file", GIT_TERMINAL_PROMPT="0",
+               GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1")
+    return subprocess.check_output(
+        ["git", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always",
+         "-c", "core.hooksPath=/dev/null", "-C", str(root), *args],
+        input=input, text=True, stderr=subprocess.PIPE, env=env, timeout=5,
+    ).strip()
+
+
+def _verify_local_git_tree(root):
+    def checked(*args, input=None):
+        try:
+            return _local_git(root, *args, input=input)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError("local-only Git repository or candidate object missing: "
+                             + (exc.stderr or "")) from exc
+    # Linked staged worktrees share their common object directory legitimately.
+    common = Path(checked("rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = root / common
+    objects = common.resolve(strict=True) / "objects"
+    try:
+        partial = _local_git(root, "config", "--get-regexp",
+                             r"^(extensions\.partialclone|remote\..*\.promisor)$")
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 1:
+            raise
+        partial = ""
+    if partial or list((objects / "pack").glob("*.promisor")):
+        raise ValueError("local-only Git refuses partial/promisor repository")
+    if (objects / "info/alternates").exists():
+        raise ValueError("local-only Git refuses alternate object stores")
+    commit = checked("rev-parse", "--verify", "HEAD^{commit}")
+    tree = checked("rev-parse", "--verify", "HEAD^{tree}")
+    # Check only this candidate commit and its full tree, never history/fsck.
+    expected = {commit: "commit", tree: "tree"}
+    for row in checked("ls-tree", "-r", "-t", "-z", "--full-tree", "HEAD").split("\0"):
+        if row:
+            _, kind, oid = row.split("\t", 1)[0].split()
+            if kind == "commit":
+                raise ValueError("local-only Git refuses submodule inputs")
+            expected[oid] = kind
+    checked = checked("cat-file", "--batch-check=%(objectname) %(objecttype)",
+                         input="\n".join(expected) + "\n").splitlines()
+    if checked != [oid + " " + kind for oid, kind in expected.items()]:
+        raise ValueError("local-only Git missing or invalid candidate object")
+
+
 def _knowledgehub_root(*, agent_root=None):
     import subprocess
 
@@ -42,11 +94,9 @@ def _knowledgehub_root(*, agent_root=None):
             expected = staged["knowledgehub_commit"]
             if root != (agent.parent / "knowledgehub").resolve(strict=True):
                 raise ValueError("root does not belong to the staged candidate")
+        _verify_local_git_tree(root)
         def git(*args):
-            return subprocess.check_output(
-                ["git", "--no-lazy-fetch", "-C", str(root), *args],
-                text=True, stderr=subprocess.PIPE, timeout=5,
-            ).strip()
+            return _local_git(root, *args)
         if Path(git("rev-parse", "--show-toplevel")).resolve() != root:
             raise ValueError("not a candidate repository root")
         if git("rev-parse", "HEAD") != expected:
@@ -1228,8 +1278,7 @@ def test_kb_binding_checks_staged_pair_and_tracked_inputs(tmp_path, monkeypatch,
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("fixture")
     def git(*args):
-        return subprocess.check_output(["git", "--no-lazy-fetch", "-C", str(root), *args],
-                                       text=True, stderr=subprocess.PIPE).strip()
+        return _local_git(root, *args)
     git("init", "-q")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -1414,3 +1463,55 @@ def test_delivery_reports_cache_adoption_separately_from_formal_card(tmp_path, m
     result = build_direct_fact_result(turn, SCALAR_QUESTION)
     assert result['verified_fact_reused'] is adopted
     assert turn.resolved_answer.source_kind == ('verified_fact' if adopted else 'formal_answer_card')
+
+
+@pytest.mark.parametrize("fault", ["none", "missing_blob", "promisor_config", "promisor_pack", "wrong_root", "network_protocol", "linked_worktree", "missing_tree", "partial_config", "alternates", "remote_helper"])
+def test_local_only_git_checks_real_objects_and_protocol(tmp_path, fault):
+    root = tmp_path / "source"
+    root.mkdir()
+    def setup_git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(root), *args], text=True, stderr=subprocess.PIPE,
+            timeout=5,
+        ).strip()
+    setup_git("init", "-q")
+    (root / "input").write_text("local fixture")
+    setup_git("add", "input")
+    setup_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+              "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+    if fault == "none":
+        clone = tmp_path / "independent"
+        _local_git(tmp_path, "clone", "--no-local", "--no-hardlinks", root.as_uri(), str(clone))
+        _verify_local_git_tree(clone)
+        assert _local_git(clone, "rev-parse", "HEAD") == setup_git("rev-parse", "HEAD")
+        assert not (root / ".git/worktrees").exists()
+    elif fault in {"network_protocol", "remote_helper"}:
+        url = "https://127.0.0.1:1/forbidden" if fault == "network_protocol" else "ext::false"
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            _local_git(root, "ls-remote", url)
+        assert "not allowed" in caught.value.stderr
+    elif fault == "linked_worktree":
+        linked = tmp_path / "staged-worktree"
+        setup_git("worktree", "add", "--detach", str(linked), "HEAD")
+        _verify_local_git_tree(linked)
+        assert _local_git(linked, "rev-parse", "HEAD") == setup_git("rev-parse", "HEAD")
+    else:
+        if fault == "missing_blob":
+            oid = setup_git("rev-parse", "HEAD:input")
+            (root / ".git/objects" / oid[:2] / oid[2:]).unlink()
+        elif fault == "missing_tree":
+            oid = setup_git("rev-parse", "HEAD^{tree}")
+            (root / ".git/objects" / oid[:2] / oid[2:]).unlink()
+        elif fault == "partial_config":
+            setup_git("config", "extensions.partialClone", "origin")
+        elif fault == "alternates":
+            (root / ".git/objects/info/alternates").write_text(str(tmp_path / "outside"))
+        elif fault == "promisor_config":
+            setup_git("config", "remote.origin.promisor", "true")
+        elif fault == "promisor_pack":
+            (root / ".git/objects/pack/fixture.promisor").write_text("")
+        else:
+            root = tmp_path / "not-repository"
+            root.mkdir()
+        with pytest.raises((ValueError, subprocess.SubprocessError), match="local-only|missing|repository"):
+            _verify_local_git_tree(root)
