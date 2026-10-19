@@ -1405,3 +1405,12 @@ def test_incomplete_turn_contract_cannot_activate_even_with_manual_ok(tmp_path, 
     incomplete = replace(turn, parameter_contract=contract)
     assert activate_validated_fact(db, incomplete, question=SCALAR_QUESTION,
                                    validation={'ok':True,'adopted_claims':[_validated_claim()]}) is False
+
+
+@pytest.mark.parametrize('mode,adopted', [('off',False),('shadow',False),('active',True)])
+def test_delivery_reports_cache_adoption_separately_from_formal_card(tmp_path, mode, adopted):
+    db, config = _verified_fact_fixture(tmp_path, mode=mode)
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    result = build_direct_fact_result(turn, SCALAR_QUESTION)
+    assert result['verified_fact_reused'] is adopted
+    assert turn.resolved_answer.source_kind == ('verified_fact' if adopted else 'formal_answer_card')

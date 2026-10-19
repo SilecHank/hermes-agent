@@ -372,7 +372,9 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
         "history_offset": 0,
         "last_prompt_tokens": 0,
         "agent_persisted": False,
-        "verified_fact_reused": bool(validation["ok"]),
+        "verified_fact_reused": bool(validation["ok"] and turn.verified_fact_hit
+                                     and turn.resolved_answer is not None
+                                     and turn.resolved_answer.source_kind == "verified_fact"),
         "preflight_blocked": not validation["ok"],
         "presentation_validation": validation,
         "evidence_ids": list(turn.direct_evidence_ids),
