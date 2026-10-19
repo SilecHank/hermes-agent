@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import inspect
 import json
 import re
@@ -71,6 +72,7 @@ class AfterSalesTurn:
     evidence_sidecar_enabled: bool = False
     presentation_contract: dict[str, Any] = field(default_factory=dict)
     presentation_module_path: str = ""
+    parameter_contract: dict[str, Any] = field(default_factory=dict)
 
     def present_text(self, text: str) -> str:
         if not self.presentation_module_path or not self.presentation_contract:
@@ -117,13 +119,17 @@ class AfterSalesTurn:
         messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.has_validator:
+            if self.parameter_contract:
+                return {"ok": False, "reasons": ["formal_validator_unavailable"],
+                        "fallback": build_source_validation_fallback(self, "formal_validator_unavailable")}
             return {"ok": True, "reasons": [], "fallback": ""}
         assert self.validator is not None
-        if self.requires_source_validation and not self.facts:
+        if self.requires_source_validation and (not self.facts or self.parameter_contract):
             trusted_claims, source_read, claim_sources = _trusted_tool_numeric_evidence_details(
                 messages or [],
                 self.source_paths,
                 self.validator,
+                required_source_path=self.parameter_contract.get("absolute_source_path"),
             )
             if not source_read:
                 return {
@@ -238,6 +244,9 @@ class AfterSalesTurn:
     ) -> list[dict[str, Any]]:
         if not self.evidence_sidecar_enabled or not self.fact_key:
             return []
+        contract = _complete_parameter_contract(self)
+        if contract is None:
+            return []
         assert self.validator is not None
         claims = list(self.validator.extract_numeric_claims(answer))
         if len(claims) != 1:
@@ -247,7 +256,8 @@ class AfterSalesTurn:
         source_path = source_details.get("source_path", "")
         relative_path = _relative_source_path(source_path, self.source_revisions)
         revision = self.source_revisions.get(relative_path, "")
-        if not relative_path or not revision:
+        if (relative_path != contract["source_path"]
+                or revision != contract["source_revision"]):
             return []
         value, unit = _split_numeric_claim(claim)
         if not value:
@@ -257,16 +267,18 @@ class AfterSalesTurn:
                 "fact_key": self.fact_key,
                 "value": value,
                 "unit": unit,
-                "conditions": [],
+                "conditions": list(contract["conditions"]),
                 "evidence_id": build_runtime_evidence_id(
                     source_revision=revision,
                     source_path=relative_path,
-                    locator="tool:read_file",
+                    locator=contract["source_locator"],
                     adopted_excerpt=claim,
                 ),
                 "source_path": relative_path,
                 "source_revision": revision,
-                "locator": "tool:read_file",
+                "locator": contract["source_locator"],
+                "source_document_id": contract["source_document_id"],
+                "source_version": contract["source_version"],
                 "tool_call_id": source_details.get("tool_call_id", ""),
             }
         ]
@@ -403,6 +415,48 @@ def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[
     return {"ok": not reasons, "reasons": list(dict.fromkeys(reasons))}
 
 
+def _complete_parameter_contract(turn: AfterSalesTurn) -> dict[str, Any] | None:
+    """Reuse/activation require the same adopted, current-source scalar contract."""
+    contract = turn.parameter_contract
+    required = ("fact_key", "value", "unit", "product_scope", "source_path", "source_revision",
+                "source_locator", "source_document_id", "source_version")
+    if (not isinstance(contract, dict)
+            or any(not isinstance(contract.get(key), str) or not contract[key] for key in required)
+            or not isinstance(contract.get("product_variant"), str)
+            or not isinstance(contract.get("conditions"), list)):
+        return None
+    if (not contract or turn.blocks_answer_generation or not turn.has_validator
+            or turn.answer_shape != "scalar_lookup"
+            or turn.fact_key != contract["fact_key"]
+            or turn.product_scope != contract["product_scope"]
+            or turn.product_variant != contract["product_variant"]
+            or turn.source_locator != contract["source_locator"]
+            or not contract.get("source_revision")
+            or turn.source_revisions.get(contract["source_path"]) != contract["source_revision"]
+            or not contract["conditions"]):
+        return None
+    expected = {_normalize_numeric_claim(item) for item in turn.expected_scalar_claims}
+    if expected != {_normalize_numeric_claim(f"{contract['value']} {contract['unit']}")}:
+        return None
+    return contract
+
+
+def _matches_parameter_claim(claim: dict[str, Any], contract: dict[str, Any]) -> bool:
+    conditions = claim.get("conditions")
+    return (
+        isinstance(conditions, list) and all(isinstance(item, str) for item in conditions)
+        and sorted(conditions) == contract["conditions"]
+        and claim.get("fact_key") == contract["fact_key"]
+        and _normalize_numeric_claim(f"{claim.get('value', '')} {claim.get('unit', '')}")
+        == _normalize_numeric_claim(f"{contract['value']} {contract['unit']}")
+        and claim.get("source_path") == contract["source_path"]
+        and claim.get("source_revision") == contract["source_revision"]
+        and claim.get("locator") == contract["source_locator"]
+        and claim.get("source_document_id") == contract["source_document_id"]
+        and claim.get("source_version") == contract["source_version"]
+    )
+
+
 def activate_validated_fact(
     session_db: Any,
     turn: AfterSalesTurn,
@@ -411,7 +465,8 @@ def activate_validated_fact(
     validation: dict[str, Any],
 ) -> bool:
     """Activate exactly one adopted scalar claim after final validation."""
-    if not validation.get("ok") or turn.answer_shape not in {"scalar_lookup", "direct_fact"}:
+    contract = _complete_parameter_contract(turn)
+    if contract is None or not isinstance(validation, dict) or validation.get("ok") is not True:
         return False
     if not turn.product_scope:
         return False
@@ -419,13 +474,9 @@ def activate_validated_fact(
     if len(claims) != 1:
         return False
     claim = claims[0]
-    if turn.expected_scalar_claims:
-        claim_text = f"{claim.get('value', '')} {claim.get('unit', '')}".strip()
-        if _normalize_numeric_claim(claim_text) not in {
-            _normalize_numeric_claim(item) for item in turn.expected_scalar_claims
-        }:
-            return False
-    fact_key = str(claim.get("fact_key") or _fact_key_for_question(question))
+    if not isinstance(claim, dict) or not _matches_parameter_claim(claim, contract):
+        return False
+    fact_key = contract["fact_key"]
     if not fact_key or not claim.get("evidence_id") or not claim.get("source_path"):
         return False
     revision = str(claim.get("source_revision") or "")
@@ -441,8 +492,6 @@ def activate_validated_fact(
             json.dumps(claim.get("conditions") or [], ensure_ascii=False, sort_keys=True),
         )
     )
-    import hashlib
-
     fact_id = "fact-" + hashlib.sha256(fact_id_payload.encode("utf-8")).hexdigest()[:24]
     return VerifiedFactService(session_db).activate(
         {
@@ -460,6 +509,9 @@ def activate_validated_fact(
                     "evidence_id": str(claim["evidence_id"]),
                     "source_path": str(claim["source_path"]),
                     "source_revision": revision,
+                    "locator": contract["source_locator"],
+                    "source_document_id": contract["source_document_id"],
+                    "source_version": contract["source_version"],
                 }
             ],
             "source_revision": revision,
@@ -495,7 +547,8 @@ class CriticalAfterSalesValidator:
 
 def _normalize_numeric_claim(value: str) -> str:
     return (
-        re.sub(r"\s+", "", value)
+        # The existing KB extractor accepts all three micro-litre spellings.
+        re.sub(r"u(?=l\b)", "µ", re.sub(r"\s+", "", value), flags=re.IGNORECASE)
         .replace("μ", "µ")
         .replace(">=", "≥")
         .replace("<=", "≤")
@@ -598,6 +651,8 @@ def _trusted_tool_numeric_evidence_details(
     messages: list[dict[str, Any]],
     source_paths: Any,
     validator: ModuleType,
+    *,
+    required_source_path: str | None = None,
 ) -> tuple[tuple[str, ...], bool, dict[str, dict[str, str]]]:
     trusted_paths = {
         str(Path(str(path)).expanduser().resolve())
@@ -622,6 +677,8 @@ def _trusted_tool_numeric_evidence_details(
             if not isinstance(arguments, dict) or not arguments.get("path"):
                 continue
             candidate = str(Path(str(arguments["path"])).expanduser().resolve())
+            if required_source_path is not None and candidate != required_source_path:
+                continue
             # Trust either the pre-injected source list or any formal source
             # path the agent actually read (dynamically discovered docs).
             if candidate in trusted_paths or _is_formal_source_path(candidate):
@@ -757,6 +814,7 @@ def prepare_after_sales_turn(
                 expected_scalar_claims=tuple(
                     str(item) for item in fast_result.get("expected_scalar_claims") or ()
                 ),
+                parameter_contract=dict(fast_result.get("parameter_contract") or {}),
                 source_locator=str(fast_result.get("source_locator") or ""),
                 prepared_ivd_turn=prepared_ivd_turn,
             ),
@@ -824,6 +882,7 @@ def prepare_after_sales_turn(
             expected_scalar_claims=tuple(
                 str(item) for item in fast_result.get("expected_scalar_claims") or ()
             ),
+            parameter_contract=dict(fast_result.get("parameter_contract") or {}),
             source_locator=str(fast_result.get("source_locator") or ""),
         ),
         guard=guard,
@@ -850,10 +909,19 @@ def _attach_verified_fact(
                            presentation_module_path=str(Path(module.__file__)))
     fact_key = str(turn.fact_key or _fact_key_for_question(question))
     source_revisions = _load_source_revisions(guard.get("knowledge_release_manifest"))
+    contract = dict(turn.parameter_contract)
+    if contract and source_revisions.get(contract["source_path"]):
+        try:
+            revision = hashlib.sha256(Path(contract["absolute_source_path"]).read_bytes()).hexdigest()
+        except OSError:
+            revision = ""
+        if revision and source_revisions[contract["source_path"]] == revision:
+            contract["source_revision"] = revision
     turn = replace(
         turn,
         fact_key=fact_key,
         source_revisions=source_revisions,
+        parameter_contract=contract,
         evidence_sidecar_enabled=bool(guard.get("evidence_sidecar_enabled", False)),
     )
     mode = str(guard.get("verified_fact_reuse_mode") or "off").strip().lower()
@@ -861,21 +929,26 @@ def _attach_verified_fact(
         mode = "off"
     if mode == "off" or session_db is None:
         return turn
-    if turn.answer_shape not in {"scalar_lookup", "direct_fact"} or not turn.product_scope:
-        return turn
-    if not fact_key:
-        return turn
-    if not source_revisions:
+    contract = _complete_parameter_contract(turn)
+    if contract is None:
         return turn
     match = VerifiedFactService(session_db).lookup(
         product_scope=turn.product_scope,
         product_variant=turn.product_variant,
         fact_key=fact_key,
-        conditions=[],
-        source_revisions=source_revisions,
+        conditions=contract["conditions"],
+        source_revisions={contract["source_path"]: contract["source_revision"]},
     )
     if match is None:
         return turn
+    evidence = match.get("evidence") or []
+    if (match.get("source_revision") != contract["source_revision"] or not evidence
+            or not all(isinstance(item, dict) and _matches_parameter_claim(
+                {**match, **item}, contract) for item in evidence)):
+        return turn
+    if mode == "shadow":
+        # A shadow cache hit cannot replace the independently valid formal card.
+        return replace(turn, verified_fact_hit=True, verified_fact_status="shadow")
     rendered_answer = str(match.get("rendered_answer") or "")
     if turn.answer_shape == "scalar_lookup" and turn.expected_scalar_claims:
         if turn.validator is None:
@@ -972,6 +1045,29 @@ def _canonical_scalar_response(claim: str) -> str:
     value = value.replace(">=", "≥").replace("<=", "≤")
     normalized_unit = re.sub(r"\s+", "", unit).replace("µ", "μ")
     return f"{value}{' ' + normalized_unit if normalized_unit else ''}。"
+
+
+def _parameter_card_contract(card: dict[str, Any], root: Path, sources: list[str]) -> dict[str, Any]:
+    """Adapt existing formal-card metadata; never infer a field or a value."""
+    required = ("fact_key", "value", "unit", "source_path", "source_document_id",
+                "source_version", "source_locator", "product_scope")
+    if any(not isinstance(card.get(key), str) or not card[key].strip() for key in required):
+        return {}
+    conditions = card.get("conditions")
+    if (not isinstance(conditions, dict) or not conditions
+            or any(not isinstance(key, str) or not isinstance(value, str) or not key or not value
+                   for key, value in conditions.items())):
+        return {}
+    relative = Path(card["source_path"])
+    if relative.is_absolute() or ".." in relative.parts or not relative.as_posix().startswith("knowledge-base/"):
+        return {}
+    source = (root / relative).resolve()
+    if not source.is_relative_to(root.resolve()) or not source.is_file() or str(source) not in sources:
+        return {}
+    return {**{key: card[key] for key in required},
+            "product_variant": str(card.get("product_variant") or ""),
+            "absolute_source_path": str(source), "source_revision": "",
+            "conditions": sorted(f"{key}={value}" for key, value in conditions.items())}
 
 
 def _render_fast_response_context(
@@ -1095,6 +1191,20 @@ def _render_fast_response_context(
             "numeric_fast_answer_allowed": False,
         }
         lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
+    parameter_contract = {}
+    if (not contract_guarded and gate.get("decision") != "block"
+            and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}
+            and fast_path.get("hit") is True
+            and fast_path.get("route_source") == "formal_answer_card"
+            and fast_path.get("numeric_fast_answer_allowed") is True
+            and answer_shape.get("answer_shape") == "scalar_lookup"
+            and answer_card.get("knowledge_kind") == "parameter"
+            and answer_card.get("effective_status") == "active"
+            and answer_card.get("authority_level") == "formal_authority"
+            and product_identity.get("product_scope_confirmed") is True
+            and product_identity.get("product_scope") == answer_card.get("product_scope")
+            and str(product_identity.get("product_variant") or "") == str(answer_card.get("product_variant") or "")):
+        parameter_contract = _parameter_card_contract(answer_card, kb_root, initial_files)
     if presentation_module is not None and answer_card and not contract_guarded and answer_card.get("source_document_id"):
         presentation = {**presentation, "verified_sources": [{
             "document": answer_card["source_document_id"],
@@ -1132,11 +1242,12 @@ def _render_fast_response_context(
         "direct_response": direct_response,
         "answer_card": dict(answer_card) if isinstance(answer_card, dict) else {},
         "contact_fact": dict(contact_fact) if isinstance(contact_fact, dict) else {},
-        "fact_key": str(plan.get("fact_key") or ""),
-        "expected_scalar_claims": tuple(
+        "parameter_contract": parameter_contract,
+        "fact_key": parameter_contract.get("fact_key") or str(plan.get("fact_key") or ""),
+        "expected_scalar_claims": (f"{parameter_contract['value']} {parameter_contract['unit']}",) if parameter_contract else tuple(
             str(item) for item in plan.get("expected_scalar_claims") or ()
         ),
-        "source_locator": str(plan.get("source_locator") or ""),
+        "source_locator": parameter_contract.get("source_locator") or str(plan.get("source_locator") or ""),
         "requires_source_validation": str(fast_path.get("answer_shape") or "")
         == "sop_parameter_short_answer",
     }

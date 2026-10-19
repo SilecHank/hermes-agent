@@ -1,4 +1,6 @@
 import os
+import hashlib
+import copy
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -79,6 +81,21 @@ def _presentation():
 
 
 NIFTY_SOURCE_REL = _parameter_card()["source_path"]
+SOURCE_REVISION = hashlib.sha256((KB / NIFTY_SOURCE_REL).read_bytes()).hexdigest()
+
+
+def _parameter_conditions():
+    return sorted(f"{key}={value}" for key, value in _parameter_card()["conditions"].items())
+
+
+def _validated_claim(**changes):
+    card = _parameter_card()
+    return dict({"fact_key": card["fact_key"], "value": card["value"], "unit": card["unit"],
+                 "conditions": _parameter_conditions(), "evidence_id": "fixture-validated",
+                 "source_path": card["source_path"], "source_revision": SOURCE_REVISION,
+                 "locator": card["source_locator"], "source_document_id": card["source_document_id"],
+                 "source_version": card["source_version"]}, **changes)
+
 
 
 
@@ -105,60 +122,31 @@ def _config_with_fast_response(enabled=True):
     return config
 
 
-def _verified_fact_fixture(
-    tmp_path,
-    *,
-    mode="active",
-    manifest_revision="rev-a",
-    value="200",
-    fact_key=None,
-):
+def _verified_fact_fixture(tmp_path, *, mode="active", manifest_revision=None,
+                           value="200", fact_key=None, record_changes=None):
+    card = _parameter_card()
     db = SessionDB(db_path=tmp_path / "state.db")
-    service = VerifiedFactService(db)
-    assert service.activate(
-        {
-            "fact_id": "fixture-nifty-plasma-volume",
-            "product_scope": "NIFTY",
-            "product_variant": "",
-            "question_type": "scalar_lookup",
-            "fact_key": fact_key or _parameter_card()["fact_key"],
-            "value": value,
-            "unit": "μL",
-            "conditions": [],
-            "answer_template": "{value} {unit}。",
-            "evidence": [
-                {
-                    "evidence_id": "ev-a",
-                    "source_path": NIFTY_SOURCE_REL,
-                    "source_revision": "rev-a",
-                }
-            ],
-            "source_revision": "rev-a",
-            "status": "active",
-        }
-    )
+    record = {
+        "fact_id": "fixture-nifty-plasma-volume", "product_scope": card["product_scope"],
+        "product_variant": card["product_variant"], "question_type": "scalar_lookup",
+        "fact_key": fact_key or card["fact_key"], "value": value, "unit": card["unit"],
+        "conditions": _parameter_conditions(), "answer_template": "{value} {unit}。",
+        "evidence": [{"evidence_id": "ev-a", "source_path": NIFTY_SOURCE_REL,
+                      "source_revision": SOURCE_REVISION, "locator": card["source_locator"],
+                      "source_document_id": card["source_document_id"], "source_version": card["source_version"]}],
+        "source_revision": SOURCE_REVISION, "status": "active",
+    }
+    record.update(record_changes or {})
+    assert VerifiedFactService(db).activate(record)
     manifest = tmp_path / "knowledge-release.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "status": "ready",
-                "source_revisions": {
-                    NIFTY_SOURCE_REL: manifest_revision
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest.write_text(json.dumps({"status": "ready", "source_revisions": {
+        NIFTY_SOURCE_REL: manifest_revision if manifest_revision is not None else SOURCE_REVISION}}))
     config = _config_with_fast_response()
-    config["after_sales_guard"].update(
-        {
-            "answer_shape_enabled": True,
-            "evidence_sidecar_enabled": True,
-            "verified_fact_reuse_mode": mode,
-            "knowledge_release_manifest": str(manifest),
-        }
-    )
+    config["after_sales_guard"].update({
+        "answer_shape_enabled": True, "evidence_sidecar_enabled": True,
+        "verified_fact_reuse_mode": mode, "knowledge_release_manifest": str(manifest)})
     return db, config
+
 
 
 def _write_experience_modules(tmp_path):
@@ -497,9 +485,9 @@ def test_fast_parameter_turn_requires_reading_routed_source_and_rejects_unknown_
     assert "SOP编号" not in missing_source["fallback"]
     assert supported["ok"] is True
     assert unsupported["ok"] is False
-    assert unsupported["reasons"] == ["unsupported_numeric_claim:400μL"]
+    assert unsupported["reasons"] == ["scalar_claim_mismatch"]
     assert "请重新读取" not in unsupported["fallback"]
-    assert unsupported["fallback"] == "当前数值与已核实的正式来源不一致，已停止发送该数值结论。"
+    assert unsupported["fallback"] == "当前草稿数值与该产品、该参数字段的正式值不一致。"
 
 
 def test_fast_plan_carries_canonical_answer_shape_into_turn():
@@ -692,7 +680,9 @@ def test_shadow_fact_hit_does_not_bypass_model(tmp_path):
 
     assert turn is not None
     assert turn.verified_fact_hit is True
-    assert turn.direct_response == ""
+    assert turn.direct_response == _parameter_card()["answer_text"]
+    assert turn.resolved_answer.source_kind == "formal_answer_card"
+    assert "ev-a" not in turn.direct_evidence_ids
 
 
 def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
@@ -710,13 +700,14 @@ def test_active_fact_hit_returns_direct_answer_without_model(tmp_path):
     assert turn is not None
     assert turn.answer_shape == "scalar_lookup"
     assert turn.verified_fact_hit is True
-    assert turn.direct_response == "200 μL。"
+    assert turn.direct_response == _parameter_card()["answer_text"] + "。"
     assert result["api_calls"] == 0
-    assert result["final_response"] == turn.present_text("200 μL。")
+    assert result["final_response"] == turn.present_text(_parameter_card()["answer_text"] + "。")
 
 
 def test_active_fact_with_old_scalar_value_does_not_bypass_current_route(tmp_path):
-    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240", fact_key="volume")
+    db, config = _verified_fact_fixture(tmp_path, mode="active", value="240", fact_key="volume",
+                                         record_changes={"conditions": []})
 
     turn = prepare_after_sales_turn(
         config,
@@ -728,7 +719,9 @@ def test_active_fact_with_old_scalar_value_does_not_bypass_current_route(tmp_pat
 
     assert turn is not None
     assert turn.verified_fact_hit is False
-    assert turn.direct_response == ""
+    assert turn.direct_response == _parameter_card()["answer_text"]
+    assert turn.resolved_answer.source_kind == "formal_answer_card"
+    assert "240" not in build_direct_fact_result(turn, SCALAR_QUESTION)["final_response"]
 
 
 def test_ascii_threshold_operator_is_preserved_in_canonical_response():
@@ -754,7 +747,6 @@ def test_stale_source_revision_disables_direct_fact_reuse(tmp_path):
         mode="active",
         manifest_revision="rev-b",
         value="777",
-        fact_key="volume",
     )
 
     turn = prepare_after_sales_turn(
@@ -780,21 +772,7 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
         history=[],
         session_db=db,
     )
-    validation = {
-        "ok": True,
-        "adopted_claims": [
-            {
-                "fact_key": _parameter_card()["fact_key"],
-                "value": "200",
-                "unit": "μL",
-                "conditions": [],
-                "evidence_id": "ev-new",
-                "source_path": NIFTY_SOURCE_REL,
-                "source_revision": "rev-a",
-                "locator": "fact:dna_starting_input",
-            }
-        ],
-    }
+    validation = {"ok": True, "adopted_claims": [_validated_claim(evidence_id="ev-new")]}
 
     assert activate_validated_fact(
         db,
@@ -806,10 +784,10 @@ def test_validated_adopted_claim_activates_rebuildable_fact(tmp_path):
         product_scope="NIFTY",
         product_variant="",
         fact_key=_parameter_card()["fact_key"],
-        conditions=[],
-        source_revisions={NIFTY_SOURCE_REL: "rev-a"},
+        conditions=_parameter_conditions(),
+        source_revisions={NIFTY_SOURCE_REL: SOURCE_REVISION},
     )
-    assert match["rendered_answer"] == "200 μL。"
+    assert match["rendered_answer"] == _parameter_card()["answer_text"] + "。"
 
 
 def test_fact_activation_rejects_value_outside_current_scalar_contract(tmp_path):
@@ -826,20 +804,7 @@ def test_fact_activation_rejects_value_outside_current_scalar_contract(tmp_path)
         db,
         turn,
         question=SCALAR_QUESTION,
-        validation={
-            "ok": True,
-            "adopted_claims": [
-                {
-                    "fact_key": _parameter_card()["fact_key"],
-                    "value": "100",
-                    "unit": "μL",
-                    "conditions": [],
-                    "evidence_id": "ev-old",
-                    "source_path": NIFTY_SOURCE_REL,
-                    "source_revision": "rev-a",
-                }
-            ],
-        },
+        validation={"ok": True, "adopted_claims": [_validated_claim(value="100", evidence_id="ev-old")]},
     ) is False
 
 
@@ -879,7 +844,7 @@ def test_read_formal_source_builds_one_runtime_adopted_claim(tmp_path):
     assert result["ok"] is True
     assert len(result["adopted_claims"]) == 1
     assert result["adopted_claims"][0]["value"] == "200"
-    assert result["adopted_claims"][0]["source_revision"] == "rev-a"
+    assert result["adopted_claims"][0]["source_revision"] == SOURCE_REVISION
     assert result["adopted_claims"][0]["tool_call_id"] == "source-read"
 
 
@@ -889,9 +854,7 @@ def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path, vali
     turn = prepare_after_sales_turn(
         config, platform="weixin", message=SCALAR_QUESTION, history=[], session_db=db,
     )
-    claim = {"fact_key": _parameter_card()["fact_key"], "value": "200", "unit": "μL",
-             "conditions": [], "evidence_id": "ev-multi", "source_path": NIFTY_SOURCE_REL,
-             "source_revision": "rev-a"}
+    claim = _validated_claim(evidence_id="ev-multi")
     validation = {
         "not_validated": {"ok": False, "adopted_claims": []},
         "zero_claims": {"ok": True, "adopted_claims": []},
@@ -899,10 +862,10 @@ def test_unvalidated_or_multi_claim_answer_does_not_activate_fact(tmp_path, vali
     }[validation_case]
     assert activate_validated_fact(db, turn, question=SCALAR_QUESTION, validation=validation) is False
     match = VerifiedFactService(db).lookup(
-        product_scope="NIFTY", product_variant="", fact_key=_parameter_card()["fact_key"], conditions=[],
-        source_revisions={NIFTY_SOURCE_REL: "rev-a"},
+        product_scope="NIFTY", product_variant="", fact_key=_parameter_card()["fact_key"], conditions=_parameter_conditions(),
+        source_revisions={NIFTY_SOURCE_REL: SOURCE_REVISION},
     )
-    assert match["rendered_answer"] == "200 μL。"
+    assert match["rendered_answer"] == _parameter_card()["answer_text"] + "。"
 
 
 
@@ -1289,3 +1252,156 @@ def test_kb_binding_checks_staged_pair_and_tracked_inputs(tmp_path, monkeypatch,
     else:
         with pytest.raises(RuntimeError, match="KB binding"):
             _knowledgehub_root(agent_root=agent)
+
+
+@pytest.mark.parametrize('fault', ['key', 'value', 'unit', 'revision', 'locator', 'conditions_empty',
+                                  'method', 'object', 'step', 'source', 'document', 'version'])
+def test_cache_rejects_any_outside_parameter_contract_and_keeps_formal_card(tmp_path, fault):
+    card = _parameter_card()
+    evidence = dict(_validated_claim())
+    evidence.pop('conditions')
+    changes = {}
+    if fault == 'key': changes['fact_key'] = 'volume'
+    elif fault == 'value': changes['value'] = '240'
+    elif fault == 'unit': changes['unit'] = 'mL'
+    elif fault == 'revision':
+        changes['source_revision'] = 'old-revision'; evidence['source_revision'] = 'old-revision'
+    elif fault == 'conditions_empty': changes['conditions'] = []
+    elif fault in {'method', 'object', 'step'}:
+        key = {'method': 'method', 'object': 'sample_object', 'step': 'step_label'}[fault]
+        changes['conditions'] = sorted(x if not x.startswith(key+'=') else key+'=wrong' for x in _parameter_conditions())
+    else:
+        key = {'locator': 'locator', 'source': 'source_path', 'document': 'source_document_id', 'version': 'source_version'}[fault]
+        evidence[key] = 'wrong-'+fault
+    changes['evidence'] = [evidence]
+    db, config = _verified_fact_fixture(tmp_path, record_changes=changes)
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    assert turn.verified_fact_hit is False
+    assert turn.direct_response == card['answer_text']
+    assert turn.resolved_answer.source_kind == 'formal_answer_card'
+
+
+@pytest.mark.parametrize('fault', ['key', 'value', 'unit', 'revision', 'locator', 'conditions_empty',
+                                  'method', 'source', 'document', 'version'])
+def test_activation_independently_rejects_manual_ok_outside_contract(tmp_path, fault):
+    claim = _validated_claim()
+    if fault == 'conditions_empty': claim['conditions'] = []
+    elif fault == 'method': claim['conditions'] = ['method=wrong']
+    else:
+        key = {'key':'fact_key', 'value':'value', 'unit':'unit', 'revision':'source_revision', 'locator':'locator',
+               'source':'source_path', 'document':'source_document_id', 'version':'source_version'}[fault]
+        claim[key] = '100' if fault == 'value' else 'mL' if fault == 'unit' else 'wrong-'+fault
+    db, config = _verified_fact_fixture(tmp_path, mode='off')
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    before = db._conn.execute('SELECT * FROM ivd_verified_facts').fetchall()
+    assert activate_validated_fact(db, turn, question=SCALAR_QUESTION,
+                                   validation={'ok':True,'adopted_claims':[claim]}) is False
+    assert db._conn.execute('SELECT * FROM ivd_verified_facts').fetchall() == before
+
+
+def _plan_fixture(tmp_path, plan):
+    p = tmp_path / 'fixture-kb/scripts/hermes_fast_response_pipeline.py'
+    p.parent.mkdir(parents=True)
+    source = p.parent.parent / NIFTY_SOURCE_REL
+    source.parent.mkdir(parents=True)
+    source.write_bytes((KB / NIFTY_SOURCE_REL).read_bytes())
+    (p.parent / 'hermes_channel_presentation.py').write_bytes((KB / 'scripts/hermes_channel_presentation.py').read_bytes())
+    p.write_text('def build_fast_response_plan(*args, **kwargs):\n    return '+repr(plan)+'\n')
+    return p
+
+
+@pytest.mark.parametrize('fault', ['valid', 'expert_block', 'preflight_block', 'not_adopted', 'identity_unconfirmed',
+                                  'wrong_scope', 'wrong_variant', 'inactive', 'not_formal', 'missing_unit',
+                                  'missing_locator', 'empty_conditions', 'not_parameter'])
+def test_non_adopted_or_incomplete_card_cannot_promote_cache_or_activation(tmp_path, fault):
+    path = KB / 'scripts/hermes_fast_response_pipeline.py'
+    plan = copy.deepcopy(_load_module(str(path), path.stat().st_mtime_ns).build_fast_response_plan(SCALAR_QUESTION))
+    if fault == 'expert_block': plan['expert_route_contract'] = {'status':'blocked','formal_answer_allowed':False,'bounded_expert_answer_allowed':False}
+    elif fault == 'preflight_block': plan['preflight_gate'] = {'decision':'block','pipeline_action':'stop_before_final_answer'}
+    elif fault == 'not_adopted': plan['fast_path']['hit'] = False
+    elif fault == 'missing_unit': plan['fast_path']['answer_card'].pop('unit')
+    elif fault == 'missing_locator': plan['fast_path']['answer_card'].pop('source_locator')
+    elif fault == 'empty_conditions': plan['fast_path']['answer_card']['conditions'] = {}
+    elif fault == 'not_parameter': plan['fast_path']['answer_card']['knowledge_kind'] = 'contact'
+    elif fault == 'identity_unconfirmed': plan['product_identity']['product_scope_confirmed'] = False
+    elif fault == 'wrong_scope': plan['fast_path']['answer_card']['product_scope'] = 'other'
+    elif fault == 'wrong_variant': plan['fast_path']['answer_card']['product_variant'] = 'other'
+    elif fault == 'inactive': plan['fast_path']['answer_card']['effective_status'] = 'pending_verify'
+    elif fault == 'not_formal': plan['fast_path']['answer_card']['authority_level'] = 'candidate'
+    db, config = _verified_fact_fixture(tmp_path)
+    config['after_sales_guard']['fast_response_module'] = str(_plan_fixture(tmp_path, plan))
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    if fault == 'valid':
+        assert turn.verified_fact_hit is True
+        assert activate_validated_fact(db, turn, question=SCALAR_QUESTION,
+                                       validation={'ok':True,'adopted_claims':[_validated_claim()]}) is True
+    else:
+        assert turn.verified_fact_hit is False
+        assert activate_validated_fact(db, turn, question=SCALAR_QUESTION,
+                                       validation={'ok':True,'adopted_claims':[_validated_claim()]}) is False
+
+
+def test_parameter_contract_is_shared_across_four_platforms(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode='off')
+    contracts = []
+    for platform in ('weixin','wecom','qqbot','telegram'):
+        turn = prepare_after_sales_turn(config, platform=platform, message=SCALAR_QUESTION, history=[], session_db=db)
+        assert turn.fact_key == _parameter_card()['fact_key']
+        assert turn.expected_scalar_claims == ('200 uL',)
+        contracts.append(turn.parameter_contract)
+    assert all(c == contracts[0] for c in contracts)
+    assert contracts[0]['source_revision'] == SOURCE_REVISION
+    assert contracts[0]['conditions'] == _parameter_conditions()
+
+
+def test_validate_to_activation_preserves_real_card_locator_and_conditions(tmp_path):
+    db, config = _verified_fact_fixture(tmp_path, mode='off')
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    messages = [{'role':'assistant','tool_calls':[{'id':'real-contract-fixture','function':{
+        'name':'read_file','arguments':json.dumps({'path':turn.source_paths[0]})}}]},
+        {'role':'tool','tool_call_id':'real-contract-fixture','content':'fixture:本字段200μL，另一字段600μL。'}]
+    validation = turn.validate('200 μL。', messages=messages)
+    assert validation['ok'] is True
+    assert validation['adopted_claims'][0]['locator'] == _parameter_card()['source_locator']
+    assert validation['adopted_claims'][0]['conditions'] == _parameter_conditions()
+    assert activate_validated_fact(db, turn, question=SCALAR_QUESTION, validation=validation) is True
+
+
+@pytest.mark.parametrize('missing', ['manifest', 'validator', 'method'])
+def test_missing_contract_prerequisite_never_enables_reuse_or_activation(tmp_path, missing):
+    db, config = _verified_fact_fixture(tmp_path)
+    question = SCALAR_QUESTION
+    if missing == 'manifest': config['after_sales_guard'].pop('knowledge_release_manifest')
+    elif missing == 'validator': config['after_sales_guard']['validator_module'] = str(tmp_path / 'absent.py')
+    elif missing == 'method': question = '无创提取需要多少血浆'
+    turn = prepare_after_sales_turn(config, platform='weixin', message=question, history=[], session_db=db)
+    assert turn.verified_fact_hit is False
+    assert activate_validated_fact(db, turn, question=question,
+                                   validation={'ok':True,'adopted_claims':[_validated_claim()]}) is False
+    if missing == 'validator':
+        assert turn.validate('200 μL。')['reasons'] == ['formal_validator_unavailable']
+
+
+def test_selected_scalar_requires_its_source_but_legacy_dynamic_formal_reads_still_work():
+    from gateway.after_sales_guard import _trusted_tool_numeric_evidence_details
+    turn = prepare_after_sales_turn(_config_with_fast_response(), platform='weixin', message=SCALAR_QUESTION, history=[])
+    other = str(KB / 'knowledge-base/reference/nifty-troubleshooting-tree.md')
+    messages = [{'role':'assistant','tool_calls':[{'id':'other-source','function':{
+        'name':'read_file','arguments':json.dumps({'path':other})}}]},
+        {'role':'tool','tool_call_id':'other-source','content':'fixture:200μL'}]
+    assert turn.validate('200 μL。', messages=messages)['reasons'] == ['formal_source_not_read']
+    claims, read, _ = _trusted_tool_numeric_evidence_details(messages, [], turn.validator)
+    assert read is True
+    assert claims == ('200μL',)
+
+
+@pytest.mark.parametrize("fault", ["key_only", "missing_variant"])
+def test_incomplete_turn_contract_cannot_activate_even_with_manual_ok(tmp_path, fault):
+    db, config = _verified_fact_fixture(tmp_path, mode='off')
+    turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
+    # Component boundary: a truncated internal contract is not a new authority.
+    contract = {'fact_key': _parameter_card()['fact_key']} if fault == 'key_only' else dict(turn.parameter_contract)
+    if fault == 'missing_variant': contract.pop('product_variant')
+    incomplete = replace(turn, parameter_contract=contract)
+    assert activate_validated_fact(db, incomplete, question=SCALAR_QUESTION,
+                                   validation={'ok':True,'adopted_claims':[_validated_claim()]}) is False
