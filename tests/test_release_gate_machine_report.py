@@ -118,3 +118,64 @@ def test_gate_wrapper_uses_bound_python_despite_stale_home_venv(tmp_path):
     assert data['status'] == 'ready'
     assert data['interpreter'] == os.path.abspath(sys.executable)
     assert data['files'][0]['interpreter'] == os.path.abspath(sys.executable)
+
+
+def _run_selection_probe(tmp_path, paths, *, release=True, extra=()):
+    repo = Path(__file__).resolve().parents[1]
+    report = tmp_path / 'selection-report.json'
+    env = dict(os.environ, HERMES_TEST_DURATION_CACHE='0')
+    env.pop('HERMES_RELEASE_GATE_REPORT', None)
+    env.pop('HERMES_RELEASE_GATE_ATTEMPT', None)
+    if release:
+        env.update(HERMES_RELEASE_GATE_REPORT=str(report), HERMES_RELEASE_GATE_ATTEMPT='selection')
+    proc = subprocess.run([sys.executable, str(repo / 'scripts/run_tests_parallel.py'),
+                           '-j2', '--file-retries', '0', *map(str, paths), *extra],
+                          env=env, capture_output=True, text=True, timeout=40)
+    return proc, json.loads(report.read_text()) if report.exists() else None
+
+
+def test_release_selection_preserves_explicit_request_order(tmp_path):
+    last = tmp_path / 'test_z_requested_first.py'
+    first = tmp_path / 'test_a_requested_second.py'
+    last.write_text('import time\ndef test_z(): time.sleep(0.2)\n')
+    first.write_text('def test_a(): pass\n')
+    proc, report = _run_selection_probe(tmp_path, [last, first])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert report['status'] == 'ready'
+    assert [r['path'] for r in report['files']] == [str(last), str(first)]
+
+
+@pytest.mark.parametrize('bad', ['missing', 'duplicate', 'directory'])
+def test_release_selection_invalidates_before_any_test_runs(tmp_path, bad):
+    probe = tmp_path / 'test_valid.py'
+    touched = tmp_path / 'was-executed'
+    probe.write_text(f'from pathlib import Path\ndef test_valid(): Path({str(touched)!r}).touch()\n')
+    invalid = {'missing': tmp_path / 'test_absent.py', 'duplicate': probe,
+               'directory': tmp_path}[bad]
+    proc, report = _run_selection_probe(tmp_path, [probe, invalid])
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert report['status'] == 'blocked'
+    assert not touched.exists(), 'invalid selection must fail before executing even valid files'
+    assert 'release gate selection' in proc.stderr
+
+
+@pytest.mark.parametrize('extra_kind', ['extra', 'duplicate'])
+def test_report_rejects_unrequested_or_duplicate_results(tmp_path, extra_kind):
+    from scripts.run_tests_parallel import _write_gate_report
+    requested = tmp_path / 'test_wanted.py'
+    row = dict(path=requested.name, tests=1, passed=1, failed=0, errors=0,
+               skipped=0, xfailed=0, xpassed=0, completed=True, returncode=0,
+               interpreter=os.path.abspath(sys.executable))
+    other = dict(row, path='test_unrequested.py') if extra_kind == 'extra' else dict(row)
+    report = tmp_path / 'report.json'
+    _write_gate_report(str(report), 'attempt', [requested], [row, other], tmp_path)
+    data = json.loads(report.read_text())
+    assert data['status'] == 'blocked'
+    assert len(data['files']) == 2, 'do not hide evidence by deduplication or filtering'
+
+
+def test_ordinary_discovery_keeps_sorted_deduplicated_compatibility(tmp_path):
+    from scripts.run_tests_parallel import _discover_files
+    z = tmp_path / 'test_z.py'; z.touch()
+    a = tmp_path / 'test_a.py'; a.touch()
+    assert _discover_files([z, a, z, tmp_path / 'test_missing.py']) == [a, z]

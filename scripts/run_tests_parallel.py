@@ -99,6 +99,12 @@ def _write_gate_report(destination: str, attempt: str, files: list[Path],
         if path not in reported:
             results.append(dict.fromkeys(_GATE_COUNTS, 0) | dict(
                 path=path, completed=False, returncode=None))
+    # Completion order is nondeterministic with multiple workers. Only reorder
+    # exact, unique coverage; retain duplicate/extra rows so they remain invalid.
+    result_paths = [row['path'] for row in results]
+    if len(set(result_paths)) == len(result_paths) and sorted(result_paths) == sorted(paths):
+        by_path = {row['path']: row for row in results}
+        results = [by_path[path] for path in paths]
     totals = {key: sum(row.get(key, 0) for row in results) for key in _GATE_COUNTS}
     ready = bool(attempt and paths and len(set(paths)) == len(paths)
                  and sorted(row['path'] for row in results) == sorted(paths)
@@ -260,6 +266,21 @@ def _discover_files(roots: List[Path]) -> List[Path]:
             seen.add(real)
             out.append(path)
     return sorted(out)
+
+
+def _release_gate_files(roots: List[Path]) -> List[Path]:
+    """Validate the complete explicit selection before starting any subprocess."""
+    if not roots:
+        raise ValueError("release gate selection is empty")
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_file() or root.suffix != ".py":
+            raise ValueError(f"release gate selection requires an existing Python file: {root}")
+        real = root.resolve()
+        if real in seen:
+            raise ValueError(f"release gate selection contains a duplicate file: {root}")
+        seen.add(real)
+    return list(roots)
 
 
 def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
@@ -957,7 +978,18 @@ def main() -> int:
             global _SKIP_PARTS  # noqa: PLW0603 — config knob
             _SKIP_PARTS = set()
 
-        files = _discover_files(roots)
+        files = [] if gate_destination else _discover_files(roots)
+
+    if gate_destination:
+        try:
+            if slice_raw or args.generate_slices is not None:
+                raise ValueError("release gate selection cannot be sliced")
+            if args.files and args.paths_positional:
+                raise ValueError("release gate selection cannot mix --files and positional paths")
+            files = _release_gate_files(files if args.files else roots)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     if not files:
         print("No test files to run", file=sys.stderr)
