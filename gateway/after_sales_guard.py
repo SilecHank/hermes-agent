@@ -723,6 +723,15 @@ def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
     return module
 
 
+def _clarification_history(message: str, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if str(message).lstrip().startswith("["):
+        return []
+    return [item for item in history if item.get("role") == "user"
+            and isinstance(item.get("content"), str)
+            and not item["content"].lstrip().startswith("[")
+            and not any(item.get(key) for key in ("observed", "mirror", "user_id", "sender_id"))]
+
+
 def prepare_after_sales_turn(
     config: dict[str, Any],
     *,
@@ -758,13 +767,22 @@ def prepare_after_sales_turn(
     if module_path.is_file() and validator_path.is_file() and cards_dir.is_dir():
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
-        match = module.match_case_facts(cards_dir, message=message, history=history)
+        try:
+            match = module.match_case_facts(cards_dir, message=message, history=history)
+            if match and (match.get("facts") or {}).get("clarification"):
+                # Shared-chat display names are not verified actor identities.
+                match = module.match_case_facts(cards_dir, message=message,
+                                                history=_clarification_history(message, history))
+        except ValueError:
+            # An invalid/unavailable card cannot authorize any fact. The
+            # planner still supplies a safe clarification, never an answer.
+            match = None
 
     experience_context = _render_answer_experience_context(
         guard,
         platform=normalized_platform,
     )
-    fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform)
+    fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform, history=history)
     if fast_result.get("presentation_contract"):
         experience_context = ""
     fast_context = str(fast_result.get("context") or "")
@@ -1078,6 +1096,7 @@ def _render_fast_response_context(
     message: str,
     match: dict[str, Any] | None,
     platform: str = "generic",
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     module_path = Path(str(guard.get("fast_response_module") or ""))
     if not module_path.is_file():
@@ -1091,6 +1110,22 @@ def _render_fast_response_context(
         kwargs = {"question_type": question_type}
         if "platform" in inspect.signature(module.build_fast_response_plan).parameters:
             kwargs["platform"] = platform
+        parameters = inspect.signature(module.build_fast_response_plan).parameters
+        if ("conversation_context" in parameters and hasattr(module, "build_context_envelope")
+                and isinstance(match, dict) and (match.get("facts") or {}).get("clarification")):
+            # History is the caller's conversation-scoped input; never read another session.
+            prior = {}
+            for item in _clarification_history(message, history or [])[-12:]:
+                if item.get("role") == "user" and isinstance(item.get("content"), str):
+                    prior = module.build_context_envelope(item["content"], conversation_context=prior)
+            current_identity = module.match_product_scope(message)
+            if (prior.get("conflicts") or
+                (current_identity.get("product_scope_confirmed") and prior.get("product_line")
+                 and current_identity.get("product_scope") != prior["product_line"])):
+                prior = {}
+            kwargs["conversation_context"] = prior
+        if "workflow_clarification" in parameters and isinstance(match, dict):
+            kwargs["workflow_clarification"] = (match.get("facts") or {}).get("clarification")
         plan = module.build_fast_response_plan(message, **kwargs)
     except Exception:
         return {}
@@ -1180,6 +1215,18 @@ def _render_fast_response_context(
                 missing.insert(0, "产品名称")
             request = "请确认" + "、".join(missing) + "。" if missing else "需要进一步核对对应正式来源。"
             direct_response = "现有上下文或正式证据不足，暂不输出未经核实的正式数值结论。" + request
+        elif str(answer_shape.get("answer_shape") or "") == "diagnostic":
+            clarification = expert_contract.get("clarification") or {}
+            known = clarification.get("known_context") or {}
+            gaps = [item["question"] for item in clarification.get("gaps") or []
+                    if isinstance(item, dict) and isinstance(item.get("question"), str)][:2]
+            if gaps:
+                scope = ("已记录你提供的分析版本" + str(known["product_version"]) + "，适用性仍需核对。"
+                         if known.get("product_version") else "适用分析版本尚未确认，暂不作产品特定解释。")
+                direct_response = "\n".join([str(clarification.get("acknowledgement") or "现有信息尚不足以解释变化原因。"),
+                    scope, *gaps, str(clarification.get("next_action") or "再对照对应分析流程核对。")])
+            else:
+                direct_response = "暂不能判断个案原因。请确认发生变化的完整结果字段，以及两次采用的分析流程？拿到这些信息后再核对可比性与对应流程。"
         else:
             direct_response = "当前尚未核实到足以支持此问题的正式来源，需要继续核对适用的受控文件。"
         contract_guarded = True
