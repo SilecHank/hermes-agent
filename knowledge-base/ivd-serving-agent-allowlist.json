@@ -62,6 +62,7 @@
     "gateway/ivd_execution_contract.py",
     "gateway/ivd_final_validator.py",
     "gateway/ivd_knowledge_engine.py",
+    "gateway/ivd_parameter_scope.py",
     "gateway/ivd_receipt_sink.py",
     "gateway/ivd_renderer.py",
     "gateway/ivd_route_epoch.py",
@@ -166,6 +167,8 @@
     "tools/file_state.py",
     "tools/file_tools.py",
     "tools/registry.py",
+    "tools/threat_patterns.py",
+    "tools/skill_provenance.py",
     "utils.py"
   ],
   "forbidden_paths": [

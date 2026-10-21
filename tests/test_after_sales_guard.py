@@ -1515,3 +1515,12 @@ def test_local_only_git_checks_real_objects_and_protocol(tmp_path, fault):
             root.mkdir()
         with pytest.raises((ValueError, subprocess.SubprocessError), match="local-only|missing|repository"):
             _verify_local_git_tree(root)
+
+
+def test_serving_artifact_startup_imports_are_closed(tmp_path):
+    """The existing formal Agent gate must exercise the shipped startup artifact."""
+    from tests.test_ivd_serving_agent_cold_import import (
+        test_serving_artifact_cold_start_import_is_closed as check_artifact,
+    )
+
+    check_artifact(tmp_path, 'gateway.run')
