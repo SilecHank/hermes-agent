@@ -777,6 +777,7 @@ def prepare_after_sales_turn(
             # An invalid/unavailable card cannot authorize any fact. The
             # planner still supplies a safe clarification, never an answer.
             match = None
+            guard = {**guard, "_workflow_card_unavailable": True}
 
     experience_context = _render_answer_experience_context(
         guard,
@@ -1130,7 +1131,10 @@ def _render_fast_response_context(
     except Exception:
         return {}
     runtime_preflight = plan.get("runtime_preflight") or {}
-    if not runtime_preflight.get("eligible", False):
+    workflow_clarification = (plan.get("expert_route_contract") or {}).get("clarification") or {}
+    clarification_required = bool(guard.get("_workflow_card_unavailable") or
+        (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
+    if not runtime_preflight.get("eligible", False) and not clarification_required:
         return {}
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
@@ -1192,6 +1196,11 @@ def _render_fast_response_context(
     elif direct_response and answer_card:
         lines.append("已解析正式答案卡，直接采用卡内当前值，不再重复检索或调用模型。")
     expert_contract = plan.get("expert_route_contract") or {}
+    if clarification_required and not workflow_clarification.get("workflow"):
+        # Invalid policy/card inputs can only request a fixed non-answer fallback.
+        expert_contract = {"status": "clarification", "formal_answer_allowed": False,
+                           "bounded_expert_answer_allowed": False, "clarification": {}}
+        answer_shape = {"answer_shape": "diagnostic"}
     contract_guarded = False
     contract_status = str(expert_contract.get("status") or "")
     if (
@@ -1205,7 +1214,7 @@ def _render_fast_response_context(
         scalar_question = str(answer_shape.get("answer_shape") or "") in {
             "scalar_lookup", "scoped_scalar", "ambiguous_scalar"
         }
-        if scalar_question:
+        if scalar_question and not workflow_clarification.get("workflow"):
             envelope = plan.get("context_envelope") or {}
             labels = {"product_line": "产品名称", "product_version": "适用版本",
                       "method": "实验方法", "workflow_step": "具体步骤", "sample_type": "样本类型"}
@@ -1215,18 +1224,13 @@ def _render_fast_response_context(
                 missing.insert(0, "产品名称")
             request = "请确认" + "、".join(missing) + "。" if missing else "需要进一步核对对应正式来源。"
             direct_response = "现有上下文或正式证据不足，暂不输出未经核实的正式数值结论。" + request
-        elif str(answer_shape.get("answer_shape") or "") == "diagnostic":
-            clarification = expert_contract.get("clarification") or {}
-            known = clarification.get("known_context") or {}
-            gaps = [item["question"] for item in clarification.get("gaps") or []
-                    if isinstance(item, dict) and isinstance(item.get("question"), str)][:2]
-            if gaps:
-                scope = ("已记录你提供的分析版本" + str(known["product_version"]) + "，适用性仍需核对。"
-                         if known.get("product_version") else "适用分析版本尚未确认，暂不作产品特定解释。")
-                direct_response = "\n".join([str(clarification.get("acknowledgement") or "现有信息尚不足以解释变化原因。"),
-                    scope, *gaps, str(clarification.get("next_action") or "再对照对应分析流程核对。")])
-            else:
-                direct_response = "暂不能判断个案原因。请确认发生变化的完整结果字段，以及两次采用的分析流程？拿到这些信息后再核对可比性与对应流程。"
+        elif (str(answer_shape.get("answer_shape") or "") == "diagnostic"
+              or workflow_clarification.get("workflow")):
+            renderer = getattr(module, "render_expert_clarification", None)
+            direct_response = (renderer(expert_contract.get("clarification"),
+                                       product=product_identity.get("product_scope"))
+                               if callable(renderer) else
+                               "暂不能判断个案原因。请确认发生变化的完整结果字段，以及两次采用的分析流程？拿到这些信息后再核对可比性与对应流程。")
         else:
             direct_response = "当前尚未核实到足以支持此问题的正式来源，需要继续核对适用的受控文件。"
         contract_guarded = True
