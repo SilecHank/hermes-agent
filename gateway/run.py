@@ -3649,9 +3649,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform: str,
         message: str,
         history: list[dict[str, Any]],
+        business_message: str | None = None,
+        business_history_isolated: bool = False,
     ) -> tuple[Any, Any]:
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
+        routing_history = [] if business_history_isolated else history
         normalized_platform = str(platform or "").strip().lower()
         prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
         prepared = prepared_contracts.get(normalized_platform)
@@ -3660,7 +3663,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             exclusive = execute_exclusive_ivd_turn(
                 prepared,
                 question=message,
-                history=history,
+                business_question=business_message,
+                history=routing_history,
                 platform=platform,
                 fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
             )
@@ -3680,7 +3684,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exclusive = execute_exclusive_ivd_turn(
                     prepared,
                     question=message,
-                    history=history,
+                business_question=business_message,
+                    history=routing_history,
                     platform=platform,
                     fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
                 )
@@ -3688,7 +3693,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exclusive = None
             if exclusive is not None:
                 decision = decide_hybrid_route(
-                    message,
+                    (business_message if business_message is not None else message),
                     envelope=exclusive,
                     result=exclusive,
                 )
@@ -3701,8 +3706,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         turn = prepare_after_sales_turn(
             config,
             platform=normalized_platform,
-            message=message,
-            history=history,
+            message=business_message if business_message is not None else message,
+            history=routing_history,
             prepared_ivd_turn=prepared,
             session_db=getattr(session_db, "_db", session_db),
         )
@@ -12951,6 +12956,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _pending_stt_prepared
             else event.text
         ) or ""
+        event._gateway_business_text = message_text if message_text else None
         from gateway.session import group_sessions_per_user_for_source
 
         _group_sessions_per_user = group_sessions_per_user_for_source(
@@ -12971,6 +12977,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             group_sessions_per_user=_group_sessions_per_user,
             thread_sessions_per_user=_thread_sessions_per_user,
         )
+        event._gateway_business_history_isolated = _is_shared_multi_user
         if _is_shared_multi_user and source.user_name:
             # source.user_name is the platform display name — attacker-
             # influenceable on any platform that lets participants set their
@@ -14439,6 +14446,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _run_start_session_id = session_entry.session_id
             agent_result = await self._run_agent(
                 message=message_text,
+                business_message=getattr(event, "_gateway_business_text", None),
+                business_history_isolated=bool(getattr(event, "_gateway_business_history_isolated", False)),
                 context_prompt=context_prompt,
                 history=history,
                 source=source,
@@ -20544,6 +20553,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        business_message: Optional[str] = None,
+        business_history_isolated: bool = False,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -20562,6 +20573,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                business_message=business_message,
+                business_history_isolated=business_history_isolated,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -20573,6 +20586,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                business_message=business_message,
+                business_history_isolated=business_history_isolated,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -20694,6 +20709,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        business_message: Optional[str] = None,
+        business_history_isolated: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -20707,6 +20724,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        # A plain current greeting is not authorization to resume prior work.
+        # This deterministic boundary precedes proxy/model/checkpoint handling;
+        # history remains stored unchanged for later explicit business turns.
+        _current_business_text = business_message if business_message is not None else message
+        if re.fullmatch(r"[你您]好[\s！!。，,.]*", str(_current_business_text).strip()):
+            return {"final_response": "你好，有什么可以帮你？", "messages": [],
+                    "completed": True, "api_calls": 0, "tools": []}
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -21938,7 +21963,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # history or leaking into an unrelated follow-up. The guard is
             # optional and fail-open: a missing/invalid KB card never blocks a
             # platform message.
-            _ivd_question_text = str(message or "")
+            _ivd_question_text = str(_current_business_text or "")
             _after_sales_turn = None
             # Managed IVD establishes its serving contract before legacy
             # routing, retrieval, or visible-answer work. Failures escape.
@@ -21947,6 +21972,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 platform=platform_key,
                 message=message,
                 history=history,
+                business_message=business_message,
+                business_history_isolated=business_history_isolated,
             )
             if (
                 _after_sales_turn is not None
@@ -21990,7 +22017,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
 
                         _blocked_result = build_preflight_block_result(
-                            _after_sales_turn, message
+                            _after_sales_turn, _ivd_question_text
                         )
                         try:
                             _blocked_event = build_runtime_event(
@@ -22043,7 +22070,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
 
                         _direct_result = build_direct_fact_result(
-                            _after_sales_turn, message
+                            _after_sales_turn, _ivd_question_text
                         )
                         try:
                             _direct_event = build_runtime_event(
@@ -24666,6 +24693,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    business_message=getattr(pending_event, "_gateway_business_text", None) if pending_event is not None else None,
+                    business_history_isolated=bool(getattr(pending_event, "_gateway_business_history_isolated", False)) if pending_event is not None else False,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

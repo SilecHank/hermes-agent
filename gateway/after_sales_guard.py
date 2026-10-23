@@ -710,8 +710,93 @@ def _trusted_tool_numeric_evidence_details(
     return tuple(dict.fromkeys(claims)), source_read, claim_sources
 
 
-@lru_cache(maxsize=8)
+def _bind_workflow_scripts(path: Path) -> None:
+    """Bind one process to one trusted KB scripts root before its first import.
+
+    Never replace an existing namespace or module. A release change requires a
+    new gateway process; an incompatible cache is a configuration error.
+    """
+    import os
+    import importlib.machinery
+
+    resolved = path.resolve(strict=True)
+    root = resolved.parent.parent
+    agent = Path(__file__).resolve().parents[1]
+    if agent.name == "serving-agent":
+        expected = agent.parent / "serving-package"
+        staged = json.loads((agent.parent / ".staged.json").read_bytes())
+        manifest = json.loads((expected / "package-manifest.json").read_bytes())
+        if (root != expected or manifest.get("package_digest") != staged.get("package_digest")
+                or not staged.get("knowledgehub_commit")):
+            raise ImportError("workflow scripts release binding mismatch")
+        members = manifest.get("members")
+        if (not isinstance(members, dict)
+                or "scripts/hermes_workflow_clarification.py" not in members
+                or str(resolved.relative_to(root)) not in members):
+            raise ImportError("workflow scripts package members unavailable")
+        package_digest = hashlib.sha256(json.dumps(
+            {"algorithm": "sha256-canonical-members-v1", "members": members},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if package_digest != staged["package_digest"]:
+            raise ImportError("workflow scripts package digest mismatch")
+        for relative, digest in members.items():
+            if relative.startswith("scripts/"):
+                member = root / relative
+                if member.is_symlink() or hashlib.sha256(member.read_bytes()).hexdigest() != digest:
+                    raise ImportError("workflow scripts package member mismatch")
+    else:
+        configured = os.environ.get("IVD_KB_ROOT")
+        if not configured or root != Path(configured).resolve(strict=True) or not (root / ".git").exists():
+            raise ImportError("workflow scripts explicit source binding required")
+    scripts = root / "scripts"
+    helper = scripts / "hermes_workflow_clarification.py"
+    if not helper.is_file() or helper.is_symlink() or scripts.is_symlink():
+        raise ImportError("workflow scripts dependency missing or linked")
+    for name, module in list(sys.modules.items()):
+        if name == "scripts":
+            locations = getattr(module, "__path__", None)
+            resolved_locations = [Path(p).resolve() for p in locations] if locations is not None else []
+            # Existing source tests may have Python's implicit namespace spanning
+            # the selected KB and this Agent's scripts directory. Only that
+            # known empty namespace is narrowed, after all cached children pass.
+            allowed_locations = {scripts, agent / "scripts"} if agent.name != "serving-agent" else {scripts}
+            if (not resolved_locations
+                    or any(p not in allowed_locations for p in resolved_locations)):
+                raise ImportError(f"workflow scripts namespace conflict: {resolved_locations!r}")
+        elif name.startswith("scripts."):
+            file = getattr(module, "__file__", None)
+            if not file or not Path(file).resolve().is_relative_to(scripts):
+                # Source runner owns independent Agent scripts (e.g. environment
+                # isolation). Preserve them only when no KB module shares that
+                # name; never permit a foreign KB dependency or release module.
+                relative = Path(*name.split(".")[1:]).with_suffix(".py")
+                source_agent_module = (agent.name != "serving-agent" and file
+                    and Path(file).resolve() == agent / "scripts" / relative
+                    and not (scripts / relative).exists())
+                if not source_agent_module:
+                    raise ImportError(f"workflow scripts cached module conflict: {name}: {file}")
+    if "scripts" in sys.modules:
+        sys.modules["scripts"].__path__ = [str(scripts)]
+        if sys.modules["scripts"].__spec__ is not None:
+            sys.modules["scripts"].__spec__.submodule_search_locations = [str(scripts)]
+    else:
+        namespace = ModuleType("scripts")
+        namespace.__path__ = [str(scripts)]
+        namespace.__package__ = "scripts"
+        namespace.__spec__ = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+        namespace.__spec__.submodule_search_locations = namespace.__path__
+        sys.modules["scripts"] = namespace
+
+
 def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
+    path = Path(path_text)
+    if path.name in {"after_sales_workflow_gate.py", "hermes_fast_response_pipeline.py"}:
+        _bind_workflow_scripts(path)
+    return _load_module_cached(path_text, mtime_ns)
+
+
+@lru_cache(maxsize=8)
+def _load_module_cached(path_text: str, mtime_ns: int) -> ModuleType:
     path = Path(path_text)
     module_name = f"hermes_after_sales_{abs(hash((path_text, mtime_ns)))}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -1103,9 +1188,6 @@ def _render_fast_response_context(
     if not module_path.is_file():
         return {}
     try:
-        kb_root = str(module_path.parent.parent)
-        if kb_root not in sys.path:
-            sys.path.insert(0, kb_root)
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         question_type = _question_type_from_match(match)
         kwargs = {"question_type": question_type}
