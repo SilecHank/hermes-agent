@@ -19,6 +19,23 @@ def _load_fast_module(path: Path, payload: dict) -> Path:
 
 
 class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
+    def setUp(self):
+        # These are renderer contract unit tests with synthetic planner results,
+        # not trusted-root/production loading tests. Keep the loader seam explicit;
+        # real cold-entry tests exercise binding in separate fresh processes.
+        import importlib.util
+        from unittest.mock import patch
+
+        def synthetic_loader(path, mtime):
+            spec = importlib.util.spec_from_file_location("synthetic_contract_plan", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        loader = patch("gateway.after_sales_guard._load_module", side_effect=synthetic_loader)
+        loader.start()
+        self.addCleanup(loader.stop)
+
     def test_expert_contract_without_evidence_stops_numeric_rendering(self):
         plan = {
         "runtime_preflight": {"eligible": True, "route_version": "test"},
