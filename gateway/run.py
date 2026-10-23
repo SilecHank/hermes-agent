@@ -3649,6 +3649,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform: str,
         message: str,
         history: list[dict[str, Any]],
+        business_message: str | None = None,
     ) -> tuple[Any, Any]:
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
@@ -3660,6 +3661,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             exclusive = execute_exclusive_ivd_turn(
                 prepared,
                 question=message,
+                business_question=business_message,
                 history=history,
                 platform=platform,
                 fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
@@ -3680,6 +3682,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exclusive = execute_exclusive_ivd_turn(
                     prepared,
                     question=message,
+                business_question=business_message,
                     history=history,
                     platform=platform,
                     fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
@@ -3688,7 +3691,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exclusive = None
             if exclusive is not None:
                 decision = decide_hybrid_route(
-                    message,
+                    (business_message if business_message is not None else message),
                     envelope=exclusive,
                     result=exclusive,
                 )
@@ -3701,7 +3704,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         turn = prepare_after_sales_turn(
             config,
             platform=normalized_platform,
-            message=message,
+            message=business_message if business_message is not None else message,
             history=history,
             prepared_ivd_turn=prepared,
             session_db=getattr(session_db, "_db", session_db),
@@ -4598,6 +4601,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _profile = get_active_profile_name() or "default"
                 except Exception:
                     _profile = None
+        event._gateway_business_text = message_text
         from gateway.session import group_sessions_per_user_for_source
 
         return build_session_key(
@@ -14439,6 +14443,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _run_start_session_id = session_entry.session_id
             agent_result = await self._run_agent(
                 message=message_text,
+                business_message=getattr(event, "_gateway_business_text", None),
                 context_prompt=context_prompt,
                 history=history,
                 source=source,
@@ -20544,6 +20549,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        business_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -20562,6 +20568,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                business_message=business_message,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -20573,6 +20580,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                business_message=business_message,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -20694,6 +20702,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        business_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -21947,6 +21956,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 platform=platform_key,
                 message=message,
                 history=history,
+                business_message=business_message,
             )
             if (
                 _after_sales_turn is not None

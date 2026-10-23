@@ -198,6 +198,7 @@ def execute_exclusive_ivd_turn(
     evidence: Mapping[str, object] | None = None,
     platform: str = "generic",
     fast_response_module: str = "",
+    business_question: str | None = None,
 ) -> ExclusiveIVDResult:
     """Run the immutable package without constructing any legacy answer plane."""
     if prepared is None:
@@ -234,7 +235,7 @@ def execute_exclusive_ivd_turn(
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
-            question=_strip_gateway_internal_prefix(question),
+            question=business_question if business_question is not None else question,
             context=recent_context,
             evidence=evidence,
             **({"presentation_formatter": present} if presentation_module is not None else {}),
