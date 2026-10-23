@@ -730,7 +730,9 @@ def _bind_workflow_scripts(path: Path) -> None:
                 or not staged.get("knowledgehub_commit")):
             raise ImportError("workflow scripts release binding mismatch")
         members = manifest.get("members")
-        if not isinstance(members, dict):
+        if (not isinstance(members, dict)
+                or "scripts/hermes_workflow_clarification.py" not in members
+                or str(resolved.relative_to(root)) not in members):
             raise ImportError("workflow scripts package members unavailable")
         package_digest = hashlib.sha256(json.dumps(
             {"algorithm": "sha256-canonical-members-v1", "members": members},
