@@ -249,6 +249,26 @@ def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
     assert contexts["qqbot"]["internal_status_visible"] is False
 
 
+def _unit_planner_loader(monkeypatch, fixture_path):
+    """Isolate only this synthetic planner; every real path uses trusted loader."""
+    import importlib.util
+    from gateway import after_sales_guard as guard
+    real_loader = guard._load_module
+    # Prove the runtime would reject this arbitrary temporary root. This unit
+    # seam does not grant it production authority or change original assertions.
+    with pytest.raises(ImportError):
+        real_loader(str(fixture_path), fixture_path.stat().st_mtime_ns)
+
+    def load(path, mtime):
+        if Path(path).resolve() != fixture_path.resolve():
+            return real_loader(path, mtime)
+        spec = importlib.util.spec_from_file_location("synthetic_plan_unit_only", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    monkeypatch.setattr(guard, "_load_module", load)
+
+
 def _write_boundary_fast_module(tmp_path, source_path, *, source_status="source_candidates_found"):
     scripts = tmp_path / "scripts-boundary"
     scripts.mkdir()
@@ -282,10 +302,11 @@ def _write_boundary_fast_module(tmp_path, source_path, *, source_status="source_
     return fast
 
 
-def test_four_platforms_receive_same_boundary_and_material_location(tmp_path):
+def test_four_platforms_receive_same_boundary_and_material_location(tmp_path, monkeypatch):
     source = tmp_path / "PMseq RNA V5 SOP.pdf"
     source.write_text("fixture", encoding="utf-8")
     fast = _write_boundary_fast_module(tmp_path, source)
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
 
@@ -313,10 +334,11 @@ def test_four_platforms_receive_same_boundary_and_material_location(tmp_path):
     assert all(c == contexts[0] for c in contexts)
 
 
-def test_sufficient_identity_lookup_failure_does_not_repeat_known_fields(tmp_path):
+def test_sufficient_identity_lookup_failure_does_not_repeat_known_fields(tmp_path, monkeypatch):
     source = tmp_path / "PMseq RNA V5 SOP.pdf"
     source.write_text("fixture", encoding="utf-8")
     fast = _write_boundary_fast_module(tmp_path, source)
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
 
@@ -1362,7 +1384,7 @@ def _plan_fixture(tmp_path, plan):
 @pytest.mark.parametrize('fault', ['valid', 'expert_block', 'preflight_block', 'not_adopted', 'identity_unconfirmed',
                                   'wrong_scope', 'wrong_variant', 'inactive', 'not_formal', 'missing_unit',
                                   'missing_locator', 'empty_conditions', 'not_parameter'])
-def test_non_adopted_or_incomplete_card_cannot_promote_cache_or_activation(tmp_path, fault):
+def test_non_adopted_or_incomplete_card_cannot_promote_cache_or_activation(tmp_path, fault, monkeypatch):
     path = KB / 'scripts/hermes_fast_response_pipeline.py'
     plan = copy.deepcopy(_load_module(str(path), path.stat().st_mtime_ns).build_fast_response_plan(SCALAR_QUESTION))
     if fault == 'expert_block': plan['expert_route_contract'] = {'status':'blocked','formal_answer_allowed':False,'bounded_expert_answer_allowed':False}
@@ -1378,7 +1400,9 @@ def test_non_adopted_or_incomplete_card_cannot_promote_cache_or_activation(tmp_p
     elif fault == 'inactive': plan['fast_path']['answer_card']['effective_status'] = 'pending_verify'
     elif fault == 'not_formal': plan['fast_path']['answer_card']['authority_level'] = 'candidate'
     db, config = _verified_fact_fixture(tmp_path)
-    config['after_sales_guard']['fast_response_module'] = str(_plan_fixture(tmp_path, plan))
+    fixture_path = _plan_fixture(tmp_path, plan)
+    _unit_planner_loader(monkeypatch, fixture_path)
+    config['after_sales_guard']['fast_response_module'] = str(fixture_path)
     turn = prepare_after_sales_turn(config, platform='weixin', message=SCALAR_QUESTION, history=[], session_db=db)
     if fault == 'valid':
         assert turn.verified_fact_hit is True

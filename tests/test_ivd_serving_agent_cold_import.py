@@ -7,7 +7,16 @@ import sys
 
 import pytest
 
-from scripts.build_ivd_serving_agent import build_serving_agent
+# Build-time utility belongs to this authenticated Agent checkout, not the KB
+# runtime scripts namespace. Load only the exact sibling file under a distinct
+# test-tool name; do not append Agent scripts into the production namespace.
+import importlib.util
+_builder_path = Path(__file__).resolve().parents[1] / "scripts/build_ivd_serving_agent.py"
+_builder_spec = importlib.util.spec_from_file_location("agent_serving_builder_test_tool", _builder_path)
+_builder_module = importlib.util.module_from_spec(_builder_spec)
+sys.modules[_builder_spec.name] = _builder_module
+_builder_spec.loader.exec_module(_builder_module)
+build_serving_agent = _builder_module.build_serving_agent
 
 
 def _probe(source, artifact, private, entrypoint):
