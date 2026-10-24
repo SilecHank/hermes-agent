@@ -37,3 +37,36 @@ def test_live_actor_pending_is_the_only_short_reply_context_authority():
     other = prepare_after_sales_turn({'after_sales_guard': G}, platform='weixin',
         message='V5', history=[], actor_id='b', pending_task=pending)
     assert other.task_contract['continuation'] == 'new'
+
+
+def test_real_lifecycle_records_and_consumes_same_actor_pending_version():
+    from gateway.run import GatewayRunner
+    class MetadataStore:
+        value = None
+        def get_session_metadata(self, session_key, key):
+            assert (session_key, key) == ('fixture-chat', 'ivd_pending_task')
+            return self.value
+        def set_session_metadata(self, session_key, key, value):
+            self.value = value
+            return True
+    runner = object.__new__(GatewayRunner)
+    runner.session_store = MetadataStore()
+    runner._ivd_prepared_contracts = {}
+    _, first = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message=OLD, history=[], actor_id='actor-a', session_key='fixture-chat')
+    assert first.blocks_answer_generation
+    assert 'product_version' in runner.session_store.value['missing_fields']
+    _, second = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message='B3', history=[], actor_id='actor-a', session_key='fixture-chat')
+    assert second.task_contract['task_id'] == first.task_contract['task_id']
+    assert second.task_contract['continuation'] == 'clarification_reply'
+    assert second.task_contract['context']['product_version'] == 'B3'
+    assert second.blocks_answer_generation  # Case comparability fields still missing.
+    _, isolated = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message='B3', history=[], actor_id='actor-a', session_key='fixture-chat',
+        business_history_isolated=True)
+    assert isolated.task_contract['continuation'] == 'new'
+    _, third = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message='CNV-seq的产品经理是谁', history=[], actor_id='actor-a', session_key='fixture-chat')
+    assert not third.blocks_answer_generation and third.direct_response
+    assert runner.session_store.value is None

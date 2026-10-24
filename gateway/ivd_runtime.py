@@ -47,6 +47,7 @@ class ExclusiveIVDResult:
     effect_count: int
     sources: tuple[object, ...]
     intent: str = ""
+    task_id: str = ""
     product_line: str = ""
     product_variant: str = ""
     ambiguities: tuple[str, ...] = ()
@@ -265,6 +266,7 @@ def execute_exclusive_ivd_turn(
             return ExclusiveIVDResult(
                 text=present(text),
                 presentation_contract=presentation,
+                task_id=str(task.get("task_id") or ""),
                 answer_shape="clarification",
                 outcome="clarification",
                 model_calls=0,
@@ -289,6 +291,7 @@ def execute_exclusive_ivd_turn(
             text=(str(result.text) if str(result.answer_shape) in {"scalar", "diagnostic", "process", "rule", "contact", "evidence"}
                   else present(str(result.text))),
             presentation_contract=presentation,
+                task_id=str(task.get("task_id") or ""),
             answer_shape=str(result.answer_shape),
             outcome=str(result.outcome),
             model_calls=int(result.model_calls),

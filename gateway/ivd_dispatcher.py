@@ -365,7 +365,7 @@ class IVDDispatcher:
                              if item["intent"] == task_contract["intent"]), semantic)
             operation = None if task_contract["intent"] in {"mechanism", "sop_lookup"} else operation
         source_bound_input = explicit_sop_input_request(text)
-        if source_bound_input and operation is None:
+        if source_bound_input and operation is None and not (task_contract and task_contract["intent"] == "mechanism"):
             semantic = next((item for item in self._semantics if item["intent"] == "parameter"), semantic)
         selected = operation or semantic or next(
             item for item in self._semantics if item["intent"] == "product_fact"
@@ -387,7 +387,10 @@ class IVDDispatcher:
             indexed_retrieval_budget=0 if ambiguous else 1,
             model_call_budget=0,
             envelope_count=1,
-            metadata=MappingProxyType({"resolution_order": _RESOLUTION_ORDER}),
+            metadata=MappingProxyType({"resolution_order": _RESOLUTION_ORDER,
+                **({"task_id": task_contract.get("task_id", ""),
+                    "subtask": task_contract.get("subtask", ""),
+                    "continuation": task_contract.get("continuation", "new")} if task_contract else {})}),
         )
 
     def execute(

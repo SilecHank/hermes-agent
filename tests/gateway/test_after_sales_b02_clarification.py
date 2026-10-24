@@ -45,8 +45,10 @@ def test_extra_sex_chromosome_alias_alone_does_not_end_in_static_refusal():
     assert '完整字段' in text and '同次采血' in text
 
 
-def test_confirmed_version_is_preserved_without_reasking():
-    _, text = run_turn(history=[{'role': 'user', 'content': '使用NIFTY B3分析流程'}])
+def test_current_version_is_preserved_but_unbound_history_is_not_authority():
+    _, unbound = run_turn(history=[{'role': 'user', 'content': '使用NIFTY B3分析流程'}])
+    assert 'B3' not in unbound
+    _, text = run_turn(QUESTION + '，使用NIFTY B3分析流程')
     assert 'B3' in text
     assert '版本是否' not in text
     _, missing = run_turn()
@@ -86,7 +88,8 @@ def test_cross_product_and_unknown_term_do_not_use_sex_branch():
         turn, text = run_turn(q)
         assert turn.facts.get('decision_branch') != 'sex_chromosome'
         assert '同次采血' not in text and 'X/Y' not in text
-        assert '?' in text or '？' in text or '请确认' in text
+        assert not turn.expert_route_contract['formal_answer_allowed']
+        assert '下一步' in text or '请确认' in text
 
 
 def test_shared_chat_does_not_inherit_other_members_version_or_gaps():
@@ -97,7 +100,8 @@ def test_shared_chat_does_not_inherit_other_members_version_or_gaps():
 
 def test_no_workflow_card_still_offers_specific_safe_gap(tmp_path):
     _, text = run_turn(cards_dir=tmp_path)
-    assert '完整结果字段' in text and '分析流程' in text
+    assert '本轮' in text and '来源' in text
+    assert '已进入专家检索' not in text
     assert '性染色体' not in text and '已检索' not in text
 
 
@@ -113,7 +117,8 @@ def test_missing_formal_source_card_fails_closed_to_safe_clarification(tmp_path)
         source['path'] = str(tmp_path/'absent.md')
     (tmp_path/'report.json').write_text(json.dumps(card))
     turn, text = run_turn(cards_dir=tmp_path)
-    assert not turn.facts and '完整结果字段' in text
+    assert not turn.facts and not turn.expert_route_contract['formal_answer_allowed']
+    assert '本轮' in text and '来源' in text
     assert '性染色体分析流程' not in text and '已检索' not in text
 
 
@@ -132,7 +137,7 @@ def test_candidate_source_cannot_become_a_formal_answer(tmp_path):
     (tmp_path/'report.json').write_text(json.dumps(card))
     _, text = run_turn(cards_dir=tmp_path)
     assert '污染' not in text and '严重程度' not in text and '已检索' not in text
-    assert '？' in text
+    assert '下一步' in text and '已进入专家检索' not in text
 
 
 def test_existing_sex_branch_aliases_share_clarification_not_an_xo_answer():

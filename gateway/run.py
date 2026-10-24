@@ -2334,6 +2334,8 @@ def _prepare_gateway_ivd_boundary(
         prepare_enabled_ivd_turn,
     )
 
+    from gateway.after_sales_guard import resolve_after_sales_task
+    task = resolve_after_sales_task(config.get("after_sales_guard") or {}, message)
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
     mode = ivd_engine_mode(config, platform=platform)
     if mode == "package":
@@ -2341,6 +2343,7 @@ def _prepare_gateway_ivd_boundary(
             prepared,
             question=message,
             history=history,
+            task_contract=task,
             platform=platform,
             fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
         )
@@ -2352,6 +2355,7 @@ def _prepare_gateway_ivd_boundary(
                 prepared,
                 question=message,
                 history=history,
+            task_contract=task,
                 platform=platform,
                 fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
             )
@@ -2373,6 +2377,7 @@ def _prepare_gateway_ivd_boundary(
         message=message,
         history=history,
         prepared_ivd_turn=prepared,
+        task_contract=task,
     )
     return prepared, turn
 
@@ -3659,12 +3664,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.after_sales_guard import resolve_after_sales_task
         store = getattr(self, "session_store", None)
         getter = getattr(store, "get_session_metadata", None)
-        pending = getter(session_key, "ivd_pending_task") if callable(getter) and session_key else None
+        pending = (getter(session_key, "ivd_pending_task")
+                   if callable(getter) and session_key and not business_history_isolated else None)
         guard = config.get("after_sales_guard") or {}
         task = resolve_after_sales_task(guard,
             business_message if business_message is not None else message,
             actor_id=actor_id, pending_task=pending)
         routing_history = []  # Shared task resolution owns all context admission.
+        setter = getattr(store, "set_session_metadata", None)
+        if callable(setter) and session_key and pending:
+            # Every selected turn supersedes the old waiting state. Recreate it
+            # below only if this same task still has a verified outstanding gap.
+            setter(session_key, "ivd_pending_task", None)
         if task.get("intent") == "social":
             from gateway.after_sales_guard import AfterSalesTurn
             return None, AfterSalesTurn(context="", facts={}, validator=None,
@@ -3734,11 +3745,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if turn is not None and turn.blocks_answer_generation and task and actor_id:
                 missing = list((task.get("context") or {}).get("missing") or [])
                 missing += list((turn.facts.get("clarification") or {}).get("missing") or [])
+                missing += list(turn.facts.get("missing_discriminators") or [])
+                if 'product_scope_required' in turn.expert_route_contract.get('issues', []):
+                    current_context = task.get('context') or {}
+                    if not current_context.get('product_line'):
+                        missing.append('product_line')
+                    elif not current_context.get('product_version') and task.get('intent') != 'mechanism':
+                        missing.append('product_version')
                 if missing:
                     waiting = {"task": task, "actor_id": actor_id,
                                "question": task["question"], "status": "awaiting_reply",
                                "expires_at": time.time() + 900,
-                               "missing_fields": list(dict.fromkeys(missing))}
+                               "missing_fields": list(dict.fromkeys(missing)),
+                               "workflow_clarification": dict(turn.facts.get("clarification") or {}),
+                               "workflow_binding": dict(turn.facts.get("workflow_binding") or {})}
             setter(session_key, "ivd_pending_task", waiting)
         return prepared, turn
 
@@ -20271,6 +20291,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_key: str = None,
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
+        business_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of
         running a local AIAgent.
@@ -20284,6 +20305,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent runs on the host with full access to local files, memory,
         skills, and a unified session store.
         """
+        _proxy_turn = None
+        _proxy_config = _load_gateway_config()
+        _proxy_platform = _platform_config_key(source.platform)
+        from gateway.ivd_runtime import ivd_engine_mode
+        if ivd_engine_mode(_proxy_config, platform=_proxy_platform) != "disabled":
+            _, _proxy_turn = self._prepare_ivd_lifecycle(_proxy_config, platform=_proxy_platform,
+                message=message, business_message=business_message, history=history,
+                actor_id=str(source.user_id_alt or source.user_id or ""), session_key=session_key or "")
+            if getattr(_proxy_turn, "dispatch_count", 0) == 1:
+                return {"final_response": _proxy_turn.text, "messages": [], "completed": True, "api_calls": 0}
+            if _proxy_turn is not None:
+                from gateway.after_sales_guard import build_preflight_block_result, build_direct_fact_result
+                if _proxy_turn.blocks_answer_generation:
+                    return build_preflight_block_result(_proxy_turn, business_message or message)
+                if _proxy_turn.direct_response:
+                    return build_direct_fact_result(_proxy_turn, business_message or message)
+                context_prompt += "\n\n" + _proxy_turn.context
+                history = []  # Task context is already admitted; no remote history may re-authorize it.
+                message = business_message if business_message is not None else message
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
         except ImportError:
@@ -20338,7 +20378,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         headers: Dict[str, str] = {"Content-Type": "application/json"}
         if proxy_key:
             headers["Authorization"] = f"Bearer {proxy_key}"
-        if session_id:
+        if session_id and _proxy_turn is None:
             headers["X-Hermes-Session-Id"] = session_id
 
         body = {
@@ -20368,7 +20408,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
 
-        if _streaming_enabled:
+        if _streaming_enabled and _proxy_turn is None:
             try:
                 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self._adapter_for_source(source)
@@ -20552,6 +20592,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             proxy_url, (session_id or "")[:20], _elapsed, len(full_response),
         )
 
+        if _proxy_turn is not None and _proxy_turn.has_validator:
+            from gateway.after_sales_guard import CriticalAfterSalesValidator
+            from agent.final_response_validation import evaluate_final_response
+            _proxy_validator = CriticalAfterSalesValidator(_proxy_turn, messages_provider=lambda: [])
+            full_response = evaluate_final_response(_proxy_validator, full_response, attempts=1).response
         return {
             "final_response": full_response or "(No response from remote agent)",
             "messages": [
@@ -20772,6 +20817,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event_message_id,
+                business_message=business_message,
             )
 
         from run_agent import AIAgent
@@ -22212,8 +22258,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
-            _want_stream_deltas = _streaming_enabled
-            _want_interim_messages = interim_assistant_messages_enabled
+            # Hold governed drafts until the final validator accepts them.
+            _governed_draft = bool(_after_sales_turn is not None and _after_sales_turn.has_validator)
+            _want_stream_deltas = _streaming_enabled and not _governed_draft
+            _want_interim_messages = interim_assistant_messages_enabled and not _governed_draft
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
@@ -23380,6 +23428,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            _delivery_validator = getattr(agent_holder[0], "_final_response_validator", None)
+            if getattr(_delivery_validator, "requires_structured_claims", False) is True and final_response:
+                from agent.final_response_validation import evaluate_final_response
+                _delivery = evaluate_final_response(_delivery_validator, str(final_response), attempts=1)
+                _old_final = final_response
+                final_response = _delivery.response
+                result["final_response"] = final_response
+                for _row in reversed(result.get("messages") or []):
+                    if _row.get("role") == "assistant" and _row.get("content") == _old_final:
+                        _row["content"] = final_response
+                        break
             if _after_sales_turn is not None and hasattr(_after_sales_turn, "present_text"):
                 final_response = _after_sales_turn.present_text(str(final_response or ""))
                 result["final_response"] = final_response
@@ -23429,10 +23488,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "adopted_claims": [],
                     }
                     if _after_sales_turn is not None and _after_sales_turn.has_validator:
-                        _validation = _after_sales_turn.validate(
-                            str(final_response or ""),
-                            messages=_turn_messages,
-                        )
+                        _callback = getattr(agent, "_final_response_validator", None)
+                        _validation = (_callback(str(final_response or "")) if callable(_callback)
+                            else _after_sales_turn.validate(str(final_response or ""), messages=_turn_messages))
                         _validation_status = "pass" if _validation.get("ok") else "fallback"
                         if _validation.get("ok") and _validation.get("adopted_claims"):
                             try:
