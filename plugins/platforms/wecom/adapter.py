@@ -145,6 +145,7 @@ class WeComAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     SUPPORTS_MESSAGE_EDITING = False
+    splits_long_messages = True
     # Threshold for detecting WeCom client-side message splits.
     # When a chunk is near the 4000-char limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 3900
@@ -1414,17 +1415,18 @@ class WeComAdapter(BasePlatformAdapter):
             if not reply_req_id and chat_id in self._last_chat_req_ids:
                 reply_req_id = self._last_chat_req_ids[chat_id]
 
-            if reply_req_id:
-                response = await self._send_reply_markdown(reply_req_id, content)
-            else:
-                response = await self._send_request(
-                    APP_CMD_SEND,
-                    {
-                        "chatid": chat_id,
-                        "msgtype": "markdown",
-                        "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
-                    },
-                )
+            from gateway.platforms.helpers import split_preserving_references
+            for index, chunk in enumerate(split_preserving_references(content, self.MAX_MESSAGE_LENGTH)):
+                if reply_req_id and index == 0:
+                    response = await self._send_reply_markdown(reply_req_id, chunk)
+                else:
+                    response = await self._send_request(
+                        APP_CMD_SEND,
+                        {"chatid": chat_id, "msgtype": "markdown", "markdown": {"content": chunk}},
+                    )
+                error = self._response_error(response)
+                if error:
+                    return SendResult(success=False, error=error)
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:

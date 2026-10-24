@@ -10,7 +10,10 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
+
+
+from gateway.ivd_parameter_scope import explicit_sop_input_request
 
 
 _VOCABULARY_MEMBER = "indexes/dispatch-vocabulary-v1.json"
@@ -354,11 +357,14 @@ class IVDDispatcher:
         semantic = self._match_intent(text, self._semantics) or self._match_intent(
             routing_text, self._semantics
         )
+        source_bound_input = explicit_sop_input_request(text)
+        if source_bound_input and operation is None:
+            semantic = next((item for item in self._semantics if item["intent"] == "parameter"), semantic)
         selected = operation or semantic or next(
             item for item in self._semantics if item["intent"] == "product_fact"
         )
         intent = str(selected["intent"])
-        needs_product = intent in self._product_required and product_line is None
+        needs_product = intent in self._product_required and product_line is None and not source_bound_input
         ambiguous = product_conflict or needs_product
         return DecisionEnvelope(
             policy_version=self._policy_version,
@@ -384,10 +390,13 @@ class IVDDispatcher:
         question: str,
         context: str = "",
         evidence: Mapping[str, object] | None = None,
+        presentation_formatter: Callable[[str, tuple[object, ...]], str] | None = None,
     ) -> DispatchOutcome:
         envelope = self.dispatch(question, context=context)
         if envelope.clarifying_questions:
             return DispatchOutcome(envelope=envelope, result=None)
+        presentation_options = ({"presentation_formatter": presentation_formatter}
+                                if presentation_formatter is not None else {})
         result = engine.execute(
             question=question,
             product_line=envelope.product_line or "",
@@ -397,5 +406,6 @@ class IVDDispatcher:
             answer_shape=envelope.answer_shape,
             evidence=dict(evidence or {}),
             allow_index_transaction=envelope.indexed_retrieval_budget > 0,
+            **presentation_options,
         )
         return DispatchOutcome(envelope=envelope, result=result)

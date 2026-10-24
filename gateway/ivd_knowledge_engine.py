@@ -11,11 +11,12 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import quote
 from pathlib import PurePosixPath
 
 from gateway.ivd_final_validator import validate_final_response
+from gateway.ivd_parameter_scope import explicit_sop_input_request, sop_scope, parameter_object_asserted
 from gateway.ivd_renderer import IVDRenderer, SourceReference, source_reference_from_mapping
 
 
@@ -241,6 +242,38 @@ class IVDKnowledgeEngine:
             self._projection() + " WHERE " + " AND ".join(clauses) + " LIMIT 2", values
         ).fetchall()
         return self._hit(rows[0]) if len(rows) == 1 else None
+
+    def _source_bound_input(self, question, product_line, product_variant, workflow_stage):
+        scope = sop_scope(question)
+        if not explicit_sop_input_request(question) or scope is None:
+            return None
+        clauses = ["s.source_document_id=?", "v.source_version=?", "a.effective_status='active'", "e.knowledge_kind='parameter'"]
+        values = list(scope)
+        for field, value in (("p.product_line", product_line), ("p.product_variant", product_variant), ("e.workflow_stage", workflow_stage)):
+            if value:
+                clauses.append(field+"=?")
+                values.append(value)
+        rows = self._database.execute(self._projection()+" WHERE "+" AND ".join(clauses), values).fetchall()
+        candidates = {}
+        for row in rows:
+            conditions = json.loads(row["conditions_json"])
+            sample = str(conditions.get("sample_object") or row["object_name"])
+            requested_units = {unit.casefold().replace("μ", "u").replace("µ", "u") for unit in
+                               re.findall(r"(?<![A-Za-z])([uµμm]L|ng|pg|ug|mg)(?![A-Za-z])", question, re.I)}
+            if requested_units and requested_units != {str(row["unit"]).casefold()}:
+                continue
+            if sample and parameter_object_asserted(question, sample) and row["unit"] in ("uL", "mL"):
+                # Alias duplicates may collapse; distinct formal assertions may not.
+                identity = tuple(row[key] for key in row.keys() if key != "matched_alias")
+                candidates[identity] = row
+        return self._hit(next(iter(candidates.values()))) if len(candidates) == 1 else None
+
+    @staticmethod
+    def _method_question(hit):
+        conditions = json.loads(str(getattr(hit, "conditions_json", "{}")))
+        if conditions.get("platform") or conditions.get("reagent"):
+            return "请确认采用的提取方法、平台与试剂。"
+        return "请确认提取或实验方法；现有正式参数仅适用于来源所规定的方法。"
 
     @staticmethod
     def _semantic_signature(value: str) -> tuple[str, frozenset[str]]:
@@ -948,6 +981,7 @@ class IVDKnowledgeEngine:
         answer_shape: str = "",
         evidence: Mapping[str, object] | None = None,
         allow_index_transaction: bool = False,
+        presentation_formatter: Callable[[str, tuple[SourceReference, ...]], str] | None = None,
     ) -> ExecutionResult:
         with self._lock:
             if self._closed:
@@ -961,6 +995,7 @@ class IVDKnowledgeEngine:
                 answer_shape=answer_shape,
                 evidence=evidence,
                 allow_index_transaction=allow_index_transaction,
+                presentation_formatter=presentation_formatter,
             )
 
     def _execute(
@@ -974,13 +1009,14 @@ class IVDKnowledgeEngine:
         answer_shape: str = "",
         evidence: Mapping[str, object] | None = None,
         allow_index_transaction: bool = False,
+        presentation_formatter: Callable[[str, tuple[SourceReference, ...]], str] | None = None,
     ) -> ExecutionResult:
         normalized = _normalize(question)
         evidence = dict(evidence or {})
-        original_delivery = self._original_document_lookup(normalized, product_line)
+        original_delivery = self._original_document_lookup(normalized, product_line) if knowledge_type != "parameter" else None
         if original_delivery is not None:
             return original_delivery
-        sop_doc = self._sop_path_lookup(normalized, product_line) if knowledge_type not in ("file", "operation") else None
+        sop_doc = self._sop_path_lookup(normalized, product_line) if knowledge_type not in ("file", "operation", "parameter") else None
         if sop_doc is not None:
             return sop_doc
         hit = self._exact_registry(
@@ -990,8 +1026,15 @@ class IVDKnowledgeEngine:
             workflow_stage,
             knowledge_type,
         )
+        bound_input = knowledge_type == "parameter" and explicit_sop_input_request(question)
+        if bound_input:
+            # Exact source/revision/object lookup is a registry transaction, not
+            # an indexed similarity search. Never fall through to fuzzy routing.
+            hit = self._source_bound_input(question, product_line, product_variant, workflow_stage)
+            if hit is None:
+                return ExecutionResult("请确认所依据的SOP修订、产品及参数对象。", "clarification", "clarification", 0, 0, 0, 0, None, ())
         if hit is not None:
-            rendered = self._renderer.render_registry_hit(hit)
+            rendered = self._renderer.render_registry_hit(hit, include_conditions=bound_input)
             if answer_shape and rendered.answer_shape != answer_shape:
                 raise PackageIntegrityError("answer_shape_mismatch")
             receipt = {
@@ -999,9 +1042,11 @@ class IVDKnowledgeEngine:
                 "filesystem_scans": 0,
             }
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, (rendered.source,) if rendered.source else ())
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or hit.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 0,
@@ -1009,6 +1054,12 @@ class IVDKnowledgeEngine:
                 effect_receipt=receipt,
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        self._method_question(hit),
+                        "clarification", "clarification", 0,
+                        int(receipt.get("index_transactions") or 0), 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 0, 0, 0,
@@ -1030,8 +1081,14 @@ class IVDKnowledgeEngine:
             rendered = self._renderer.render_diagnostic(diagnostic)
             if answer_shape and rendered.answer_shape != answer_shape:
                 raise PackageIntegrityError("answer_shape_mismatch")
+            sources = tuple(
+                source_reference_from_mapping(source)
+                for source in diagnostic["pattern"].get("formal_source_ids", [])
+                if isinstance(source, Mapping)
+            )
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, sources)
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or str(diagnostic["pattern"].get("product_line") or ""),
                     "known_product_lines": self._known_product_lines,
@@ -1047,18 +1104,13 @@ class IVDKnowledgeEngine:
             )
             if not decision.allowed:
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
-            sources = tuple(
-                source_reference_from_mapping(source)
-                for source in diagnostic["pattern"].get("formal_source_ids", [])
-                if isinstance(source, Mapping)
-            )
             return ExecutionResult(
                 decision.text, rendered.answer_shape, str(diagnostic["outcome"]),
                 0, 0, 0, int(diagnostic.get("effect_count") or 0),
                 sources[0] if len(sources) == 1 else None, sources,
             )
 
-        equipment_reagent = self._equipment_reagent_lookup(normalized)
+        equipment_reagent = self._equipment_reagent_lookup(normalized) if knowledge_type != "parameter" else None
         if equipment_reagent is not None:
             return equipment_reagent
 
@@ -1076,9 +1128,11 @@ class IVDKnowledgeEngine:
             if answer_shape and rendered.answer_shape != answer_shape:
                 raise PackageIntegrityError("answer_shape_mismatch")
             decision = validate_final_response(
-                text=rendered.text,
+                text=(presentation_formatter(rendered.text, (rendered.source,) if rendered.source else ())
+                      if presentation_formatter is not None else rendered.text),
                 contract={
                     "product_line": product_line or fuzzy.product_line,
+                    "question": question,
                     "known_product_lines": self._known_product_lines,
                     "answer_shape": rendered.answer_shape,
                     "max_index_transactions": 1,
@@ -1089,6 +1143,12 @@ class IVDKnowledgeEngine:
                 },
             )
             if not decision.allowed:
+                if set(decision.reasons) <= {"method_scope_required", "method_scope_mismatch"}:
+                    return ExecutionResult(
+                        self._method_question(fuzzy),
+                        "clarification", "clarification", 0,
+                        1, 0, 0, None, (),
+                    )
                 raise PackageIntegrityError("final validation failed: " + ",".join(decision.reasons))
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,

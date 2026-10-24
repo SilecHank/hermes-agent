@@ -417,3 +417,34 @@ def convert_table_to_bullets(text: str) -> str:
         i += 1
 
     return '\n'.join(out)
+
+
+# Mechanical display boundaries only; these patterns do not validate facts.
+def protected_reference_spans(text: str):
+    """Offsets where display wrapping must keep identifiers/units together."""
+    import re
+    pattern = re.compile(
+        r"SOP[-A-Za-z0-9]+[ \t]+(?:[AV]\d+(?:\.\d+)*)"
+        r"|(?:[<>≥≤]=?\s*)?\d+(?:\.\d+)?[ \t]+(?:ng\s*/\s*[μµu]L|[μµu]L|mL|ng|mg|g|%|℃|°C|bp|Gb|Mb)(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return [(m.start(), m.end()) for m in pattern.finditer(text)]
+
+
+def split_preserving_references(text: str, limit: int):
+    """Lossless chunks, moving a split before a protected display token."""
+    if limit < 1:
+        raise ValueError("positive message limit required")
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = limit
+        for start, end in protected_reference_spans(remaining):
+            if start < cut < end and start > 0:
+                cut = start
+                break
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining or not chunks:
+        chunks.append(remaining)
+    return chunks

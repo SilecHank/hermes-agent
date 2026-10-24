@@ -22,7 +22,7 @@ GUARD_PATH = Path(__file__).resolve().parents[2] / "gateway" / "after_sales_guar
 RELEASE_ROOT = Path("/home/slim/.hermes/ivd-state/releases")
 
 
-def _current_release_validator() -> Path:
+def _current_release_validator() -> Path | None:
     """Resolve the after_sales_answer_validator.py in the active release."""
     try:
         real = Path(
@@ -32,7 +32,7 @@ def _current_release_validator() -> Path:
             ).strip()
         )
     except Exception:
-        return Path("")
+        return None
     candidate = real / "serving-package" / "scripts" / "after_sales_answer_validator.py"
     if candidate.exists():
         return candidate
@@ -42,13 +42,13 @@ def _current_release_validator() -> Path:
             candidate = rel / "serving-package" / "scripts" / "after_sales_answer_validator.py"
             if candidate.exists():
                 return candidate
-    return Path("")
+    return None
 
 
 @pytest.fixture(scope="module")
 def validator():
     vpath = _current_release_validator()
-    if not vpath.exists():
+    if vpath is None or not vpath.is_file():
         pytest.skip("active release validator script not present")
     spec = importlib.util.spec_from_file_location("test_validator_mod", str(vpath))
     assert spec is not None and spec.loader is not None

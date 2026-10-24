@@ -33,6 +33,8 @@ Usage:
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_RELEASE_GATE_REPORT Optional machine evidence destination (private absolute path)
+    HERMES_RELEASE_GATE_ATTEMPT Nonce identifying the release-gate attempt
     HERMES_TEST_PASS_FDS Preserve comma-separated POSIX file descriptors
                          for release-gate pytest children
 
@@ -47,10 +49,81 @@ import os
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+
+
+_GATE_COUNTS = ("tests", "passed", "failed", "errors", "skipped", "xfailed", "xpassed")
+
+# Loaded only for release evidence. Each subprocess gets its own private module
+# and output path, independent of caller-supplied JUnit output options.
+_GATE_PLUGIN = """
+import json
+import os
+import sys
+from pathlib import Path
+counts = dict.fromkeys(('tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed'), 0)
+seen = set()
+def pytest_runtest_logreport(report):
+    if report.nodeid not in seen and (report.when == 'call' or report.outcome != 'passed'):
+        seen.add(report.nodeid)
+        counts['tests'] += 1
+    if hasattr(report, 'wasxfail'):
+        counts['xfailed' if report.skipped else 'xpassed'] += 1
+    elif report.failed:
+        counts['failed' if report.when == 'call' else 'errors'] += 1
+    elif report.skipped:
+        counts['skipped'] += 1
+    elif report.when == 'call':
+        counts['passed'] += 1
+def pytest_collectreport(report):
+    if report.failed:
+        counts['errors'] += 1
+    elif report.skipped:
+        counts['skipped'] += 1
+def pytest_sessionfinish(session, exitstatus):
+    Path(OUTPUT).write_text(json.dumps(dict(counts, completed=True, interpreter=os.path.abspath(sys.executable))), encoding='utf-8')
+"""
+
+
+def _write_gate_report(destination: str, attempt: str, files: list[Path],
+                       results: list[dict], repo_root: Path) -> None:
+    paths = [_format_file(f, repo_root) for f in files]
+    results = list(results)
+    reported = {row['path'] for row in results}
+    for path in paths:
+        if path not in reported:
+            results.append(dict.fromkeys(_GATE_COUNTS, 0) | dict(
+                path=path, completed=False, returncode=None))
+    # Completion order is nondeterministic with multiple workers. Only reorder
+    # exact, unique coverage; retain duplicate/extra rows so they remain invalid.
+    result_paths = [row['path'] for row in results]
+    if len(set(result_paths)) == len(result_paths) and sorted(result_paths) == sorted(paths):
+        by_path = {row['path']: row for row in results}
+        results = [by_path[path] for path in paths]
+    totals = {key: sum(row.get(key, 0) for row in results) for key in _GATE_COUNTS}
+    ready = bool(attempt and paths and len(set(paths)) == len(paths)
+                 and sorted(row['path'] for row in results) == sorted(paths)
+                 and all(row.get('interpreter') == os.path.abspath(sys.executable) and row.get('completed') and row.get('returncode') == 0
+                         and row.get('tests', 0) > 0
+                         and row.get('tests') == row.get('passed') for row in results)
+                 and all(totals[key] == 0 for key in ('failed', 'errors', 'skipped', 'xfailed', 'xpassed')))
+    payload = dict(schema_version=1, kind='pytest_suite', attempt_id=attempt,
+                   status='ready' if ready else 'blocked', interpreter=os.path.abspath(sys.executable), files=results, **totals)
+    # Replace atomically: an interrupted write cannot look like completed evidence.
+    target = Path(destination)
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,
+                                     prefix='.pytest-suite-', delete=False) as handle:
+        temporary = Path(handle.name)
+        json.dump(payload, handle)
+    try:
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # Default test discovery roots.
@@ -195,6 +268,21 @@ def _discover_files(roots: List[Path]) -> List[Path]:
     return sorted(out)
 
 
+def _release_gate_files(roots: List[Path]) -> List[Path]:
+    """Validate the complete explicit selection before starting any subprocess."""
+    if not roots:
+        raise ValueError("release gate selection is empty")
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_file() or root.suffix != ".py":
+            raise ValueError(f"release gate selection requires an existing Python file: {root}")
+        real = root.resolve()
+        if real in seen:
+            raise ValueError(f"release gate selection contains a duplicate file: {root}")
+        seen.add(real)
+    return list(roots)
+
+
 def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
     """Kill the pytest subprocess and every descendant it spawned.
 
@@ -295,6 +383,8 @@ def _run_one_file(
     file, rc, output, summary, subproc_wall = _run_one_file_once(
         file, pytest_args, repo_root, file_timeout
     )
+    if os.environ.get("HERMES_RELEASE_GATE_REPORT"):
+        retries = 0
     attempt = 0
     while rc != 0 and attempt < retries:
         attempt += 1
@@ -331,6 +421,18 @@ def _run_one_file_once(
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    gate_dir = None
+    child_env = os.environ
+    if os.environ.get("HERMES_RELEASE_GATE_REPORT"):
+        gate_dir = tempfile.TemporaryDirectory(prefix="hermes-pytest-evidence-")
+        gate_root = Path(gate_dir.name)
+        machine_path = gate_root / "result.json"
+        plugin_name = "_hermes_gate_events"
+        (gate_root / (plugin_name + ".py")).write_text(
+            "OUTPUT = " + repr(str(machine_path)) + "\n" + _GATE_PLUGIN, encoding="utf-8")
+        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = str(gate_root) + os.pathsep + child_env.get("PYTHONPATH", "")
+        cmd += ["-p", plugin_name]
     
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -340,7 +442,7 @@ def _run_one_file_once(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        env=os.environ,
+        env=child_env,
         pass_fds=_test_pass_fds(),
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
@@ -386,12 +488,26 @@ def _run_one_file_once(
 
         output +=  "\n"
 
+    actual_rc = rc
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
         # Treat as a pass; surface info in a slightly distinct status
         # so the operator can spot it.
         rc = 0
     summary = _parse_pytest_summary(output)
+    if gate_dir is not None:
+        machine = dict.fromkeys(_GATE_COUNTS, 0)
+        machine.update(completed=False, returncode=actual_rc)
+        try:
+            data = json.loads(machine_path.read_text(encoding="utf-8"))
+            if (data.get("completed") is True and
+                    all(type(data.get(key)) is int and data[key] >= 0 for key in _GATE_COUNTS)):
+                machine.update(data)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        finally:
+            gate_dir.cleanup()
+        summary["_gate"] = machine
     subproc_wall = time.monotonic() - subproc_start
     return file, rc, output, summary, subproc_wall
 
@@ -672,6 +788,11 @@ def _slice_files(
 
 
 def main() -> int:
+    gate_destination = os.environ.get("HERMES_RELEASE_GATE_REPORT", "")
+    gate_attempt = os.environ.get("HERMES_RELEASE_GATE_ATTEMPT", "")
+    if gate_destination:
+        # Invalidate stale success even when discovery/argument processing fails.
+        _write_gate_report(gate_destination, gate_attempt, [], [], Path.cwd())
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -857,7 +978,18 @@ def main() -> int:
             global _SKIP_PARTS  # noqa: PLW0603 — config knob
             _SKIP_PARTS = set()
 
-        files = _discover_files(roots)
+        files = [] if gate_destination else _discover_files(roots)
+
+    if gate_destination:
+        try:
+            if slice_raw or args.generate_slices is not None:
+                raise ValueError("release gate selection cannot be sliced")
+            if args.files and args.paths_positional:
+                raise ValueError("release gate selection cannot mix --files and positional paths")
+            files = _release_gate_files(files if args.files else roots)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     if not files:
         print("No test files to run", file=sys.stderr)
@@ -911,6 +1043,7 @@ def main() -> int:
 
     # Capture and print on completion (out-of-order is fine — keeps the
     # terminal clean rather than interleaving N parallel pytest outputs).
+    gate_results: list[dict] = []
     failures: List[Tuple[Path, str, Dict[str, int]]] = []
     file_times: List[Tuple[Path, float]] = []  # (file, subprocess_wall) for distribution
     started = time.monotonic()
@@ -944,6 +1077,8 @@ def main() -> int:
         with lock:
             files_done += 1
             tests_done += n_tests
+            if gate_destination:
+                gate_results.append(dict(summary.get("_gate", {}), path=_format_file(fpath, repo_root)))
             # Accumulate test-level counts from parsed summary.
             tests_passed += summary.get("passed", 0)
             tests_failed += summary.get("failed", 0)
@@ -980,6 +1115,8 @@ def main() -> int:
         for fut in futures:
             fut.result() if fut.exception() is None else None
 
+    if gate_destination:
+        _write_gate_report(gate_destination, gate_attempt, files, gate_results, repo_root)
     elapsed = time.monotonic() - started
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0

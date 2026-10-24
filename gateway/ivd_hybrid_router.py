@@ -55,6 +55,17 @@ def decide_hybrid_route(
         return HybridRouteDecision("expert", "non_scalar")
     if len(tuple(getattr(result, "sources", ()) or ())) != 1:
         return HybridRouteDecision("expert", "source_not_unique")
-    if len(_NUMERIC_CLAIM.findall(str(getattr(result, "text", "") or ""))) != 1:
+    routing_lines = str(getattr(result, "text", "") or "").splitlines()
+    # The presentation contract appends verified document IDs as attribution.
+    # Ignore only those exact IDs on source lines; never drop a whole line or
+    # extra quantities supplied alongside a citation.
+    for index, line in enumerate(routing_lines):
+        if line.startswith("来源："):
+            for source in tuple(getattr(result, "sources", ()) or ()):
+                document = str(getattr(source, "document", "") or "")
+                if document and any(character.isalpha() for character in document):
+                    line = re.sub(r"(?<![\w-])" + re.escape(document) + r"(?![\w-])", "", line)
+            routing_lines[index] = line
+    if len(_NUMERIC_CLAIM.findall("\n".join(routing_lines))) != 1:
         return HybridRouteDecision("expert", "scalar_not_unique")
     return HybridRouteDecision("package_scalar", "exact_scalar_fact")

@@ -19,6 +19,23 @@ def _load_fast_module(path: Path, payload: dict) -> Path:
 
 
 class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
+    def setUp(self):
+        # These are renderer contract unit tests with synthetic planner results,
+        # not trusted-root/production loading tests. Keep the loader seam explicit;
+        # real cold-entry tests exercise binding in separate fresh processes.
+        import importlib.util
+        from unittest.mock import patch
+
+        def synthetic_loader(path, mtime):
+            spec = importlib.util.spec_from_file_location("synthetic_contract_plan", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        loader = patch("gateway.after_sales_guard._load_module", side_effect=synthetic_loader)
+        loader.start()
+        self.addCleanup(loader.stop)
+
     def test_expert_contract_without_evidence_stops_numeric_rendering(self):
         plan = {
         "runtime_preflight": {"eligible": True, "route_version": "test"},
@@ -183,6 +200,23 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         self.assertIn("实验阶段、样本类型与所用方法", result["direct_response"])
         self.assertNotIn("请补充产品名称", result["direct_response"])
         self.assertEqual("block", result["preflight_decision"])
+    def test_file_lookup_guard_does_not_ask_numeric_stage_or_known_version(self):
+        from tempfile import TemporaryDirectory
+        plan={"runtime_preflight":{"eligible":True},
+              "answer_shape":{"answer_shape":"direct_fact"},
+              "answer_contract":{"deliverable":"direct_answer"},
+              "context_envelope":{"product_line":"PMseq","product_version":"V5","workflow_step":"建库"},
+              "expert_route_contract":{"status":"clarification","formal_answer_allowed":False,
+                                        "bounded_expert_answer_allowed":False}}
+        with TemporaryDirectory() as root:
+            path=_load_fast_module(Path(root)/"scripts/hermes_fast_response_pipeline.py",plan)
+            result=_render_fast_response_context({"fast_response_module":str(path)},
+                       message="PMseq RNA V5 建库SOP在哪里",match=None)
+        self.assertEqual("block",result["preflight_decision"])
+        self.assertEqual("stop_before_answer_generation",result["preflight_action"])
+        self.assertNotIn("数值",result["direct_response"])
+        self.assertNotIn("请补充",result["direct_response"])
+        self.assertNotIn("首次建库",result["direct_response"])
 
 
 if __name__ == "__main__":

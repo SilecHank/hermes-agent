@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import inspect
 import json
 import re
 import sys
@@ -68,6 +70,17 @@ class AfterSalesTurn:
     source_locator: str = ""
     source_revisions: dict[str, str] = field(default_factory=dict)
     evidence_sidecar_enabled: bool = False
+    presentation_contract: dict[str, Any] = field(default_factory=dict)
+    presentation_module_path: str = ""
+    parameter_contract: dict[str, Any] = field(default_factory=dict)
+
+    def present_text(self, text: str) -> str:
+        if not self.presentation_module_path or not self.presentation_contract:
+            return text
+        path = Path(self.presentation_module_path)
+        module = _load_module(str(path), path.stat().st_mtime_ns)
+        return module.prepare_user_text(text, self.presentation_contract)
+
 
     def __post_init__(self) -> None:
         if self.resolved_answer is None and self.direct_response:
@@ -106,13 +119,17 @@ class AfterSalesTurn:
         messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.has_validator:
+            if self.parameter_contract:
+                return {"ok": False, "reasons": ["formal_validator_unavailable"],
+                        "fallback": build_source_validation_fallback(self, "formal_validator_unavailable")}
             return {"ok": True, "reasons": [], "fallback": ""}
         assert self.validator is not None
-        if self.requires_source_validation and not self.facts:
+        if self.requires_source_validation and (not self.facts or self.parameter_contract):
             trusted_claims, source_read, claim_sources = _trusted_tool_numeric_evidence_details(
                 messages or [],
                 self.source_paths,
                 self.validator,
+                required_source_path=self.parameter_contract.get("absolute_source_path"),
             )
             if not source_read:
                 return {
@@ -227,6 +244,9 @@ class AfterSalesTurn:
     ) -> list[dict[str, Any]]:
         if not self.evidence_sidecar_enabled or not self.fact_key:
             return []
+        contract = _complete_parameter_contract(self)
+        if contract is None:
+            return []
         assert self.validator is not None
         claims = list(self.validator.extract_numeric_claims(answer))
         if len(claims) != 1:
@@ -236,7 +256,8 @@ class AfterSalesTurn:
         source_path = source_details.get("source_path", "")
         relative_path = _relative_source_path(source_path, self.source_revisions)
         revision = self.source_revisions.get(relative_path, "")
-        if not relative_path or not revision:
+        if (relative_path != contract["source_path"]
+                or revision != contract["source_revision"]):
             return []
         value, unit = _split_numeric_claim(claim)
         if not value:
@@ -246,16 +267,18 @@ class AfterSalesTurn:
                 "fact_key": self.fact_key,
                 "value": value,
                 "unit": unit,
-                "conditions": [],
+                "conditions": list(contract["conditions"]),
                 "evidence_id": build_runtime_evidence_id(
                     source_revision=revision,
                     source_path=relative_path,
-                    locator="tool:read_file",
+                    locator=contract["source_locator"],
                     adopted_excerpt=claim,
                 ),
                 "source_path": relative_path,
                 "source_revision": revision,
-                "locator": "tool:read_file",
+                "locator": contract["source_locator"],
+                "source_document_id": contract["source_document_id"],
+                "source_version": contract["source_version"],
                 "tool_call_id": source_details.get("tool_call_id", ""),
             }
         ]
@@ -344,7 +367,12 @@ def build_preflight_block_result(
         "当前检索计划包含待验证或非正式来源，暂不能据此给出结论。"
         "请补充产品名称、版本或SOP编号，我会改用正式来源继续核实。"
     )
+    if "expert_route_contract_not_ready" in turn.preflight_issues and turn.direct_response:
+        fallback = turn.direct_response
+    present = getattr(turn, "present_text", None)
+    fallback = present(fallback) if callable(present) else fallback
     return {
+        "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
         "final_response": fallback,
         "messages": [
             {"role": "user", "content": str(message or "")},
@@ -366,11 +394,21 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
     """Build the standard zero-model result for an exact active fact hit."""
     if not turn.direct_response:
         raise ValueError("direct fact result requires a validated response")
+    present = getattr(turn, "present_text", None)
+    try:
+        text = present(turn.direct_response) if callable(present) else turn.direct_response
+        validation = _validate_direct_fact_presentation(turn, text)
+    except Exception:
+        validation = {"ok": False, "reasons": ["presentation_failed"]}
+        text = ""
+    if not validation["ok"]:
+        text = "当前回答的数值或来源未通过核对，暂不提供该结论。"
     return {
-        "final_response": turn.direct_response,
+        "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
+        "final_response": text,
         "messages": [
             {"role": "user", "content": str(message or "")},
-            {"role": "assistant", "content": turn.direct_response},
+            {"role": "assistant", "content": text},
         ],
         "api_calls": 0,
         "completed": True,
@@ -380,9 +418,91 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
         "history_offset": 0,
         "last_prompt_tokens": 0,
         "agent_persisted": False,
-        "verified_fact_reused": True,
+        "verified_fact_reused": bool(validation["ok"] and turn.verified_fact_hit
+                                     and turn.resolved_answer is not None
+                                     and turn.resolved_answer.source_kind == "verified_fact"),
+        "preflight_blocked": not validation["ok"],
+        "presentation_validation": validation,
         "evidence_ids": list(turn.direct_evidence_ids),
     }
+
+
+def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[str, Any]:
+    """Validate delivery text without inventing a tool-read receipt.
+
+    Source authority was checked by the card/verified-fact loader. Presentation
+    must preserve that checked body; the existing pure final gate also examines
+    the complete delivery text. Numeric claims use the existing KB extractor.
+    """
+    from gateway.ivd_final_validator import validate_final_response
+    original = str(turn.direct_response)
+    reasons = []
+    policy = getattr(turn, "presentation_contract", {}) or {}
+    if not text.startswith(original):
+        reasons.append("validated_body_changed")
+    if text != original and not policy.get("verified_sources"):
+        reasons.append("unverified_presentation_addition")
+    decision = validate_final_response(
+        text=text,
+        contract={"product_line": getattr(turn, "product_scope", ""),
+                  "answer_shape": getattr(turn, "answer_shape", ""),
+                  "max_index_transactions": 0},
+        effect_receipt={"model_calls": 0, "index_transactions": 0, "filesystem_scans": 0},
+    )
+    reasons.extend(decision.reasons)
+    validator = getattr(turn, "validator", None)
+    if validator is not None:
+        before = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(original)}
+        after = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(text)}
+        if before != after:
+            reasons.append("presentation_numeric_claims_changed")
+        if turn.facts and turn.has_validator:
+            existing = turn.validate(text)
+            if not existing.get("ok"):
+                reasons.extend(existing.get("reasons") or ())
+    return {"ok": not reasons, "reasons": list(dict.fromkeys(reasons))}
+
+
+def _complete_parameter_contract(turn: AfterSalesTurn) -> dict[str, Any] | None:
+    """Reuse/activation require the same adopted, current-source scalar contract."""
+    contract = turn.parameter_contract
+    required = ("fact_key", "value", "unit", "product_scope", "source_path", "source_revision",
+                "source_locator", "source_document_id", "source_version")
+    if (not isinstance(contract, dict)
+            or any(not isinstance(contract.get(key), str) or not contract[key] for key in required)
+            or not isinstance(contract.get("product_variant"), str)
+            or not isinstance(contract.get("conditions"), list)):
+        return None
+    if (not contract or turn.blocks_answer_generation or not turn.has_validator
+            or turn.answer_shape != "scalar_lookup"
+            or turn.fact_key != contract["fact_key"]
+            or turn.product_scope != contract["product_scope"]
+            or turn.product_variant != contract["product_variant"]
+            or turn.source_locator != contract["source_locator"]
+            or not contract.get("source_revision")
+            or turn.source_revisions.get(contract["source_path"]) != contract["source_revision"]
+            or not contract["conditions"]):
+        return None
+    expected = {_normalize_numeric_claim(item) for item in turn.expected_scalar_claims}
+    if expected != {_normalize_numeric_claim(f"{contract['value']} {contract['unit']}")}:
+        return None
+    return contract
+
+
+def _matches_parameter_claim(claim: dict[str, Any], contract: dict[str, Any]) -> bool:
+    conditions = claim.get("conditions")
+    return (
+        isinstance(conditions, list) and all(isinstance(item, str) for item in conditions)
+        and sorted(conditions) == contract["conditions"]
+        and claim.get("fact_key") == contract["fact_key"]
+        and _normalize_numeric_claim(f"{claim.get('value', '')} {claim.get('unit', '')}")
+        == _normalize_numeric_claim(f"{contract['value']} {contract['unit']}")
+        and claim.get("source_path") == contract["source_path"]
+        and claim.get("source_revision") == contract["source_revision"]
+        and claim.get("locator") == contract["source_locator"]
+        and claim.get("source_document_id") == contract["source_document_id"]
+        and claim.get("source_version") == contract["source_version"]
+    )
 
 
 def activate_validated_fact(
@@ -393,7 +513,8 @@ def activate_validated_fact(
     validation: dict[str, Any],
 ) -> bool:
     """Activate exactly one adopted scalar claim after final validation."""
-    if not validation.get("ok") or turn.answer_shape not in {"scalar_lookup", "direct_fact"}:
+    contract = _complete_parameter_contract(turn)
+    if contract is None or not isinstance(validation, dict) or validation.get("ok") is not True:
         return False
     if not turn.product_scope:
         return False
@@ -401,13 +522,9 @@ def activate_validated_fact(
     if len(claims) != 1:
         return False
     claim = claims[0]
-    if turn.expected_scalar_claims:
-        claim_text = f"{claim.get('value', '')} {claim.get('unit', '')}".strip()
-        if _normalize_numeric_claim(claim_text) not in {
-            _normalize_numeric_claim(item) for item in turn.expected_scalar_claims
-        }:
-            return False
-    fact_key = str(claim.get("fact_key") or _fact_key_for_question(question))
+    if not isinstance(claim, dict) or not _matches_parameter_claim(claim, contract):
+        return False
+    fact_key = contract["fact_key"]
     if not fact_key or not claim.get("evidence_id") or not claim.get("source_path"):
         return False
     revision = str(claim.get("source_revision") or "")
@@ -423,8 +540,6 @@ def activate_validated_fact(
             json.dumps(claim.get("conditions") or [], ensure_ascii=False, sort_keys=True),
         )
     )
-    import hashlib
-
     fact_id = "fact-" + hashlib.sha256(fact_id_payload.encode("utf-8")).hexdigest()[:24]
     return VerifiedFactService(session_db).activate(
         {
@@ -442,6 +557,9 @@ def activate_validated_fact(
                     "evidence_id": str(claim["evidence_id"]),
                     "source_path": str(claim["source_path"]),
                     "source_revision": revision,
+                    "locator": contract["source_locator"],
+                    "source_document_id": contract["source_document_id"],
+                    "source_version": contract["source_version"],
                 }
             ],
             "source_revision": revision,
@@ -477,7 +595,8 @@ class CriticalAfterSalesValidator:
 
 def _normalize_numeric_claim(value: str) -> str:
     return (
-        re.sub(r"\s+", "", value)
+        # The existing KB extractor accepts all three micro-litre spellings.
+        re.sub(r"u(?=l\b)", "µ", re.sub(r"\s+", "", value), flags=re.IGNORECASE)
         .replace("μ", "µ")
         .replace(">=", "≥")
         .replace("<=", "≤")
@@ -500,22 +619,44 @@ def _canonical_preflight_action(gate: dict[str, Any]) -> str:
     return str(gate.get("pipeline_action") or "")
 
 
-def _render_answer_experience_context(
-    guard: dict[str, Any],
-    *,
-    platform: str,
-) -> str:
-    """Load the shared IVD answer policy beside the configured KB pipeline."""
-    fast_response_path = Path(str(guard.get("fast_response_module") or ""))
-    if not fast_response_path.is_file():
+def _load_presentation_policy(
+    fast_response_module: str, *, platform: str, task_type: str = "general",
+    detail_requested: bool = False,
+) -> tuple[ModuleType | None, dict[str, Any]]:
+    """Load the canonical code beside the configured release-owned pipeline."""
+    if not fast_response_module or not Path(fast_response_module).is_file():
+        return None, {}
+    path = Path(fast_response_module).with_name("hermes_channel_presentation.py")
+    if not path.is_file():
+        return None, {}  # Compatibility with releases predating this contract.
+    try:
+        module = _load_module(str(path), path.stat().st_mtime_ns)
+        if not all(callable(getattr(module, name, None)) for name in (
+            "presentation_contract", "render_presentation_instructions", "prepare_user_text"
+        )):
+            return None, {}  # Old KB release: retain its existing guard/policy.
+        contract = module.presentation_contract(platform, task_type=task_type,
+                                                 detail_requested=detail_requested)
+        return module, dict(contract)
+    except Exception:
+        # Presentation loading must not discard the numeric/source guard.
+        return None, {}
+
+
+def _render_answer_experience_context(guard: dict[str, Any], *, platform: str) -> str:
+    module, contract = _load_presentation_policy(
+        str(guard.get("fast_response_module") or ""), platform=platform)
+    if module is not None:
+        return module.render_presentation_instructions(contract)
+    fast_path = Path(str(guard.get("fast_response_module") or ""))
+    if not fast_path.is_file():
         return ""
-    policy_path = fast_response_path.with_name("after_sales_platform_policy.py")
+    policy_path = fast_path.with_name("after_sales_platform_policy.py")
     if not policy_path.is_file():
         return ""
     try:
         module = _load_module(str(policy_path), policy_path.stat().st_mtime_ns)
-        render = getattr(module, "render_answer_experience_context")
-        return str(render(platform=platform) or "").strip()
+        return str(module.render_answer_experience_context(platform=platform) or "").strip()
     except Exception:
         return ""
 
@@ -558,6 +699,8 @@ def _trusted_tool_numeric_evidence_details(
     messages: list[dict[str, Any]],
     source_paths: Any,
     validator: ModuleType,
+    *,
+    required_source_path: str | None = None,
 ) -> tuple[tuple[str, ...], bool, dict[str, dict[str, str]]]:
     trusted_paths = {
         str(Path(str(path)).expanduser().resolve())
@@ -582,6 +725,8 @@ def _trusted_tool_numeric_evidence_details(
             if not isinstance(arguments, dict) or not arguments.get("path"):
                 continue
             candidate = str(Path(str(arguments["path"])).expanduser().resolve())
+            if required_source_path is not None and candidate != required_source_path:
+                continue
             # Trust either the pre-injected source list or any formal source
             # path the agent actually read (dynamically discovered docs).
             if candidate in trusted_paths or _is_formal_source_path(candidate):
@@ -611,8 +756,93 @@ def _trusted_tool_numeric_evidence_details(
     return tuple(dict.fromkeys(claims)), source_read, claim_sources
 
 
-@lru_cache(maxsize=8)
+def _bind_workflow_scripts(path: Path) -> None:
+    """Bind one process to one trusted KB scripts root before its first import.
+
+    Never replace an existing namespace or module. A release change requires a
+    new gateway process; an incompatible cache is a configuration error.
+    """
+    import os
+    import importlib.machinery
+
+    resolved = path.resolve(strict=True)
+    root = resolved.parent.parent
+    agent = Path(__file__).resolve().parents[1]
+    if agent.name == "serving-agent":
+        expected = agent.parent / "serving-package"
+        staged = json.loads((agent.parent / ".staged.json").read_bytes())
+        manifest = json.loads((expected / "package-manifest.json").read_bytes())
+        if (root != expected or manifest.get("package_digest") != staged.get("package_digest")
+                or not staged.get("knowledgehub_commit")):
+            raise ImportError("workflow scripts release binding mismatch")
+        members = manifest.get("members")
+        if (not isinstance(members, dict)
+                or "scripts/hermes_workflow_clarification.py" not in members
+                or str(resolved.relative_to(root)) not in members):
+            raise ImportError("workflow scripts package members unavailable")
+        package_digest = hashlib.sha256(json.dumps(
+            {"algorithm": "sha256-canonical-members-v1", "members": members},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if package_digest != staged["package_digest"]:
+            raise ImportError("workflow scripts package digest mismatch")
+        for relative, digest in members.items():
+            if relative.startswith("scripts/"):
+                member = root / relative
+                if member.is_symlink() or hashlib.sha256(member.read_bytes()).hexdigest() != digest:
+                    raise ImportError("workflow scripts package member mismatch")
+    else:
+        configured = os.environ.get("IVD_KB_ROOT")
+        if not configured or root != Path(configured).resolve(strict=True) or not (root / ".git").exists():
+            raise ImportError("workflow scripts explicit source binding required")
+    scripts = root / "scripts"
+    helper = scripts / "hermes_workflow_clarification.py"
+    if not helper.is_file() or helper.is_symlink() or scripts.is_symlink():
+        raise ImportError("workflow scripts dependency missing or linked")
+    for name, module in list(sys.modules.items()):
+        if name == "scripts":
+            locations = getattr(module, "__path__", None)
+            resolved_locations = [Path(p).resolve() for p in locations] if locations is not None else []
+            # Existing source tests may have Python's implicit namespace spanning
+            # the selected KB and this Agent's scripts directory. Only that
+            # known empty namespace is narrowed, after all cached children pass.
+            allowed_locations = {scripts, agent / "scripts"} if agent.name != "serving-agent" else {scripts}
+            if (not resolved_locations
+                    or any(p not in allowed_locations for p in resolved_locations)):
+                raise ImportError(f"workflow scripts namespace conflict: {resolved_locations!r}")
+        elif name.startswith("scripts."):
+            file = getattr(module, "__file__", None)
+            if not file or not Path(file).resolve().is_relative_to(scripts):
+                # Source runner owns independent Agent scripts (e.g. environment
+                # isolation). Preserve them only when no KB module shares that
+                # name; never permit a foreign KB dependency or release module.
+                relative = Path(*name.split(".")[1:]).with_suffix(".py")
+                source_agent_module = (agent.name != "serving-agent" and file
+                    and Path(file).resolve() == agent / "scripts" / relative
+                    and not (scripts / relative).exists())
+                if not source_agent_module:
+                    raise ImportError(f"workflow scripts cached module conflict: {name}: {file}")
+    if "scripts" in sys.modules:
+        sys.modules["scripts"].__path__ = [str(scripts)]
+        if sys.modules["scripts"].__spec__ is not None:
+            sys.modules["scripts"].__spec__.submodule_search_locations = [str(scripts)]
+    else:
+        namespace = ModuleType("scripts")
+        namespace.__path__ = [str(scripts)]
+        namespace.__package__ = "scripts"
+        namespace.__spec__ = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
+        namespace.__spec__.submodule_search_locations = namespace.__path__
+        sys.modules["scripts"] = namespace
+
+
 def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
+    path = Path(path_text)
+    if path.name in {"after_sales_workflow_gate.py", "hermes_fast_response_pipeline.py"}:
+        _bind_workflow_scripts(path)
+    return _load_module_cached(path_text, mtime_ns)
+
+
+@lru_cache(maxsize=8)
+def _load_module_cached(path_text: str, mtime_ns: int) -> ModuleType:
     path = Path(path_text)
     module_name = f"hermes_after_sales_{abs(hash((path_text, mtime_ns)))}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -622,6 +852,15 @@ def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _clarification_history(message: str, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if str(message).lstrip().startswith("["):
+        return []
+    return [item for item in history if item.get("role") == "user"
+            and isinstance(item.get("content"), str)
+            and not item["content"].lstrip().startswith("[")
+            and not any(item.get(key) for key in ("observed", "mirror", "user_id", "sender_id"))]
 
 
 def prepare_after_sales_turn(
@@ -650,6 +889,7 @@ def prepare_after_sales_turn(
     if normalized_platform not in enabled_platforms:
         return None
 
+    guard = {**guard, "_presentation_platform": normalized_platform}
     module_path = Path(str(guard.get("workflow_module") or ""))
     validator_path = Path(str(guard.get("validator_module") or ""))
     cards_dir = Path(str(guard.get("cards_dir") or ""))
@@ -658,13 +898,25 @@ def prepare_after_sales_turn(
     if module_path.is_file() and validator_path.is_file() and cards_dir.is_dir():
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
-        match = module.match_case_facts(cards_dir, message=message, history=history)
+        try:
+            match = module.match_case_facts(cards_dir, message=message, history=history)
+            if match and (match.get("facts") or {}).get("clarification"):
+                # Shared-chat display names are not verified actor identities.
+                match = module.match_case_facts(cards_dir, message=message,
+                                                history=_clarification_history(message, history))
+        except ValueError:
+            # An invalid/unavailable card cannot authorize any fact. The
+            # planner still supplies a safe clarification, never an answer.
+            match = None
+            guard = {**guard, "_workflow_card_unavailable": True}
 
     experience_context = _render_answer_experience_context(
         guard,
         platform=normalized_platform,
     )
-    fast_result = _render_fast_response_context(guard, message=message, match=match)
+    fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform, history=history)
+    if fast_result.get("presentation_contract"):
+        experience_context = ""
     fast_context = str(fast_result.get("context") or "")
     if match is None:
         combined_context = "\n\n".join(
@@ -703,6 +955,8 @@ def prepare_after_sales_turn(
                 preflight_decision=str(fast_result.get("preflight_decision") or ""),
                 preflight_action=str(fast_result.get("preflight_action") or ""),
                 preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
+                presentation_contract=dict(fast_result.get("presentation_contract") or {}),
+                presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
                 answer_contract=dict(fast_result.get("answer_contract") or {}),
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
@@ -712,6 +966,7 @@ def prepare_after_sales_turn(
                 expected_scalar_claims=tuple(
                     str(item) for item in fast_result.get("expected_scalar_claims") or ()
                 ),
+                parameter_contract=dict(fast_result.get("parameter_contract") or {}),
                 source_locator=str(fast_result.get("source_locator") or ""),
                 prepared_ivd_turn=prepared_ivd_turn,
             ),
@@ -770,6 +1025,8 @@ def prepare_after_sales_turn(
         preflight_action=str(fast_result.get("preflight_action") or ""),
             preflight_issues=tuple(fast_result.get("preflight_issues") or ()),
             prepared_ivd_turn=prepared_ivd_turn,
+            presentation_contract=dict(fast_result.get("presentation_contract") or {}),
+            presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
             answer_contract=dict(fast_result.get("answer_contract") or {}),
             source_location=dict(fast_result.get("source_location") or {}),
             answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
@@ -777,6 +1034,7 @@ def prepare_after_sales_turn(
             expected_scalar_claims=tuple(
                 str(item) for item in fast_result.get("expected_scalar_claims") or ()
             ),
+            parameter_contract=dict(fast_result.get("parameter_contract") or {}),
             source_locator=str(fast_result.get("source_locator") or ""),
         ),
         guard=guard,
@@ -792,12 +1050,30 @@ def _attach_verified_fact(
     question: str,
     session_db: Any | None,
 ) -> AfterSalesTurn:
+    if not turn.presentation_contract:
+        platform = str(guard.get("_presentation_platform") or "generic")
+        module, policy = _load_presentation_policy(
+            str(guard.get("fast_response_module") or ""), platform=platform,
+            task_type=str(turn.answer_contract.get("task_kind") or "general"),
+            detail_requested=turn.answer_contract.get("detail_level") == "detailed")
+        if module is not None:
+            turn = replace(turn, presentation_contract=policy,
+                           presentation_module_path=str(Path(module.__file__)))
     fact_key = str(turn.fact_key or _fact_key_for_question(question))
     source_revisions = _load_source_revisions(guard.get("knowledge_release_manifest"))
+    contract = dict(turn.parameter_contract)
+    if contract and source_revisions.get(contract["source_path"]):
+        try:
+            revision = hashlib.sha256(Path(contract["absolute_source_path"]).read_bytes()).hexdigest()
+        except OSError:
+            revision = ""
+        if revision and source_revisions[contract["source_path"]] == revision:
+            contract["source_revision"] = revision
     turn = replace(
         turn,
         fact_key=fact_key,
         source_revisions=source_revisions,
+        parameter_contract=contract,
         evidence_sidecar_enabled=bool(guard.get("evidence_sidecar_enabled", False)),
     )
     mode = str(guard.get("verified_fact_reuse_mode") or "off").strip().lower()
@@ -805,21 +1081,26 @@ def _attach_verified_fact(
         mode = "off"
     if mode == "off" or session_db is None:
         return turn
-    if turn.answer_shape not in {"scalar_lookup", "direct_fact"} or not turn.product_scope:
-        return turn
-    if not fact_key:
-        return turn
-    if not source_revisions:
+    contract = _complete_parameter_contract(turn)
+    if contract is None:
         return turn
     match = VerifiedFactService(session_db).lookup(
         product_scope=turn.product_scope,
         product_variant=turn.product_variant,
         fact_key=fact_key,
-        conditions=[],
-        source_revisions=source_revisions,
+        conditions=contract["conditions"],
+        source_revisions={contract["source_path"]: contract["source_revision"]},
     )
     if match is None:
         return turn
+    evidence = match.get("evidence") or []
+    if (match.get("source_revision") != contract["source_revision"] or not evidence
+            or not all(isinstance(item, dict) and _matches_parameter_claim(
+                {**match, **item}, contract) for item in evidence)):
+        return turn
+    if mode == "shadow":
+        # A shadow cache hit cannot replace the independently valid formal card.
+        return replace(turn, verified_fact_hit=True, verified_fact_status="shadow")
     rendered_answer = str(match.get("rendered_answer") or "")
     if turn.answer_shape == "scalar_lookup" and turn.expected_scalar_claims:
         if turn.validator is None:
@@ -918,26 +1199,70 @@ def _canonical_scalar_response(claim: str) -> str:
     return f"{value}{' ' + normalized_unit if normalized_unit else ''}。"
 
 
+def _parameter_card_contract(card: dict[str, Any], root: Path, sources: list[str]) -> dict[str, Any]:
+    """Adapt existing formal-card metadata; never infer a field or a value."""
+    required = ("fact_key", "value", "unit", "source_path", "source_document_id",
+                "source_version", "source_locator", "product_scope")
+    if any(not isinstance(card.get(key), str) or not card[key].strip() for key in required):
+        return {}
+    conditions = card.get("conditions")
+    if (not isinstance(conditions, dict) or not conditions
+            or any(not isinstance(key, str) or not isinstance(value, str) or not key or not value
+                   for key, value in conditions.items())):
+        return {}
+    relative = Path(card["source_path"])
+    if relative.is_absolute() or ".." in relative.parts or not relative.as_posix().startswith("knowledge-base/"):
+        return {}
+    source = (root / relative).resolve()
+    if not source.is_relative_to(root.resolve()) or not source.is_file() or str(source) not in sources:
+        return {}
+    return {**{key: card[key] for key in required},
+            "product_variant": str(card.get("product_variant") or ""),
+            "absolute_source_path": str(source), "source_revision": "",
+            "conditions": sorted(f"{key}={value}" for key, value in conditions.items())}
+
+
 def _render_fast_response_context(
     guard: dict[str, Any],
     *,
     message: str,
     match: dict[str, Any] | None,
+    platform: str = "generic",
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     module_path = Path(str(guard.get("fast_response_module") or ""))
     if not module_path.is_file():
         return {}
     try:
-        kb_root = str(module_path.parent.parent)
-        if kb_root not in sys.path:
-            sys.path.insert(0, kb_root)
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         question_type = _question_type_from_match(match)
-        plan = module.build_fast_response_plan(message, question_type=question_type)
+        kwargs = {"question_type": question_type}
+        if "platform" in inspect.signature(module.build_fast_response_plan).parameters:
+            kwargs["platform"] = platform
+        parameters = inspect.signature(module.build_fast_response_plan).parameters
+        if ("conversation_context" in parameters and hasattr(module, "build_context_envelope")
+                and isinstance(match, dict) and (match.get("facts") or {}).get("clarification")):
+            # History is the caller's conversation-scoped input; never read another session.
+            prior = {}
+            for item in _clarification_history(message, history or [])[-12:]:
+                if item.get("role") == "user" and isinstance(item.get("content"), str):
+                    prior = module.build_context_envelope(item["content"], conversation_context=prior)
+            current_identity = module.match_product_scope(message)
+            if (prior.get("conflicts") or
+                (current_identity.get("product_scope_confirmed") and prior.get("product_line")
+                 and current_identity.get("product_scope") != prior["product_line"])):
+                prior = {}
+            kwargs["conversation_context"] = prior
+        if "workflow_clarification" in parameters and isinstance(match, dict):
+            kwargs["workflow_clarification"] = (match.get("facts") or {}).get("clarification")
+        plan = module.build_fast_response_plan(message, **kwargs)
     except Exception:
         return {}
     runtime_preflight = plan.get("runtime_preflight") or {}
-    if not runtime_preflight.get("eligible", False):
+    workflow_clarification = (plan.get("expert_route_contract") or {}).get("clarification") or {}
+    clarification_required = bool(guard.get("_workflow_card_unavailable") or
+        (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
+    if not runtime_preflight.get("eligible", False) and not clarification_required:
         return {}
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
@@ -977,6 +1302,12 @@ def _render_fast_response_context(
     if initial_files:
         lines.append("首轮只读正式来源：" + "；".join(initial_files))
     answer_contract = dict(plan.get("answer_contract") or {})
+    presentation_module, presentation = _load_presentation_policy(
+        str(module_path), platform=platform,
+        task_type=str(answer_contract.get("task_kind") or "general"),
+        detail_requested=answer_contract.get("detail_level") == "detailed")
+    if presentation_module is not None:
+        lines.append(presentation_module.render_presentation_instructions(presentation))
     lines.extend(_render_answer_contract_lines(answer_contract))
     if not answer_contract:
         lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
@@ -993,6 +1324,11 @@ def _render_fast_response_context(
     elif direct_response and answer_card:
         lines.append("已解析正式答案卡，直接采用卡内当前值，不再重复检索或调用模型。")
     expert_contract = plan.get("expert_route_contract") or {}
+    if clarification_required and not workflow_clarification.get("workflow"):
+        # Invalid policy/card inputs can only request a fixed non-answer fallback.
+        expert_contract = {"status": "clarification", "formal_answer_allowed": False,
+                           "bounded_expert_answer_allowed": False, "clarification": {}}
+        answer_shape = {"answer_shape": "diagnostic"}
     contract_guarded = False
     contract_status = str(expert_contract.get("status") or "")
     if (
@@ -1002,10 +1338,53 @@ def _render_fast_response_context(
     ):
         # A contract that has not reached a serving-safe evidence tier must
         # stop before the general model can turn retrieved draft text into a
-        # formal-looking numeric answer.  The wording names the gap that
-        # actually blocks: missing product, missing version, a mechanism
-        # question without bound sources, or missing evidence for a scoped one.
-        direct_response = build_expert_contract_stop_response(expert_contract)
+        # formal-looking numeric answer.  When the contract names a concrete
+        # gap, the wording names that gap: missing product, missing version, a
+        # mechanism question without bound sources, or the input that would
+        # change the judgement for this capability.  Otherwise keep the
+        # envelope- and shape-driven clarification.
+        contract_issues = {str(item) for item in (expert_contract.get("issues") or ())}
+        contract_capability = str(expert_contract.get("capability") or "")
+        contract_product = str(expert_contract.get("product_line") or "").strip()
+        contract_version = str(expert_contract.get("version") or "").strip()
+        gap_names_input = bool(
+            not contract_product
+            or contract_capability == "mechanism_explanation"
+            or ("product_scope_required" in contract_issues and not contract_version)
+            or contract_capability in EXPERT_CONTRACT_EVIDENCE_ASKS
+        )
+        # A navigation or document-lookup question is answered by pointing at a
+        # controlled file, so it must not be met with a request for a numeric
+        # conclusion's missing inputs.
+        navigation_question = (
+            str(answer_shape.get("answer_shape") or "") in {"direct_fact", "file_lookup"}
+            or str((plan.get("answer_contract") or {}).get("deliverable") or "") == "direct_answer"
+        )
+        gap_names_input = gap_names_input and not navigation_question
+        scalar_question = str(answer_shape.get("answer_shape") or "") in {
+            "scalar_lookup", "scoped_scalar", "ambiguous_scalar"
+        }
+        if gap_names_input:
+            direct_response = build_expert_contract_stop_response(expert_contract)
+        elif scalar_question and not workflow_clarification.get("workflow"):
+            envelope = plan.get("context_envelope") or {}
+            labels = {"product_line": "产品名称", "product_version": "适用版本",
+                      "method": "实验方法", "workflow_step": "具体步骤", "sample_type": "样本类型"}
+            missing = [labels[key] for key in envelope.get("missing") or ()
+                       if key in labels and not envelope.get(key)]
+            if not envelope.get("product_line") and "产品名称" not in missing:
+                missing.insert(0, "产品名称")
+            request = "请确认" + "、".join(missing) + "。" if missing else "需要进一步核对对应正式来源。"
+            direct_response = "现有上下文或正式证据不足，暂不输出未经核实的正式数值结论。" + request
+        elif (str(answer_shape.get("answer_shape") or "") == "diagnostic"
+              or workflow_clarification.get("workflow")):
+            renderer = getattr(module, "render_expert_clarification", None)
+            direct_response = (renderer(expert_contract.get("clarification"),
+                                       product=product_identity.get("product_scope"))
+                               if callable(renderer) else
+                               "暂不能判断个案原因。请确认发生变化的完整结果字段，以及两次采用的分析流程？拿到这些信息后再核对可比性与对应流程。")
+        else:
+            direct_response = "当前尚未核实到足以支持此问题的正式来源，需要继续核对适用的受控文件。"
         contract_guarded = True
         answer_shape = {"answer_shape": "clarification"}
         fast_path = {
@@ -1017,8 +1396,29 @@ def _render_fast_response_context(
             "numeric_fast_answer_allowed": False,
         }
         lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
+    parameter_contract = {}
+    if (not contract_guarded and gate.get("decision") != "block"
+            and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}
+            and fast_path.get("hit") is True
+            and fast_path.get("route_source") == "formal_answer_card"
+            and fast_path.get("numeric_fast_answer_allowed") is True
+            and answer_shape.get("answer_shape") == "scalar_lookup"
+            and answer_card.get("knowledge_kind") == "parameter"
+            and answer_card.get("effective_status") == "active"
+            and answer_card.get("authority_level") == "formal_authority"
+            and product_identity.get("product_scope_confirmed") is True
+            and product_identity.get("product_scope") == answer_card.get("product_scope")
+            and str(product_identity.get("product_variant") or "") == str(answer_card.get("product_variant") or "")):
+        parameter_contract = _parameter_card_contract(answer_card, kb_root, initial_files)
+    if presentation_module is not None and answer_card and not contract_guarded and answer_card.get("source_document_id"):
+        presentation = {**presentation, "verified_sources": [{
+            "document": answer_card["source_document_id"],
+            "version": answer_card.get("source_version", ""),
+            "locator": answer_card.get("source_locator", ""),
+        }]}
     return {
         "context": "\n".join(lines),
+        "presentation_contract": presentation,
         "route_id": fast_path.get("route_id") or fast_path.get("answer_shape") or "fast_preflight",
         "route_source": str(fast_path.get("route_source") or ""),
         "route_version": runtime_preflight.get("route_version", ""),
@@ -1047,11 +1447,12 @@ def _render_fast_response_context(
         "direct_response": direct_response,
         "answer_card": dict(answer_card) if isinstance(answer_card, dict) else {},
         "contact_fact": dict(contact_fact) if isinstance(contact_fact, dict) else {},
-        "fact_key": str(plan.get("fact_key") or ""),
-        "expected_scalar_claims": tuple(
+        "parameter_contract": parameter_contract,
+        "fact_key": parameter_contract.get("fact_key") or str(plan.get("fact_key") or ""),
+        "expected_scalar_claims": (f"{parameter_contract['value']} {parameter_contract['unit']}",) if parameter_contract else tuple(
             str(item) for item in plan.get("expected_scalar_claims") or ()
         ),
-        "source_locator": str(plan.get("source_locator") or ""),
+        "source_locator": parameter_contract.get("source_locator") or str(plan.get("source_locator") or ""),
         "requires_source_validation": str(fast_path.get("answer_shape") or "")
         == "sop_parameter_short_answer",
     }
@@ -1062,8 +1463,8 @@ def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
         return []
     if contract.get("deliverable") == "scalar_value":
         return [
-            "当前交付物：只输出一个已核实数值及单位。",
-            "不要补充原因、建议、下一步或可见来源标签；内部证据校验照常执行。",
+            "当前交付物：先给已核实数值及单位，保留适用条件和就地可追溯依据。",
+            "不展开无关原因或完整SOP；不得省略会改变结论的条件、边界或来源，内部证据校验照常执行。",
         ]
     deliverable = {
         "difference_list": "只输出差异清单",
@@ -1092,7 +1493,7 @@ def _render_answer_contract_lines(contract: dict[str, Any]) -> list[str]:
             (
                 "正文第一行直接进入第1项差异；禁止前置“结论”“主要差异”“来源”等摘要段。",
                 "每项只写一个比较维度及对应版本差异，不重复汇总已列出的内容。",
-                "必要依据只在正文末尾用一行正式SOP编号或标题说明；不得输出材料库文件名、路径或内部 reference 标识。",
+                "依据贴近对应差异，说明正式SOP编号、标题及版本；不得输出材料库文件名、路径或内部 reference 标识。",
             )
         )
     selected_dimensions = [
