@@ -73,6 +73,7 @@ class AfterSalesTurn:
     presentation_contract: dict[str, Any] = field(default_factory=dict)
     presentation_module_path: str = ""
     parameter_contract: dict[str, Any] = field(default_factory=dict)
+    task_contract: dict[str, Any] = field(default_factory=dict)
 
     def present_text(self, text: str) -> str:
         if not self.presentation_module_path or not self.presentation_contract:
@@ -836,7 +837,8 @@ def _bind_workflow_scripts(path: Path) -> None:
 
 def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
     path = Path(path_text)
-    if path.name in {"after_sales_workflow_gate.py", "hermes_fast_response_pipeline.py"}:
+    if path.name in {"after_sales_workflow_gate.py", "hermes_fast_response_pipeline.py",
+                     "hermes_context_envelope.py"}:
         _bind_workflow_scripts(path)
     return _load_module_cached(path_text, mtime_ns)
 
@@ -852,6 +854,17 @@ def _load_module_cached(path_text: str, mtime_ns: int) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def resolve_after_sales_task(guard: dict[str, Any], message: str, *, actor_id: str = "",
+                             pending_task: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load the sole task resolver from the verified workflow dependency root."""
+    configured = Path(str(guard.get("fast_response_module") or ""))
+    path = configured.with_name("hermes_context_envelope.py")
+    if not path.is_file():
+        return {}
+    module = _load_module(str(path), path.stat().st_mtime_ns)
+    return module.resolve_current_task(message, actor_id=actor_id, pending_task=pending_task)
 
 
 def _clarification_history(message: str, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -871,6 +884,9 @@ def prepare_after_sales_turn(
     history: list[dict[str, Any]],
     prepared_ivd_turn: Any | None = None,
     session_db: Any | None = None,
+    task_contract: dict[str, Any] | None = None,
+    actor_id: str = "",
+    pending_task: dict[str, Any] | None = None,
 ) -> AfterSalesTurn | None:
     """Return verified per-turn facts when an enabled workflow card matches."""
 
@@ -890,6 +906,15 @@ def prepare_after_sales_turn(
         return None
 
     guard = {**guard, "_presentation_platform": normalized_platform}
+    task = task_contract or resolve_after_sales_task(guard, message, actor_id=actor_id,
+                                                    pending_task=pending_task)
+    if task:
+        guard = {**guard, "_task_contract": task}
+        message = str(task.get("question") or message)
+        history = []  # The shared task already admitted any applicable fields.
+        if task.get("intent") == "social":
+            return AfterSalesTurn(context="", facts={}, validator=None,
+                                  allowed_numeric_claims=(), task_contract=task)
     module_path = Path(str(guard.get("workflow_module") or ""))
     validator_path = Path(str(guard.get("validator_module") or ""))
     cards_dir = Path(str(guard.get("cards_dir") or ""))
@@ -899,7 +924,10 @@ def prepare_after_sales_turn(
         module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
         validator = _load_module(str(validator_path), validator_path.stat().st_mtime_ns)
         try:
-            match = module.match_case_facts(cards_dir, message=message, history=history)
+            match_args = {"message": message, "history": history}
+            if "task_contract" in inspect.signature(module.match_case_facts).parameters:
+                match_args["task_contract"] = task
+            match = module.match_case_facts(cards_dir, **match_args)
             if match and (match.get("facts") or {}).get("clarification"):
                 # Shared-chat display names are not verified actor identities.
                 match = module.match_case_facts(cards_dir, message=message,
@@ -958,6 +986,7 @@ def prepare_after_sales_turn(
                 presentation_contract=dict(fast_result.get("presentation_contract") or {}),
                 presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
                 answer_contract=dict(fast_result.get("answer_contract") or {}),
+                task_contract=task,
                 source_location=dict(fast_result.get("source_location") or {}),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
                 direct_response=str(fast_result.get("direct_response") or ""),
@@ -1028,6 +1057,7 @@ def prepare_after_sales_turn(
             presentation_contract=dict(fast_result.get("presentation_contract") or {}),
             presentation_module_path=str(Path(guard["fast_response_module"]).with_name("hermes_channel_presentation.py")) if fast_result.get("presentation_contract") else "",
             answer_contract=dict(fast_result.get("answer_contract") or {}),
+            task_contract=task,
             source_location=dict(fast_result.get("source_location") or {}),
             answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
             fact_key=str(fast_result.get("fact_key") or ""),
@@ -1240,6 +1270,9 @@ def _render_fast_response_context(
         if "platform" in inspect.signature(module.build_fast_response_plan).parameters:
             kwargs["platform"] = platform
         parameters = inspect.signature(module.build_fast_response_plan).parameters
+        task = guard.get("_task_contract")
+        if task and "task_contract" in parameters:
+            kwargs["task_contract"] = task
         if ("conversation_context" in parameters and hasattr(module, "build_context_envelope")
                 and isinstance(match, dict) and (match.get("facts") or {}).get("clarification")):
             # History is the caller's conversation-scoped input; never read another session.

@@ -3651,10 +3651,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         history: list[dict[str, Any]],
         business_message: str | None = None,
         business_history_isolated: bool = False,
+        actor_id: str = "",
+        session_key: str = "",
     ) -> tuple[Any, Any]:
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
-        routing_history = [] if business_history_isolated else history
+        from gateway.after_sales_guard import resolve_after_sales_task
+        store = getattr(self, "session_store", None)
+        getter = getattr(store, "get_session_metadata", None)
+        pending = getter(session_key, "ivd_pending_task") if callable(getter) and session_key else None
+        guard = config.get("after_sales_guard") or {}
+        task = resolve_after_sales_task(guard,
+            business_message if business_message is not None else message,
+            actor_id=actor_id, pending_task=pending)
+        routing_history = []  # Shared task resolution owns all context admission.
+        if task.get("intent") == "social":
+            from gateway.after_sales_guard import AfterSalesTurn
+            return None, AfterSalesTurn(context="", facts={}, validator=None,
+                                       allowed_numeric_claims=(), task_contract=task)
         normalized_platform = str(platform or "").strip().lower()
         prepared_contracts = self.__dict__.get("_ivd_prepared_contracts") or {}
         prepared = prepared_contracts.get(normalized_platform)
@@ -3665,6 +3679,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 question=message,
                 business_question=business_message,
                 history=routing_history,
+                task_contract=task,
                 platform=platform,
                 fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
             )
@@ -3686,6 +3701,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     question=message,
                 business_question=business_message,
                     history=routing_history,
+                task_contract=task,
                     platform=platform,
                     fast_response_module=str((config.get("after_sales_guard") or {}).get("fast_response_module") or ""),
                 )
@@ -3709,8 +3725,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message=business_message if business_message is not None else message,
             history=routing_history,
             prepared_ivd_turn=prepared,
+            task_contract=task,
             session_db=getattr(session_db, "_db", session_db),
         )
+        setter = getattr(store, "set_session_metadata", None)
+        if callable(setter) and session_key:
+            waiting = None
+            if turn is not None and turn.blocks_answer_generation and task and actor_id:
+                missing = list((task.get("context") or {}).get("missing") or [])
+                missing += list((turn.facts.get("clarification") or {}).get("missing") or [])
+                if missing:
+                    waiting = {"task": task, "actor_id": actor_id,
+                               "question": task["question"], "status": "awaiting_reply",
+                               "expires_at": time.time() + 900,
+                               "missing_fields": list(dict.fromkeys(missing))}
+            setter(session_key, "ivd_pending_task", waiting)
         return prepared, turn
 
     def _close_ivd_prepared_contracts(self) -> None:
@@ -21974,6 +22003,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 history=history,
                 business_message=business_message,
                 business_history_isolated=business_history_isolated,
+                actor_id=str(source.user_id_alt or source.user_id or ""),
+                session_key=session_key or "",
             )
             if (
                 _after_sales_turn is not None
