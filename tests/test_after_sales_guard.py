@@ -23,7 +23,7 @@ from gateway.after_sales_guard import _load_module
 
 # Local audit pins the approved KB candidate. Governed releases instead use
 # their existing sibling .staged.json identity, so future releases need no pin edit.
-LOCAL_KB_COMMIT = "3f5f93c62df10299f0f298c014742bf1664e7bad"
+LOCAL_KB_COMMIT = "55805d1c5aafd1a4fb92b9a078bfbaa39e0c1602"
 
 
 def _local_git(root, *args, input=None):
