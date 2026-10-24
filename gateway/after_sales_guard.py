@@ -289,6 +289,52 @@ def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
     return "当前未能完成正式来源核实，暂不提供未经核实的数值结论。"
 
 
+EXPERT_CONTRACT_MISSING_PRODUCT = (
+    "当前已进入专家检索，但该问题缺少可决定结论的上下文或正式证据，"
+    "暂不输出未经核实的正式数值结论。请补充产品名称，以及对应的版本或 SOP 编号，"
+    "例如首次建库/第一管还是重建库/复检。"
+)
+EXPERT_CONTRACT_MISSING_VERSION = (
+    "当前已进入专家检索，产品已确认，但还缺可决定结论的版本与实验阶段，"
+    "暂不输出未经核实的正式数值结论。请补充产品版本或 SOP 编号，以及实验阶段，"
+    "例如首次建库/第一管还是重建库/复检。"
+)
+EXPERT_CONTRACT_MECHANISM_BOUNDARY = (
+    "该问题属于机制解释，产品已确认，但目前没有与问题绑定的正式来源，"
+    "只能说明机制层面的一般关系，不给数值、阈值和正式结论。"
+    "如需正式依据，请补充适用的 SOP 编号或版本。"
+)
+EXPERT_CONTRACT_EVIDENCE_ASKS = {
+    "parameter_resolution": "请补充实验阶段、样本类型与所用方法，我会按对应正式 SOP 重新核实。",
+    "data_interpretation": "请补充样本信息与对应的报告规则版本，我会按正式规则重新核实。",
+    "after_sales_diagnosis": (
+        "请补充会改变判断的现场事实，例如是否首次检测、同批次其它样本表现与关键质控结果。"
+    ),
+}
+EXPERT_CONTRACT_EVIDENCE_DEFAULT = "请补充产品版本、SOP 编号与实验阶段，我会按正式来源重新核实。"
+
+
+def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
+    """Render the stop wording for the gap that actually blocks the contract.
+
+    Every branch still stops before generation.  The wording only names the
+    missing input that would change the judgement, so a mechanism question is
+    not answered with a request for a version it never needed.
+    """
+    issues = {str(item) for item in (contract.get("issues") or ())}
+    product_line = str(contract.get("product_line") or "")
+    version = str(contract.get("version") or "")
+    capability = str(contract.get("capability") or "")
+    if not product_line:
+        return EXPERT_CONTRACT_MISSING_PRODUCT
+    if not version and "product_scope_required" in issues:
+        return EXPERT_CONTRACT_MISSING_VERSION
+    if capability == "mechanism_explanation":
+        return EXPERT_CONTRACT_MECHANISM_BOUNDARY
+    ask = EXPERT_CONTRACT_EVIDENCE_ASKS.get(capability, EXPERT_CONTRACT_EVIDENCE_DEFAULT)
+    return "当前已进入专家检索，但尚无可绑定的正式证据，暂不输出正式结论。" + ask
+
+
 def build_preflight_block_result(
     turn: AfterSalesTurn,
     message: str,
@@ -956,12 +1002,10 @@ def _render_fast_response_context(
     ):
         # A contract that has not reached a serving-safe evidence tier must
         # stop before the general model can turn retrieved draft text into a
-        # formal-looking numeric answer.
-        direct_response = (
-            "当前已进入专家检索，但该问题缺少可决定结论的上下文或正式证据，"
-            "暂不输出未经核实的正式数值结论。请补充产品版本、SOP编号及实验阶段，"
-            "例如首次建库/第一管还是重建库/复检。"
-        )
+        # formal-looking numeric answer.  The wording names the gap that
+        # actually blocks: missing product, missing version, a mechanism
+        # question without bound sources, or missing evidence for a scoped one.
+        direct_response = build_expert_contract_stop_response(expert_contract)
         contract_guarded = True
         answer_shape = {"answer_shape": "clarification"}
         fast_path = {

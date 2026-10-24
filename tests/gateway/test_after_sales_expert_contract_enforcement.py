@@ -91,6 +91,99 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         self.assertEqual("block", result["preflight_decision"])
         self.assertEqual("stop_before_answer_generation", result["preflight_action"])
 
+    def _render_with_contract(self, contract: dict, message: str = "NIFTY结果阈值是多少"):
+        plan = {
+            "runtime_preflight": {"eligible": True, "route_version": "test"},
+            "answer_template": {"style": "short_first"},
+            "preflight_gate": {"decision": "allow", "pipeline_action": "continue_final_answer"},
+            "product_identity": {"product_scope": "NIFTY", "product_scope_confirmed": True},
+            "initial_files": [],
+            "fast_path": {"hit": False, "answer_shape": "standard"},
+            "answer_shape": {"answer_shape": "scalar_lookup"},
+            "expert_route_contract": contract,
+        }
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as root:
+            module_path = _load_fast_module(
+                Path(root) / "knowledge-base" / "scripts" / "hermes_fast_response_pipeline.py",
+                plan,
+            )
+            return _render_fast_response_context(
+                {"fast_response_module": str(module_path)},
+                message=message,
+                match=None,
+            )
+
+    def test_stop_wording_asks_for_product_when_scope_is_unknown(self):
+        result = self._render_with_contract(
+            {
+                "status": "clarification",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": False,
+                "capability": "after_sales_diagnosis",
+                "issues": ["product_scope_required", "evidence_required"],
+            }
+        )
+
+        self.assertIn("请补充产品名称", result["direct_response"])
+        self.assertEqual("block", result["preflight_decision"])
+        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
+
+    def test_stop_wording_asks_for_version_when_product_is_known(self):
+        result = self._render_with_contract(
+            {
+                "status": "clarification",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": False,
+                "capability": "after_sales_diagnosis",
+                "product_line": "NIFTY",
+                "version": "",
+                "issues": ["product_scope_required", "evidence_required"],
+            }
+        )
+
+        self.assertIn("产品已确认", result["direct_response"])
+        self.assertIn("请补充产品版本或 SOP 编号", result["direct_response"])
+        self.assertEqual("block", result["preflight_decision"])
+
+    def test_mechanism_gap_states_boundary_instead_of_asking_version(self):
+        result = self._render_with_contract(
+            {
+                "status": "pending_evidence",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": False,
+                "capability": "mechanism_explanation",
+                "product_line": "NIFTY",
+                "version": "",
+                "version_scope": "general_mechanism",
+                "issues": ["evidence_not_serving", "evidence_required"],
+            }
+        )
+
+        self.assertIn("机制解释", result["direct_response"])
+        self.assertIn("不给数值、阈值和正式结论", result["direct_response"])
+        self.assertNotIn("请补充产品版本", result["direct_response"])
+        self.assertEqual("block", result["preflight_decision"])
+        self.assertEqual("clarification", result["answer_shape"])
+
+    def test_evidence_gap_asks_for_the_input_that_changes_the_judgement(self):
+        result = self._render_with_contract(
+            {
+                "status": "pending_evidence",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": False,
+                "capability": "parameter_resolution",
+                "product_line": "NIFTY",
+                "version": "V1",
+                "issues": ["evidence_required"],
+            }
+        )
+
+        self.assertIn("实验阶段、样本类型与所用方法", result["direct_response"])
+        self.assertNotIn("请补充产品名称", result["direct_response"])
+        self.assertEqual("block", result["preflight_decision"])
+
 
 if __name__ == "__main__":
     unittest.main()
