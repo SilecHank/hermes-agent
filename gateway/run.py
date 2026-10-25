@@ -3754,6 +3754,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 missing = list((task.get("context") or {}).get("missing") or [])
                 missing += list((turn.facts.get("clarification") or {}).get("missing") or [])
                 missing += list(turn.facts.get("missing_discriminators") or [])
+                patch = task.get('field_patch') or {}
+                missing += [field for field in patch.get('remove', []) if field not in (patch.get('set') or {})]
                 if 'product_scope_required' in turn.expert_route_contract.get('issues', []):
                     current_context = task.get('context') or {}
                     if not current_context.get('product_line'):

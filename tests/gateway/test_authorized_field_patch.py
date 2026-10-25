@@ -138,6 +138,25 @@ def test_pending_patch_commits_once_after_admission(dialogue,monkeypatch):
     assert after['task']['task_id']==pending['task']['task_id']
 
 
+def test_context_method_withdrawal_and_return_reuse_existing_method_semantics(dialogue):
+    dialogue(original.HISTORY[0]['content'])
+    turn,_,_,pending=dialogue(original.HISTORY[1]['content']+'手工实验。')
+    assert pending and turn.task_contract['context']['method']=='manual'
+    task_id=turn.task_contract['task_id']
+    turn,_,_,after=dialogue('实验方法不确定。')
+    assert turn.task_contract['task_id']==task_id
+    assert turn.task_contract['continuation']=='field_patch'
+    assert 'method' in turn.task_contract['field_patch']['remove']
+    assert turn.task_contract['context']['method'] is None
+    assert '手工' not in turn.task_contract['question']
+    assert after and 'method' in after['missing_fields']
+    assert after['expires_at']==pending['expires_at']
+    turn,_,_,after=dialogue('手工')
+    assert turn.task_contract['task_id']==task_id
+    assert turn.task_contract['context']['method']=='manual'
+    assert after and after['expires_at']==pending['expires_at']
+
+
 @pytest.mark.parametrize('message',[
     '撤回颜色字段，颜色不确定。',
     '更正，X浓度不知道，帮我解释PCR抑制原理。',
