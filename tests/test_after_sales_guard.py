@@ -23,7 +23,7 @@ from gateway.after_sales_guard import _load_module
 
 # Local audit pins the approved KB candidate. Governed releases instead use
 # their existing sibling .staged.json identity, so future releases need no pin edit.
-LOCAL_KB_COMMIT = "3d75e039db0dfa6338b1a74bf342951fb128ef86"
+LOCAL_KB_COMMIT = 'a4df50a861763a6a5e2de1a36aa2a5eea7e5785c'
 
 
 def _local_git(root, *args, input=None):
@@ -222,8 +222,9 @@ def _write_experience_modules(tmp_path):
     return fast
 
 
-def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path):
+def test_all_ivd_platforms_receive_identical_shared_answer_experience(tmp_path, monkeypatch):
     fast = _write_experience_modules(tmp_path)
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
     config["after_sales_guard"]["validator_module"] = str(tmp_path / "missing-validator.py")
@@ -357,8 +358,9 @@ def test_sufficient_identity_lookup_failure_does_not_repeat_known_fields(tmp_pat
     assert "未完成已定位正式资料的读取" in fallback
 
 
-def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path):
+def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path, monkeypatch):
     fast = _write_experience_modules(tmp_path)
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
     config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
@@ -377,8 +379,9 @@ def test_ivd_platform_matching_is_normalized_before_policy_loading(tmp_path):
     assert turn.context == _presentation().render_presentation_instructions(turn.presentation_contract)
 
 
-def test_matched_turn_composes_experience_with_facts_and_validator(tmp_path):
+def test_matched_turn_composes_experience_with_facts_and_validator(tmp_path, monkeypatch):
     fast = _write_experience_modules(tmp_path)
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
 
@@ -395,13 +398,14 @@ def test_matched_turn_composes_experience_with_facts_and_validator(tmp_path):
     assert turn.has_validator is True
 
 
-def test_missing_experience_module_keeps_existing_fail_open_behavior(tmp_path):
+def test_missing_experience_module_keeps_existing_fail_open_behavior(tmp_path, monkeypatch):
     fast = tmp_path / "hermes_fast_response_pipeline.py"
     fast.write_text(
         "def build_fast_response_plan(message, question_type='general'):\n"
         "    return {'runtime_preflight': {'eligible': False}}\n",
         encoding="utf-8",
     )
+    _unit_planner_loader(monkeypatch, fast)
     config = _config(enabled=True)
     config["after_sales_guard"]["fast_response_module"] = str(fast)
     config["after_sales_guard"]["workflow_module"] = str(tmp_path / "missing.py")
@@ -972,8 +976,7 @@ def test_prepare_after_sales_turn_uses_recent_user_context():
         ],
     )
 
-    assert turn is not None
-    assert turn.facts["product"] == "NIFTY"
+    assert turn is None  # No actor-bound live pending task authorized this short reply.
 
 
 def test_prepare_after_sales_turn_ignores_unrelated_message():
@@ -1233,8 +1236,18 @@ def test_real_qq_followup_advances_and_accepts_authoritative_sop_evidence():
         "样本量有时48例有时96例，48例时是客户操作，96例时是驻点实验员操作。"
         "同样都是浓度偏低"
     )
+    import time
+    from gateway.after_sales_guard import resolve_after_sales_task
+    from scripts.after_sales_workflow_gate import match_case_facts
+    guard = _config()['after_sales_guard']
+    task = resolve_after_sales_task(guard, history[0]['content'], actor_id='fixture-actor')
+    facts = match_case_facts(guard['cards_dir'], history[0]['content'], [], task_contract=task)['facts']
+    pending = {'task': task, 'question': task['question'], 'actor_id': 'fixture-actor',
+               'status': 'awaiting_reply', 'expires_at': time.time()+300,
+               'missing_fields': facts['missing_discriminators'], 'workflow_binding': facts['workflow_binding']}
     turn = prepare_after_sales_turn(
         _config(),
+        actor_id='fixture-actor', pending_task=pending,
         platform="qqbot",
         message=message,
         history=history,

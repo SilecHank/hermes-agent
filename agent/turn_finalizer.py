@@ -190,6 +190,18 @@ def finalize_turn(
                     exc_info=True,
                 )
 
+    # Recovery and iteration-limit summaries bypass the normal stop validator.
+    # Reuse the same per-turn validator before trajectory/session persistence.
+    _structured_validator = getattr(agent, '_final_response_validator', None)
+    _structured_guard = getattr(_structured_validator, 'requires_structured_claims', False) is True
+    if _structured_guard and not interrupted:
+        from agent.final_response_validation import evaluate_final_response
+        _original_final = final_response
+        _final_gate = evaluate_final_response(_structured_validator, str(final_response or ""), attempts=1)
+        final_response = _final_gate.response
+        if messages and messages[-1].get('role') == 'assistant' and messages[-1].get('content') == _original_final:
+            messages[-1] = {**messages[-1], 'content': final_response}
+
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")
     completed = (
@@ -413,7 +425,7 @@ def finalize_turn(
     # Gate: only applied when a real text response exists for this
     # turn and the user didn't interrupt.  Empty/interrupted turns
     # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not _structured_guard:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
             if _failed and agent._file_mutation_verifier_enabled():
@@ -439,7 +451,7 @@ def finalize_turn(
     #     an empty response, the "(empty)" terminal sentinel, or a
     #     suspiciously short partial fragment with no terminating
     #     punctuation (e.g. "The").  A real short answer keeps its text.
-    if not interrupted:
+    if not interrupted and not _structured_guard:
         try:
             if agent._turn_completion_explainer_enabled():
                 _stripped = (final_response or "").strip()
@@ -486,7 +498,7 @@ def finalize_turn(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can transform the LLM's output text before it's returned.
     # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not _structured_guard:
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _transform_results = _invoke_hook(

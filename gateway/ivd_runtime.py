@@ -47,6 +47,7 @@ class ExclusiveIVDResult:
     effect_count: int
     sources: tuple[object, ...]
     intent: str = ""
+    task_id: str = ""
     product_line: str = ""
     product_variant: str = ""
     ambiguities: tuple[str, ...] = ()
@@ -199,6 +200,7 @@ def execute_exclusive_ivd_turn(
     platform: str = "generic",
     fast_response_module: str = "",
     business_question: str | None = None,
+    task_contract: dict[str, Any] | None = None,
 ) -> ExclusiveIVDResult:
     """Run the immutable package without constructing any legacy answer plane."""
     if prepared is None:
@@ -228,15 +230,18 @@ def execute_exclusive_ivd_turn(
 
     dispatcher = IVDDispatcher(package_root)
     context_budget = int(projection.get("context_budget") or 0)
-    recent_context = _bounded_user_context(
-        history,
-        budget=context_budget,
-    )
+    from gateway.after_sales_guard import resolve_after_sales_task
+    task = task_contract or resolve_after_sales_task(
+        {"fast_response_module": fast_response_module},
+        business_question if business_question is not None else question)
+    # Raw history never supplies semantic intent or authorizes a subtask.
+    recent_context = ""
     with _IVD_ENGINE_CACHE.acquire(package_root, package_digest) as engine:
         outcome = dispatcher.execute(
             engine,
             question=business_question if business_question is not None else question,
             context=recent_context,
+            **({"task_contract": task} if task else {}),
             evidence=evidence,
             **({"presentation_formatter": present} if presentation_module is not None else {}),
         )
@@ -261,6 +266,7 @@ def execute_exclusive_ivd_turn(
             return ExclusiveIVDResult(
                 text=present(text),
                 presentation_contract=presentation,
+                task_id=str(task.get("task_id") or ""),
                 answer_shape="clarification",
                 outcome="clarification",
                 model_calls=0,
@@ -285,6 +291,7 @@ def execute_exclusive_ivd_turn(
             text=(str(result.text) if str(result.answer_shape) in {"scalar", "diagnostic", "process", "rule", "contact", "evidence"}
                   else present(str(result.text))),
             presentation_contract=presentation,
+                task_id=str(task.get("task_id") or ""),
             answer_shape=str(result.answer_shape),
             outcome=str(result.outcome),
             model_calls=int(result.model_calls),

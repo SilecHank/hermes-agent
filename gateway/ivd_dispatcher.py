@@ -335,8 +335,11 @@ class IVDDispatcher:
                 return str(item["stage"])
         return None
 
-    def dispatch(self, question: str, *, context: str = "") -> DecisionEnvelope:
+    def dispatch(self, question: str, *, context: str = "", task_contract: Mapping[str, Any] | None = None) -> DecisionEnvelope:
         text = str(question or "").strip()
+        if task_contract is not None:
+            text = str(task_contract.get("question") or text)
+            context = ""  # Any admitted fields are already in the shared task.
         routing_text = f"{context} {text}".strip()
         operation = self._match_intent(text, self._operations)
         product_line, product_variant, product_conflict = self._match_product(
@@ -357,8 +360,12 @@ class IVDDispatcher:
         semantic = self._match_intent(text, self._semantics) or self._match_intent(
             routing_text, self._semantics
         )
+        if task_contract is not None:
+            semantic = next((item for item in (*self._operations, *self._semantics)
+                             if item["intent"] == task_contract["intent"]), semantic)
+            operation = None if task_contract["intent"] in {"mechanism", "sop_lookup"} else operation
         source_bound_input = explicit_sop_input_request(text)
-        if source_bound_input and operation is None:
+        if source_bound_input and operation is None and not (task_contract and task_contract["intent"] == "mechanism"):
             semantic = next((item for item in self._semantics if item["intent"] == "parameter"), semantic)
         selected = operation or semantic or next(
             item for item in self._semantics if item["intent"] == "product_fact"
@@ -380,7 +387,10 @@ class IVDDispatcher:
             indexed_retrieval_budget=0 if ambiguous else 1,
             model_call_budget=0,
             envelope_count=1,
-            metadata=MappingProxyType({"resolution_order": _RESOLUTION_ORDER}),
+            metadata=MappingProxyType({"resolution_order": _RESOLUTION_ORDER,
+                **({"task_id": task_contract.get("task_id", ""),
+                    "subtask": task_contract.get("subtask", ""),
+                    "continuation": task_contract.get("continuation", "new")} if task_contract else {})}),
         )
 
     def execute(
@@ -391,8 +401,9 @@ class IVDDispatcher:
         context: str = "",
         evidence: Mapping[str, object] | None = None,
         presentation_formatter: Callable[[str, tuple[object, ...]], str] | None = None,
+        task_contract: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        envelope = self.dispatch(question, context=context)
+        envelope = self.dispatch(question, context=context, task_contract=task_contract)
         if envelope.clarifying_questions:
             return DispatchOutcome(envelope=envelope, result=None)
         presentation_options = ({"presentation_formatter": presentation_formatter}

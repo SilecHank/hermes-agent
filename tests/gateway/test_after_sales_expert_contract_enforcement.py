@@ -202,7 +202,7 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         self.assertEqual("block", result["preflight_decision"])
     def test_file_lookup_guard_does_not_ask_numeric_stage_or_known_version(self):
         from tempfile import TemporaryDirectory
-        plan={"runtime_preflight":{"eligible":True},
+        plan={"task_contract":{"intent":"sop_lookup"}, "runtime_preflight":{"eligible":True},
               "answer_shape":{"answer_shape":"direct_fact"},
               "answer_contract":{"deliverable":"direct_answer"},
               "context_envelope":{"product_line":"PMseq","product_version":"V5","workflow_step":"建库"},
