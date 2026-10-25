@@ -3672,9 +3672,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             actor_id=actor_id, pending_task=pending)
         routing_history = []  # Shared task resolution owns all context admission.
         setter = getattr(store, "set_session_metadata", None)
-        if callable(setter) and session_key and pending:
-            # Every selected turn supersedes the old waiting state. Recreate it
-            # below only if this same task still has a verified outstanding gap.
+        updating_pending = (isinstance(pending, dict)
+            and task.get('continuation') in {'clarification_reply','field_patch'}
+            and task.get('task_id') == (pending.get('task') or {}).get('task_id')
+            and pending.get('actor_id') == actor_id)
+        if callable(setter) and session_key and pending and not updating_pending:
+            # A selected new task supersedes old authority. Admitted same-task
+            # updates commit their recomputed state below without a transient gap.
             setter(session_key, "ivd_pending_task", None)
         if task.get("intent") == "social":
             from gateway.after_sales_guard import AfterSalesTurn
@@ -3701,6 +3705,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if shape != "answer" or not _looks_like_title_only_answer(
                     getattr(exclusive, "text", "") or ""
                 ):
+                    if updating_pending and callable(setter) and session_key:
+                        setter(session_key, "ivd_pending_task", None)
                     return prepared, exclusive
             # 弱命中/未命中 → 继续走专家模式（workflow card 覆盖）或通用 agent
         elif mode == "hybrid":
@@ -3725,6 +3731,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     result=exclusive,
                 )
                 if decision.mode == "package_scalar":
+                    if updating_pending and callable(setter) and session_key:
+                        setter(session_key, "ivd_pending_task", None)
                     return prepared, exclusive
 
         from gateway.after_sales_guard import prepare_after_sales_turn
@@ -3753,9 +3761,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     elif not current_context.get('product_version') and task.get('intent') != 'mechanism':
                         missing.append('product_version')
                 if missing:
+                    # A live task update does not mint a fresh authorization
+                    # window. Preserve its remaining lifetime through both
+                    # field corrections and subsequent positive gap replies.
+                    expiry = time.time() + 900
+                    if (isinstance(pending, dict)
+                            and task.get('continuation') in {'clarification_reply','field_patch'}
+                            and task.get('task_id') == (pending.get('task') or {}).get('task_id')
+                            and pending.get('actor_id') == actor_id
+                            and isinstance(pending.get('expires_at'), (int, float))):
+                        expiry = pending['expires_at']
                     waiting = {"task": task, "actor_id": actor_id,
                                "question": task["question"], "status": "awaiting_reply",
-                               "expires_at": time.time() + 900,
+                               "expires_at": expiry,
                                "missing_fields": list(dict.fromkeys(missing)),
                                "workflow_clarification": dict(turn.facts.get("clarification") or {}),
                                "workflow_binding": dict(turn.facts.get("workflow_binding") or {})}
