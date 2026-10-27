@@ -23349,6 +23349,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            _delivery_validator = getattr(agent_holder[0], "_final_response_validator", None)
+            if getattr(_delivery_validator, "requires_structured_claims", False) is True and final_response:
+                from agent.final_response_validation import evaluate_final_response
+                _delivery = evaluate_final_response(_delivery_validator, str(final_response), attempts=1)
+                _old_final = final_response
+                final_response = _delivery.response
+                result["final_response"] = final_response
+                for _row in reversed(result.get("messages") or []):
+                    if _row.get("role") == "assistant" and _row.get("content") == _old_final:
+                        _row["content"] = final_response
+                        break
+
             if _after_sales_turn is not None and hasattr(_after_sales_turn, "present_text"):
                 final_response = _after_sales_turn.present_text(str(final_response or ""))
                 result["final_response"] = final_response
