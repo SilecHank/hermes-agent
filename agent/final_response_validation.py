@@ -82,6 +82,47 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "IVD context before drafting the answer. Do not use search or an alternate "
                 "path. Do not ask the user to perform this internal step."
             )
+        elif reason in {
+            "expert_claims_json_invalid",
+            "expert_claims_structure_required",
+        }:
+            instruction = (
+                "Re-emit the answer as one JSON object containing exactly the two "
+                "keys task_id and claims. No prose before or after it, and no "
+                "unescaped double quote inside any string value; use a Chinese "
+                "quotation mark or drop the quotation instead."
+            )
+        elif reason == "expert_claims_required":
+            instruction = "Provide between one and eight claims."
+        elif reason == "expert_claim_invalid":
+            instruction = (
+                "Every claim needs a non-empty text value; drop any claim that "
+                "has no text."
+            )
+        elif reason == "claim_kind_not_allowed":
+            instruction = (
+                "Use only the claim kinds the execution contract allows; move the "
+                "content into an allowed kind instead of inventing a new one."
+            )
+        elif reason.startswith("proposition_excerpt_link"):
+            instruction = (
+                "Each fact, hypothesis, or verification_action claim needs at least "
+                "one support entry with evidence_id, start_line, quote and relation, "
+                "where quote is copied verbatim from that excerpt, and evidence_ids "
+                "must equal exactly the evidence_id values used in support. Boundary "
+                "and unknown claims may cite nothing."
+            )
+        elif reason == "evidence_required" or reason == "evidence_unresolved":
+            instruction = (
+                "Cite only evidence_id values present in the supplied bundle; drop "
+                "claims whose evidence cannot be resolved."
+            )
+        elif reason.startswith("content_authority:") or reason == "expert_contract_not_ready":
+            instruction = (
+                "This is a source-side limit, not a wording problem: do not restate "
+                "the same conclusion. State what the available sources do not "
+                "establish and which document or product detail is needed."
+            )
         else:
             instruction = (
                 "Repair only the cited workflow-boundary violation using the verified facts."

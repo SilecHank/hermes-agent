@@ -584,3 +584,50 @@ def test_non_waiting_close_cancels_queued_replays_and_later_waits_for_shutdown()
         thread.name.startswith("hermes-shadow-replay") and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_fallback_events_record_the_validator_reason_codes():
+    """A fallback without reasons cannot be diagnosed after the fact."""
+
+    event = build_runtime_event(
+        platform="weixin",
+        session_key="weixin:dm:user",
+        product_scope="NIFTY",
+        route_id="mechanism_short_answer",
+        route_version="2026-08-20",
+        fast_path=True,
+        elapsed_seconds=2.0,
+        api_calls=2,
+        tool_names=["read_file"],
+        source_paths=[],
+        validation_status="fallback",
+        validation_reasons=(
+            "claim_kind_not_allowed",
+            "proposition_excerpt_link_required",
+            "x" * 200,
+        ),
+    )
+
+    assert event["validation_reasons"][:2] == [
+        "claim_kind_not_allowed",
+        "proposition_excerpt_link_required",
+    ]
+    assert all(len(reason) <= 64 for reason in event["validation_reasons"])
+
+
+def test_validation_reasons_default_to_an_empty_list():
+    event = build_runtime_event(
+        platform="weixin",
+        session_key="weixin:dm:user",
+        product_scope="",
+        route_id="standard",
+        route_version="",
+        fast_path=False,
+        elapsed_seconds=1.0,
+        api_calls=1,
+        tool_names=[],
+        source_paths=[],
+        validation_status="pass",
+    )
+
+    assert event["validation_reasons"] == []

@@ -23704,6 +23704,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             else ()
                         ),
                         validation_status=_validation_status,
+                        validation_reasons=(
+                            (_validation.get("reasons") or ())
+                            if isinstance(_validation, dict)
+                            else ()
+                        ),
                         question_text=_ivd_question_text,
                         retrieval_snapshot=_ivd_retrieval_snapshot,
                         preflight_decision=(

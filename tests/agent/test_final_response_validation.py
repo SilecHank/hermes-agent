@@ -203,3 +203,36 @@ def test_validation_scaffolding_is_removed_even_when_buried_by_tool_messages():
 
     assert [message["role"] for message in messages] == ["user", "assistant", "tool"]
     assert all(not message.get("_final_validation_synthetic") for message in messages)
+
+
+def test_expert_claim_serialization_failure_retry_targets_the_json_shape():
+    """A malformed claims object is a format defect, not a boundary violation."""
+
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("expert_claims_json_invalid",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "task_id and claims" in decision.retry_prompt
+    assert "workflow-boundary violation" not in decision.retry_prompt
+
+
+def test_boundary_claim_rejection_explains_the_support_contract():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("proposition_excerpt_link_required",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "Boundary and unknown claims may cite nothing" in decision.retry_prompt

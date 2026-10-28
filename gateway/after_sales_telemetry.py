@@ -117,6 +117,7 @@ def build_runtime_event(
     source_paths: Iterable[str],
     validation_status: str,
     product_variant: str = "",
+    validation_reasons: Iterable[str] = (),
     answer_text: str = "",
     question_text: str = "",
     retrieval_snapshot: dict[str, object] | None = None,
@@ -137,6 +138,12 @@ def build_runtime_event(
         if str(stage)
     ][:4]
     gate_issues = [str(item)[:64] for item in preflight_issues if str(item)][:8]
+    # Reason codes are machine vocabulary (no PII). Without them a fallback is
+    # indistinguishable from any other boundary stop after the fact, which is
+    # how a deterministic dead end can recur unnoticed for months.
+    validation_reasons_out = [
+        str(item)[:64] for item in validation_reasons if str(item)
+    ][:8]
     preview = sanitize_question_preview(question_text)
     event = {
         "schema_version": 2,
@@ -155,6 +162,7 @@ def build_runtime_event(
         "tool_count": len(tools),
         "source_paths": sources,
         "validation_status": str(validation_status or "unknown"),
+        "validation_reasons": validation_reasons_out,
         "answer_shape": str(answer_shape or "unknown")[:32],
         "verified_fact_reuse": str(verified_fact_reuse or "off")[:32],
         "question_preview": preview,
