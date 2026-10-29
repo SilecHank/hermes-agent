@@ -69,6 +69,16 @@ from pathlib import Path
 counts = dict.fromkeys(('tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed'), 0)
 seen = set()
 def pytest_runtest_logreport(report):
+    # Subtest reports reuse the parent nodeid. Count its outcome only once,
+    # but retain failed/skipped/xfail subtests as independent gate blockers.
+    if type(report).__name__ in ('SubtestReport', 'SubTestReport'):
+        if hasattr(report, 'wasxfail'):
+            counts['xfailed' if report.skipped else 'xpassed'] += 1
+        elif report.failed:
+            counts['failed'] += 1
+        elif report.skipped:
+            counts['skipped'] += 1
+        return
     if report.nodeid not in seen and (report.when == 'call' or report.outcome != 'passed'):
         seen.add(report.nodeid)
         counts['tests'] += 1
