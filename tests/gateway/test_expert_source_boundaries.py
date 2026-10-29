@@ -86,9 +86,18 @@ def test_lifecycle_differential_through_real_final_validator(tmp_path,name,heade
     else:
         assert projected['tier']=='no_evidence'
         assert not contract['formal_answer_allowed']
-        result = validator(json.dumps({'task_id':'private-source-boundary','claims':[{
-            'kind':'fact','scope':'general','text':quote,'evidence_ids':['unadmitted'],'support':[]}]}))
-        assert not result['ok']
+        raw = json.dumps({'task_id':'private-source-boundary','claims':[{
+            'kind':'fact','scope':'general','text':quote,'evidence_ids':['unadmitted'],'support':[]}]})
+        result = validator(raw)
+        # A safe acquisition-gap replacement may be accepted as the final
+        # message; acceptance is not authorization of the original claim.
+        from agent.final_response_validation import evaluate_final_response
+        decision = evaluate_final_response(validator, raw, attempts=1)
+        assert result['ok'] and result.get('normalized_response')
+        assert decision.action == 'accept'
+        assert decision.response == result['normalized_response']
+        assert quote not in decision.response
+        assert '来源' in decision.response
 
 
 def mixed_projection(tmp_path,other=None,*,other_has_number=False):

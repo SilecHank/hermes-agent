@@ -378,6 +378,53 @@ def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
     return "当前已进入专家检索，但尚无可绑定的正式证据，暂不输出正式结论。" + ask
 
 
+def _validated_conditional_preflight(turn: AfterSalesTurn) -> str:
+    """Produce source-checked conditional facts at the actual final exit.
+
+    A planner suggestion never authorizes a number. Re-resolve the trusted task,
+    verify every source/line and then run the normal delivery validator.
+    Any failure preserves the non-numeric preflight response.
+    """
+    if (turn.route_id != 'conditional_scalar'
+            or 'planner_control_stop' not in turn.preflight_issues
+            or not turn.task_contract or not turn.product_scope):
+        return ''
+    try:
+        source_module = Path(turn.expert_validator_path)
+        root = source_module.parent.parent.resolve(strict=True)
+        helper_path = root / 'scripts/hermes_conditional_evidence.py'
+        if not helper_path.is_file() or helper_path.is_symlink():
+            return ''
+        helper = _load_module(str(helper_path), helper_path.stat().st_mtime_ns)
+        result = helper.conditional_response_for_task(turn.task_contract, root=root)
+        if isinstance(result, dict) and result.get('items'):
+            if any(item.get('product') != turn.product_scope
+                   or str((root / item.get('source_path', '')).resolve()) not in turn.source_paths
+                   for item in result['items']):
+                return ''
+        else:
+            bounded_path = root / 'scripts/hermes_bounded_evidence.py'
+            if not bounded_path.is_file() or bounded_path.is_symlink():
+                return ''
+            bounded = _load_module(str(bounded_path), bounded_path.stat().st_mtime_ns)
+            result = bounded.resolve_bounded_response(turn.task_contract.get('question',''), turn.product_scope, root=root)
+            if not isinstance(result,dict) or not result.get('source_paths'):
+                return ''
+            if any(str((root / path).resolve()) not in turn.source_paths for path in result['source_paths']):
+                return ''
+        text = str(result.get('text') or '')
+        if not text:
+            return ''
+        conditional_turn = replace(turn, direct_response=text, resolved_answer=None)
+        presented = conditional_turn.present_text(text)
+        validation = _validate_direct_fact_presentation(conditional_turn, presented)
+        if not validation.get('ok'):
+            return ''
+        return presented
+    except (OSError, ValueError, TypeError, ImportError, KeyError, AttributeError):
+        return ''
+
+
 def build_preflight_block_result(
     turn: AfterSalesTurn,
     message: str,
@@ -390,7 +437,8 @@ def build_preflight_block_result(
     if ({"expert_route_contract_not_ready","planner_control_stop"} & set(turn.preflight_issues)) and turn.direct_response:
         fallback = turn.direct_response
     present = getattr(turn, "present_text", None)
-    fallback = present(fallback) if callable(present) else fallback
+    conditional = _validated_conditional_preflight(turn)
+    fallback = conditional or (present(fallback) if callable(present) else fallback)
     return {
         "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
         "final_response": fallback,
@@ -1353,7 +1401,16 @@ def _render_fast_response_context(
     clarification_required = bool(guard.get("_workflow_card_unavailable") or
         (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
     planner_control_stop = (plan.get("fast_path") or {}).get("disposition") == "control_stop"
-    if not runtime_preflight.get("eligible", False) and not clarification_required and not planner_control_stop:
+    # A fast-path miss still needs the existing expert evidence contract.
+    # Without this, the early return bypasses its required clarification.
+    early_expert_contract = plan.get("expert_route_contract") or {}
+    expert_requires_clarification = (
+        early_expert_contract.get("status") in {"clarification", "pending_evidence", "blocked"}
+        and not early_expert_contract.get("formal_answer_allowed", False)
+        and not early_expert_contract.get("bounded_expert_answer_allowed", False)
+    )
+    if (not runtime_preflight.get("eligible", False) and not clarification_required
+            and not planner_control_stop and not expert_requires_clarification):
         return {}
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
