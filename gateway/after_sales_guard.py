@@ -1436,7 +1436,7 @@ def _render_fast_response_context(
         if len(initial_files) >= 5:
             break
     lines = [
-        "[快速回答管线]",
+        "[快速回答管线]" if runtime_preflight.get("eligible", False) else "[专家证据核对]",
         f"路由版本：{runtime_preflight.get('route_version', '')}",
         f"回答风格：{template.get('style', 'short_first')}",
         f"预算动作：{gate.get('pipeline_action', 'continue_final_answer')}",
