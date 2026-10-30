@@ -321,7 +321,11 @@ def find_trusted_systemd_analyze(
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        kill_group = getattr(os, "killpg", None)
+        kill_signal = getattr(signal, "SIGKILL", None)
+        if not callable(kill_group) or kill_signal is None:
+            raise OSError("process-group termination unavailable")
+        kill_group(process.pid, kill_signal)
     except (OSError, ProcessLookupError):
         try:
             process.kill()
@@ -610,8 +614,9 @@ def _systemd_service_scope_groups(
         runtime_home = _absolute_env_path(runtime_value, source="XDG_RUNTIME_DIR")
     else:
         effective_uid = uid
-        if effective_uid is None and hasattr(os, "getuid"):
-            effective_uid = os.getuid()
+        get_uid = getattr(os, "getuid", None)
+        if effective_uid is None and callable(get_uid):
+            effective_uid = get_uid()
         runtime_home = Path("/run/user") / str(effective_uid) if effective_uid is not None else None
     user_logical = [
         config_home / "systemd" / "user.control",

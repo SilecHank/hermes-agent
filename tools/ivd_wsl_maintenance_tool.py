@@ -453,7 +453,10 @@ def _production_preflight(policy: MaintenancePolicy) -> tuple[str, str, bool]:
     generation_match = re.search(r'generation["\s:=]+([0-9]+)', text)
     if not owner_match or not generation_match:
         raise RuntimeError("production ownership unavailable")
-    uid = os.getuid()
+    get_uid = getattr(os, "getuid", None)
+    if not callable(get_uid):
+        raise RuntimeError("local user identity unavailable")
+    uid = get_uid()
     disabled = subprocess.run(
         ["/bin/launchctl", "print-disabled", f"gui/{uid}"], check=False,
         capture_output=True, text=True, timeout=10, env={"PATH": SAFE_PATH},
