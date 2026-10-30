@@ -32,7 +32,18 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.test_environment_safety import assert_safe_test_environment
+# Load the local sandbox guard by file identity, without importing the Agent's
+# unrelated top-level ``scripts`` namespace into the test process. Gateway
+# tests must bind ``scripts`` to their immutable serving package.
+import importlib.util
+_safety_spec = importlib.util.spec_from_file_location(
+    "_hermes_test_environment_safety", PROJECT_ROOT / "scripts/test_environment_safety.py"
+)
+if _safety_spec is None or _safety_spec.loader is None:
+    raise RuntimeError("cannot load the test environment safety guard")
+_safety_module = importlib.util.module_from_spec(_safety_spec)
+_safety_spec.loader.exec_module(_safety_module)
+assert_safe_test_environment = _safety_module.assert_safe_test_environment
 
 
 # This executes before test collection and before per-test fixtures. Direct

@@ -3750,7 +3750,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         setter = getattr(store, "set_session_metadata", None)
         if callable(setter) and session_key:
             waiting = None
-            if turn is not None and turn.blocks_answer_generation and task and actor_id:
+            # A bounded answer does not gate the reply, but the governed
+            # collection it belongs to may still be open.  Carry that state so
+            # a follow-up supplement ("两次同次采血，这次重建库") inherits the
+            # product, the already-admitted fields and the remaining gaps
+            # instead of being re-resolved from a bare sentence that names
+            # neither product nor markers.
+            route_contract = getattr(turn, "expert_route_contract", None) or {}
+            carry_collection = bool(
+                turn is not None
+                and not turn.blocks_answer_generation
+                and task
+                and actor_id
+                and str(task.get("intent") or "") in {"troubleshooting", "report_interpretation"}
+                and (task.get("context") or {}).get("product_line")
+                and bool((turn.facts.get("clarification") or {}).get("missing"))
+                and route_contract.get("bounded_expert_answer_allowed", False)
+            )
+            if turn is not None and task and actor_id and (turn.blocks_answer_generation or carry_collection):
                 missing = list((task.get("context") or {}).get("missing") or [])
                 missing += list((turn.facts.get("clarification") or {}).get("missing") or [])
                 missing += list(turn.facts.get("missing_discriminators") or [])
@@ -3779,6 +3796,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                "missing_fields": list(dict.fromkeys(missing)),
                                "workflow_clarification": dict(turn.facts.get("clarification") or {}),
                                "workflow_binding": dict(turn.facts.get("workflow_binding") or {})}
+            if (waiting is None and turn is not None and task and actor_id
+                    and not turn.blocks_answer_generation):
+                # One answered, card-bound turn leaves a bounded topic state so
+                # the immediate follow-up ("那重抽几次") reaches the same card
+                # instead of being re-resolved from a bare sentence. The state
+                # is application-owned metadata: actor, task identity, expiry
+                # and the binding that was actually served this turn.
+                binding = dict(turn.facts.get("workflow_binding") or {})
+                if (binding.get("workflow_id") and binding.get("path")
+                        and str(task.get("question") or "").strip()
+                        and (task.get("context") or {}).get("product_line")
+                        and task.get("actor_id") == actor_id):
+                    waiting = {"task": task, "actor_id": actor_id,
+                               "question": str(task.get("topic_question") or task["question"]),
+                               "status": "awaiting_reply",
+                               "expires_at": time.time() + 900,
+                               "missing_fields": [], "topic_carry": True,
+                               "workflow_clarification": dict(turn.facts.get("clarification") or {}),
+                               "workflow_binding": binding}
             setter(session_key, "ivd_pending_task", waiting)
         return prepared, turn
 

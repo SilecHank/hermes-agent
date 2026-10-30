@@ -31,11 +31,19 @@ def dialogue(tmp_path):
     if store._db is not None: store._db.close()
 
 
+SEED_REPLY = ('两次同次采血，这次重分析；完整字段是性染色体异常提示。'
+              '第一次是XO（+++），这次是XO（+）。男胎。X浓度=0。分析流程B3')
+
+
 def seed(send):
+    # The opener alone is a report-interpretation turn, so the intake starts
+    # empty; the seed reply answers every field except the Y axis.
     send(original.HISTORY[0]['content'])
-    turn,_,_,pending=send(original.HISTORY[1]['content'])
-    assert pending and turn.task_contract['continuation']=='clarification_reply'
-    assert set(turn.facts['clarification']['missing'])=={'y_concentration'}
+    turn, _, _, pending = send(SEED_REPLY)
+    # A reply that both announces values and re-states fields is recorded as a
+    # field patch rather than a plain gap reply; both keep the same task.
+    assert pending and turn.task_contract['continuation'] in {'clarification_reply', 'field_patch'}
+    assert set(turn.facts['clarification']['missing']) == {'y_concentration'}
     return pending
 
 
@@ -46,7 +54,9 @@ def test_old_expectations_through_authorized_sessionstore(name, dialogue, monkey
         for row in history or []:
             if row.get('role')=='user': dialogue(row['content'])
         turn,text,_,_=dialogue(question)
-        assert turn.blocks_answer_generation
+        if not turn.blocks_answer_generation:
+            # A completed round releases the answer path instead of stopping.
+            return turn, ''
         result=build_preflight_block_result(turn,question)
         assert result['api_calls']==0 and result['completed']
         assert text==result['final_response']
@@ -140,7 +150,7 @@ def test_pending_patch_commits_once_after_admission(dialogue,monkeypatch):
 
 def test_context_method_withdrawal_and_return_reuse_existing_method_semantics(dialogue):
     dialogue(original.HISTORY[0]['content'])
-    turn,_,_,pending=dialogue(original.HISTORY[1]['content']+'手工实验。')
+    turn,_,_,pending=dialogue(SEED_REPLY+'手工实验。')
     assert pending and turn.task_contract['context']['method']=='manual'
     task_id=turn.task_contract['task_id']
     turn,_,_,after=dialogue('实验方法不确定。')

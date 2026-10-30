@@ -64,8 +64,12 @@ def test_real_lifecycle_records_and_consumes_same_actor_pending_version():
     runner = object.__new__(GatewayRunner)
     runner.session_store = MetadataStore()
     runner._ivd_prepared_contracts = {}
+    # A report-interpretation question still gates on the case fields, so it is
+    # the right lifecycle fixture for the version hand-off.  The "what could
+    # explain this" wording answers under a bounded contract instead.
+    blocking = '无创样本第一次XO（+++），这次XO（+），报告该怎么判读，浓度差多少算异常'
     _, first = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
-        message=OLD, history=[], actor_id='actor-a', session_key='fixture-chat')
+        message=blocking, history=[], actor_id='actor-a', session_key='fixture-chat')
     assert first.blocks_answer_generation
     assert 'product_version' in runner.session_store.value['missing_fields']
     _, second = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
@@ -82,3 +86,43 @@ def test_real_lifecycle_records_and_consumes_same_actor_pending_version():
         message='CNV-seq的产品经理是谁', history=[], actor_id='actor-a', session_key='fixture-chat')
     assert not third.blocks_answer_generation and third.direct_response
     assert runner.session_store.value is None
+
+
+def test_bounded_answer_carries_the_open_collection_to_the_follow_up():
+    """A bounded answer must not drop the open case collection.
+
+    The mechanism answer does not gate the reply, but the collection it belongs
+    to is still open.  Without carry-over the next supplement is re-resolved
+    from a bare sentence: the product reads as unknown and the markers that
+    were already supplied look missing again.
+    """
+    from gateway.run import GatewayRunner
+    class MetadataStore:
+        value = None
+        def get_session_metadata(self, session_key, key):
+            return self.value
+        def set_session_metadata(self, session_key, key, value):
+            self.value = value
+            return True
+    runner = object.__new__(GatewayRunner)
+    runner.session_store = MetadataStore()
+    runner._ivd_prepared_contracts = {}
+
+    _, first = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message=OLD, history=[], actor_id='actor-a', session_key='fixture-chat')
+    assert not first.blocks_answer_generation
+    pending = runner.session_store.value
+    assert pending and pending['missing_fields']
+
+    _, second = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message='两次同次采血，这次重建库', history=[], actor_id='actor-a',
+        session_key='fixture-chat')
+    assert second.task_contract['continuation'] in {'clarification_reply', 'field_patch'}
+    assert second.task_contract['subject'] == 'NIFTY'
+    missing = set(second.facts['clarification']['missing'])
+    assert not missing.intersection({'sample_relation', 'repeat_mode', 'first_result', 'repeat_result'})
+
+    _, third = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
+        message='X浓度 7.4%，Y浓度 0.3%，女胎', history=[], actor_id='actor-a',
+        session_key='fixture-chat')
+    assert set(third.facts['clarification']['missing']) <= {'result_field'}
