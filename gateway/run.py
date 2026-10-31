@@ -2552,6 +2552,7 @@ def _append_ivd_turn_telemetry(
         source_paths=turn.source_paths if turn is not None else (),
         validation_status=validation_status,
         question_text=question_text,
+        ivd_engine_entered=turn is not None,
         retrieval_snapshot=retrieval_snapshot,
         preflight_decision=turn.preflight_decision if turn is not None else "",
         preflight_action=turn.preflight_action if turn is not None else "",
@@ -22276,6 +22277,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 validation_status="preflight_blocked",
                                 question_text=_ivd_telemetry_text,
                                 question_has_user_text=bool(_ivd_telemetry_text),
+                                ivd_engine_entered=True,
                                 preflight_decision=_after_sales_turn.preflight_decision,
                                 preflight_action=_after_sales_turn.preflight_action,
                                 preflight_issues=_after_sales_turn.preflight_issues,
@@ -22330,6 +22332,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 validation_status="pass" if not _direct_result.get("preflight_blocked") else "preflight_blocked",
                                 question_text=_ivd_telemetry_text,
                                 question_has_user_text=bool(_ivd_telemetry_text),
+                                ivd_engine_entered=True,
                                 answer_shape=_after_sales_turn.answer_shape,
                                 verified_fact_reuse="active_hit" if _direct_result.get("verified_fact_reused") else "off",
                             )
