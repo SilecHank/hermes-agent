@@ -67,6 +67,71 @@ def test_runtime_event_is_sanitized_and_versioned(tmp_path):
     assert stored == event
 
 
+def test_runtime_event_records_whether_the_turn_had_user_text():
+    """Grouping keys must describe the user's question, not inbound scaffolding.
+
+    Before this flag existed, a screenshot-only turn and a normal question both
+    landed with the sender-identity note as their preview, so replay and the
+    answer-link watchdog collapsed unrelated turns into one "same question
+    repeated" cluster.
+    """
+
+    def _event(**overrides):
+        kwargs = dict(
+            platform="weixin",
+            session_key="weixin:dm:secret-user",
+            product_scope="NIFTY",
+            route_id="clarification",
+            route_version="",
+            fast_path=False,
+            elapsed_seconds=0,
+            api_calls=0,
+            tool_names=(),
+            source_paths=(),
+            validation_status="preflight_blocked",
+        )
+        kwargs.update(overrides)
+        return build_runtime_event(**kwargs)
+
+    assert _event(question_text="这个质控图怎么判读", question_has_user_text=True)[
+        "question_has_user_text"
+    ] is True
+    assert _event(question_text="", question_has_user_text=False)[
+        "question_has_user_text"
+    ] is False
+    assert _event(question_text="")["question_has_user_text"] is False
+    assert _event(question_text="这个质控图怎么判读")["question_has_user_text"] is True
+
+
+def test_runtime_event_preview_uses_user_text_not_scaffolding():
+    from gateway.run import user_authored_text
+
+    identity_note = (
+        '[Gateway verified sender identity: display name="斯霖"; '
+        'preferred address="老板".]'
+    )
+    user_text = user_authored_text(f"{identity_note}\n\n这个质控图怎么判读")
+    event = build_runtime_event(
+        platform="weixin",
+        session_key="weixin:dm:secret-user",
+        product_scope="NIFTY",
+        route_id="standard",
+        route_version="",
+        fast_path=False,
+        elapsed_seconds=0,
+        api_calls=3,
+        tool_names=(),
+        source_paths=(),
+        validation_status="pass",
+        question_text=user_text,
+        question_has_user_text=bool(user_text),
+    )
+
+    assert event["question_preview"] == "这个质控图怎么判读"
+    assert "sender identity" not in event["question_preview"]
+    assert event["question_has_user_text"] is True
+
+
 def test_runtime_event_never_infers_missing_product_scope():
     event = build_runtime_event(
         platform="qqbot",
