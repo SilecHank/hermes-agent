@@ -262,7 +262,10 @@ def execute_exclusive_ivd_turn(
         result = outcome.result
         if result is None:
             questions = tuple(outcome.envelope.clarifying_questions)
-            text = questions[0] if questions else "请补充产品名称、版本或SOP编号。"
+            text = questions[0] if questions else (
+                "要定位到具体条文，我需要两项信息：项目名称，以及涉及的那一步"
+                "（提取、建库、上机或分析）。适用版本和文件编号我自己核对，不用你提供。"
+            )
             return ExclusiveIVDResult(
                 text=present(text),
                 presentation_contract=presentation,

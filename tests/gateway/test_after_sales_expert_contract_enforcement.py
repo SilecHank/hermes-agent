@@ -143,7 +143,8 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("请补充产品名称", result["direct_response"])
+        self.assertIn("告诉我项目名称", result["direct_response"])
+        self.assertNotIn("版本或 SOP 编号", result["direct_response"])
         self.assertEqual("block", result["preflight_decision"])
         self.assertEqual("stop_before_answer_generation", result["preflight_action"])
 
@@ -160,8 +161,11 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
+        # 版本与文件编号由系统自查：不向用户索取他手上没有的东西。
         self.assertIn("产品已确认", result["direct_response"])
-        self.assertIn("请补充产品版本或 SOP 编号", result["direct_response"])
+        self.assertIn("这一步是提取", result["direct_response"])
+        self.assertNotIn("请补充产品版本", result["direct_response"])
+        self.assertNotIn("SOP 编号", result["direct_response"])
         self.assertEqual("block", result["preflight_decision"])
 
     def test_mechanism_gap_states_boundary_instead_of_asking_version(self):
@@ -217,6 +221,42 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         self.assertNotIn("数值",result["direct_response"])
         self.assertNotIn("请补充",result["direct_response"])
         self.assertNotIn("首次建库",result["direct_response"])
+
+    def test_stop_wording_never_asks_for_a_version_or_document_number(self):
+        # 老板手上只有“哪个项目 + 哪一步”，版本号/文件编号由系统自查。
+        # 任何兜底话术都不许把这些当成用户必须补的信息。
+        import gateway.after_sales_guard as guard_module
+
+        for wording in (
+            guard_module.EXPERT_CONTRACT_MISSING_PRODUCT,
+            guard_module.EXPERT_CONTRACT_MISSING_VERSION,
+            guard_module.EXPERT_CONTRACT_MECHANISM_BOUNDARY,
+            guard_module.EXPERT_CONTRACT_EVIDENCE_DEFAULT,
+        ):
+            self.assertNotIn("请补充产品版本", wording)
+            self.assertNotIn("SOP 编号或版本", wording)
+            self.assertNotIn("尚未核实到", wording)
+        self.assertIn("项目名称", guard_module.EXPERT_CONTRACT_MISSING_PRODUCT)
+        self.assertIn("这一步是提取", guard_module.EXPERT_CONTRACT_MISSING_VERSION)
+        self.assertIn("我自己核对", guard_module.EXPERT_CONTRACT_EVIDENCE_DEFAULT)
+
+    def test_stop_response_for_a_known_product_asks_only_for_the_step(self):
+        from gateway.after_sales_guard import build_expert_contract_stop_response
+
+        text = build_expert_contract_stop_response(
+            {
+                "status": "clarification",
+                "product_line": "NIFTY",
+                "version": "",
+                "capability": "product_scope",
+                "issues": ["product_scope_required", "evidence_required"],
+            }
+        )
+        self.assertIn("产品已确认", text)
+        self.assertIn("这一步是提取", text)
+        self.assertNotIn("请补充产品版本", text)
+        self.assertNotIn("SOP 编号", text)
+        self.assertNotIn("尚未核实到", text)
 
 
 if __name__ == "__main__":

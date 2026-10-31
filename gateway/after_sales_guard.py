@@ -333,19 +333,19 @@ def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
 
 
 EXPERT_CONTRACT_MISSING_PRODUCT = (
-    "当前已进入专家检索，但该问题缺少可决定结论的上下文或正式证据，"
-    "暂不输出未经核实的正式数值结论。请补充产品名称，以及对应的版本或 SOP 编号，"
-    "例如首次建库/第一管还是重建库/复检。"
+    "这轮还缺能决定结论的关键信息，暂不输出未经核实的正式数值结论。"
+    "告诉我项目名称，以及涉及的实验步骤（提取、建库、上机或分析；必要时说明是首次建库/第一管"
+    "还是重建库/复检），我按这两项去定位对应文件；适用版本和文件编号我自己核对。"
 )
 EXPERT_CONTRACT_MISSING_VERSION = (
-    "当前已进入专家检索，产品已确认，但还缺可决定结论的版本与实验阶段，"
-    "暂不输出未经核实的正式数值结论。请补充产品版本或 SOP 编号，以及实验阶段，"
-    "例如首次建库/第一管还是重建库/复检。"
+    "产品已确认，但还缺涉及的实验步骤，暂不输出未经核实的正式数值结论。"
+    "告诉我这一步是提取、建库、上机还是分析（必要时说明是首次建库/第一管还是重建库/复检），"
+    "我按当前适用版本核对对应文件；版本和文件编号我自己查，不用你提供。"
 )
 EXPERT_CONTRACT_MECHANISM_BOUNDARY = (
     "该问题属于机制解释，产品已确认，但目前没有与问题绑定的正式来源，"
     "只能说明机制层面的一般关系，不给数值、阈值和正式结论。"
-    "如需正式依据，请补充适用的 SOP 编号或版本。"
+    "如需正式依据，告诉我涉及哪一步（提取、建库、上机或分析），我按当前适用版本去核对对应文件。"
 )
 EXPERT_CONTRACT_EVIDENCE_ASKS = {
     "parameter_resolution": "请补充实验阶段、样本类型与所用方法，我会按对应正式 SOP 重新核实。",
@@ -354,7 +354,10 @@ EXPERT_CONTRACT_EVIDENCE_ASKS = {
         "请补充会改变判断的现场事实，例如是否首次检测、同批次其它样本表现与关键质控结果。"
     ),
 }
-EXPERT_CONTRACT_EVIDENCE_DEFAULT = "请补充产品版本、SOP 编号与实验阶段，我会按正式来源重新核实。"
+EXPERT_CONTRACT_EVIDENCE_DEFAULT = (
+    "请告诉我项目名称和涉及的实验步骤（提取、建库、上机或分析），我按这两项定位对应的受控文件；"
+    "适用版本和文件编号我自己核对。"
+)
 
 # ---------------------------------------------------------------------------
 # Expert-mode auto fallback
@@ -1805,8 +1808,10 @@ def _render_fast_response_context(
                                + listing
                                + "\n要收窄到具体一份，再告诉我涉及的是哪一步——提取、建库、上机还是分析，或者直接给文件编号。")
         elif navigation_question:
-            direct_response = ('当前尚未核实到可交付的文档定位。请给我项目名称，'
-                               '以及涉及的那一步（提取、建库、上机或分析），我按这两项重新定位。')
+            # 定位不到文件时也要给出可执行动作：先点名要那两项信息，
+            # 不把“尚未核实到”当成回答。
+            direct_response = ('还没定位到具体文件。告诉我项目名称，以及涉及的那一步'
+                               '（提取、建库、上机或分析），我按这两项重新定位。')
         elif callable(getattr(module, 'render_acquisition_gap', None)):
             direct_response = module.render_acquisition_gap(
                 task=plan.get('task_contract') or {},
@@ -1831,7 +1836,20 @@ def _render_fast_response_context(
                                if callable(renderer) else
                                "暂不能判断个案原因。请确认发生变化的完整结果字段，以及两次采用的分析流程？拿到这些信息后再核对可比性与对应流程。")
         else:
-            direct_response = "当前尚未核实到足以支持此问题的正式来源，需要继续核对适用的受控文件。"
+            # 最后兜底也不能只描述“系统还没查到”，那对读者是无信息量的。
+            # 说清需要哪两项信息（项目、步骤），并明确版本与文件编号由系统自查。
+            known_product = (str(product_identity.get('product_scope') or '').strip()
+                             or str(contract_product or '').strip()
+                             or str((plan.get('context_envelope') or {}).get('product_line') or '').strip())
+            if known_product:
+                direct_response = ('按' + known_product
+                                   + '，这轮还没取到能直接引用的受控条文。告诉我涉及哪一步'
+                                   '——提取、建库、上机还是分析，我按这个步骤去定位对应文件；'
+                                   '适用版本和文件编号我自己核对。')
+            else:
+                direct_response = ('这个问题还没定位到能直接引用的受控条文。要定位到具体文件，'
+                                   '我需要两项信息：项目名称，以及涉及的那一步（提取、建库、上机或分析）。'
+                                   '适用版本和文件编号我自己核对，不用你提供。')
         contract_guarded = True
         answer_shape = {"answer_shape": "clarification"}
         fast_path = {
