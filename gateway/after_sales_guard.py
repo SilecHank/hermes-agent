@@ -405,6 +405,22 @@ ESCALATION_SHAPES = {"", "standard", "clarification", "diagnostic", "unknown",
                      "direct_fact", "answer"}
 
 
+def is_non_business_task(task_contract: Any) -> bool:
+    """True when the resolver said this turn is not a customer case.
+
+    The KB resolver publishes `task_kind` (social / meta / operator / business /
+    unknown) precisely so the gateway can decide whether the after-sales evidence
+    contract applies at all.  Only `social` used to be honoured, so a message
+    that talked about the assistant itself, a maintenance instruction, or a
+    runtime notice still entered the IVD engine and came back as a product
+    clarification.
+    """
+    task = task_contract if isinstance(task_contract, dict) else {}
+    return str(task.get("task_kind") or "") in {
+        "social", "meta", "operator", "unknown",
+    }
+
+
 def is_business_question(task_contract: Any, message: str) -> bool:
     """True when the message is an IVD business question worth routing.
 
@@ -1757,8 +1773,18 @@ def _render_fast_response_context(
         # A navigation or document-lookup question is answered by pointing at a
         # controlled file, so it must not be met with a request for a numeric
         # conclusion's missing inputs.
+        navigation_candidates = [
+            item for item in ((plan.get("source_location") or {}).get("candidates") or ())
+            if isinstance(item, dict) and str(item.get("file_name") or "").strip()
+        ]
+        # A question like "这个项目建库那步的 SOP 怎么规定的" is shaped as a
+        # product fact, but the locator already returned the controlled files.
+        # Pointing at them beats reporting an evidence gap over the principle
+        # cards the question was never going to be answered from.
         navigation_question = ((plan.get("task_contract") or {}).get("intent") in {"sop_lookup", "file_delivery"}
-                               or answer_shape.get('answer_shape') == 'file_lookup')
+                               or answer_shape.get('answer_shape') == 'file_lookup'
+                               or (fast_path.get('disposition') == 'navigation'
+                                   and bool(navigation_candidates)))
         gap_names_input = gap_names_input and not navigation_question
         scalar_question = str(answer_shape.get("answer_shape") or "") in {
             "scalar_lookup", "scoped_scalar", "ambiguous_scalar"
@@ -1767,8 +1793,20 @@ def _render_fast_response_context(
             renderer = getattr(module, 'render_expert_clarification', None)
             direct_response = renderer(expert_contract.get('clarification'),
                                        product=product_identity.get('product_scope')) if callable(renderer) else ''
+        elif navigation_question and navigation_candidates:
+            # Name the controlled files by document title and revision, never by
+            # library path, and say plainly that the wording inside them still
+            # has to be read there.
+            listing = "\n".join(
+                "· " + str(item.get("file_name")).strip()
+                for item in navigation_candidates[:5]
+            )
+            direct_response = ("按现在给的项目和步骤，定位到下面这几份受控文件，具体条文要打开对应文件核对：\n"
+                               + listing
+                               + "\n要收窄到具体一份，再告诉我涉及的是哪一步——提取、建库、上机还是分析，或者直接给文件编号。")
         elif navigation_question:
-            direct_response = '当前尚未核实到可交付的文档定位，需要继续核对适用的受控文件。'
+            direct_response = ('当前尚未核实到可交付的文档定位。请给我项目名称，'
+                               '以及涉及的那一步（提取、建库、上机或分析），我按这两项重新定位。')
         elif callable(getattr(module, 'render_acquisition_gap', None)):
             direct_response = module.render_acquisition_gap(
                 task=plan.get('task_contract') or {},

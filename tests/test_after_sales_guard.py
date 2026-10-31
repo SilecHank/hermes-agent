@@ -1639,3 +1639,20 @@ def test_scalar_question_without_product_keeps_the_clarification_gate():
     assert is_analysis_question(
         {"task_contract": {"intent": "mechanism"}}, {"answer_shape": "standard"}, {}
     ) is True
+
+
+def test_non_business_task_kind_bypasses_the_after_sales_contract():
+    """A turn the resolver called meta/operator/unknown never enters the engine.
+
+    Only `social` used to be honoured in the gateway, so a complaint about the
+    assistant's own reply ("还是继续发澄清口径，怎么回事") or a runtime notice
+    still ran the IVD engine and came back as a product clarification.
+    """
+    from gateway.after_sales_guard import is_non_business_task
+
+    for kind in ("social", "meta", "operator", "unknown"):
+        assert is_non_business_task({"task_kind": kind}), kind
+    assert not is_non_business_task({"task_kind": "business"})
+    assert not is_non_business_task({"task_kind": ""})
+    assert not is_non_business_task({})
+    assert not is_non_business_task(None)
