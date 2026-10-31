@@ -413,6 +413,12 @@ def is_business_question(task_contract: Any, message: str) -> bool:
     after-sales evidence contract.
     """
     task = task_contract if isinstance(task_contract, dict) else {}
+    # The resolver's explicit task class wins when present (KB hermes_context_envelope).
+    kind = str(task.get("task_kind") or "")
+    if kind in {"social", "meta", "operator"}:
+        return False
+    if kind == "business":
+        return True
     if str(task.get("intent") or "") == "social":
         return False
     text = str(message or "")

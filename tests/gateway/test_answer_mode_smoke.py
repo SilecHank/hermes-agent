@@ -122,6 +122,15 @@ def test_greeting_and_command_carry_no_business_signal():
     assert is_business_question({}, "NIFTY 提取需要多少血浆") is True
 
 
+def test_resolver_task_kind_wins_over_local_heuristics():
+    # The KB resolver now classifies the message; the guard trusts it instead of
+    # re-guessing with a keyword list.
+    assert is_business_question({"task_kind": "operator"}, "随便什么") is False
+    assert is_business_question({"task_kind": "meta"}, "随便什么") is False
+    assert is_business_question({"task_kind": "social"}, "随便什么") is False
+    assert is_business_question({"task_kind": "business"}, "随便什么") is True
+
+
 def test_case_conclusions_are_never_analysis():
     assert is_analysis_question(
         {"task_contract": {"intent": "report_interpretation"}},
