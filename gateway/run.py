@@ -2320,6 +2320,35 @@ def _looks_like_title_only_answer(text: str) -> bool:
     return len(title_lines) >= 2 and not body_lines
 
 
+_GATEWAY_IDENTITY_NOTE_RE = re.compile(
+    r"\[Gateway verified sender identity:[^\]\r\n]*\]"
+)
+_GATEWAY_MEDIA_PLACEHOLDER_RE = re.compile(
+    r"^\[User sent (?:an image|audio|a video|a file):[^\]\r\n]*\]$",
+    re.MULTILINE,
+)
+
+
+def user_authored_text(message: str, business_message: str | None = None) -> str:
+    """Return only the text the user actually wrote for this turn.
+
+    A media-only turn (a screenshot with no caption) reaches the IVD boundary
+    with no user body at all: the platform event carries no text, and inbound
+    preparation glues the sender-identity note -- plus, for queued media, a
+    ``[User sent an image: …]`` placeholder -- onto it.  Treating that
+    scaffolding as a question routes the turn as a customer case with no
+    product scope, which is answered with a product clarification for a
+    screenshot the model never got to look at.  Callers use this helper to see
+    that such a turn has no user text, so it bypasses the IVD engine and the
+    agent answers the attachment itself.
+    """
+    if business_message is not None:
+        return str(business_message).strip()
+    text = _GATEWAY_IDENTITY_NOTE_RE.sub(" ", str(message or ""))
+    text = _GATEWAY_MEDIA_PLACEHOLDER_RE.sub(" ", text)
+    return text.strip()
+
+
 def _prepare_gateway_ivd_boundary(
     config: dict[str, Any],
     *,
@@ -2335,10 +2364,11 @@ def _prepare_gateway_ivd_boundary(
     )
 
     from gateway.after_sales_guard import is_non_business_task, resolve_after_sales_task
-    task = resolve_after_sales_task(config.get("after_sales_guard") or {}, message)
+    user_text = user_authored_text(message)
+    task = resolve_after_sales_task(config.get("after_sales_guard") or {}, user_text)
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
     mode = ivd_engine_mode(config, platform=platform)
-    if not str(message or "").strip() or is_non_business_task(task):
+    if not user_text or is_non_business_task(task):
         # A greeting, a question about the assistant, a maintenance instruction,
         # a runtime notice, or a turn with no user text at all never enters the
         # IVD engine.
@@ -3672,8 +3702,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         pending = (getter(session_key, "ivd_pending_task")
                    if callable(getter) and session_key and not business_history_isolated else None)
         guard = config.get("after_sales_guard") or {}
-        task = resolve_after_sales_task(guard,
-            business_message if business_message is not None else message,
+        user_text = user_authored_text(message, business_message)
+        task = resolve_after_sales_task(guard, user_text,
             actor_id=actor_id, pending_task=pending)
         routing_history = []  # Shared task resolution owns all context admission.
         setter = getattr(store, "set_session_metadata", None)
@@ -3686,7 +3716,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # updates commit their recomputed state below without a transient gap.
             setter(session_key, "ivd_pending_task", None)
         if (task.get("intent") == "social" or is_non_business_task(task)
-                or not str(message or "").strip()):
+                or not user_text):
             from gateway.after_sales_guard import AfterSalesTurn
             return None, AfterSalesTurn(context="", facts={}, validator=None,
                                        allowed_numeric_claims=(), task_contract=task)

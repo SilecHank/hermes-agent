@@ -121,6 +121,8 @@
     "hermes_logging.py",
     "hermes_state.py",
     "hermes_time.py",
+    "locales/en.yaml",
+    "locales/zh.yaml",
     "plugins/__init__.py",
     "plugins/model-providers/alibaba-coding-plan/__init__.py",
     "plugins/model-providers/alibaba/__init__.py",
