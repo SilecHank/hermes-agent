@@ -356,6 +356,103 @@ EXPERT_CONTRACT_EVIDENCE_ASKS = {
 }
 EXPERT_CONTRACT_EVIDENCE_DEFAULT = "请补充产品版本、SOP 编号与实验阶段，我会按正式来源重新核实。"
 
+# ---------------------------------------------------------------------------
+# Expert-mode auto fallback
+#
+# The structured fast path only covers questions it can already answer from a
+# card, a workflow fact or a formal source.  Everything else used to fall
+# through to the general agent, which is the product's "expert mode": it
+# retrieves controlled material, reasons over it and states its boundaries.
+#
+# Two things broke that contract:
+#   1. the knowledge resolver reports every message as a ``product_fact`` that
+#      lacks ``product_line``, so greetings, meta questions and maintenance
+#      instructions were indistinguishable from a business question, and
+#   2. the evidence-contract gate was made unconditional on a fast-path miss,
+#      so every one of those messages was stopped before the agent ever ran and
+#      answered with "请补充产品名称、版本或 SOP 编号" -- repeatedly.
+#
+# The gate below restores the intended split: only a real business question may
+# reach the evidence contract, and a non-scalar question that misses the fast
+# path is answered in expert mode instead of being blocked.
+# ---------------------------------------------------------------------------
+SOP_IDENTIFIER_RE = re.compile(r"\bSOP[-_ ]?[A-Z]{0,6}[-_ ]?\d{2,}", re.IGNORECASE)
+_BUSINESS_SIGNAL_TERMS = (
+    "sop", "产品", "试剂", "耗材", "仪器", "平台", "样本", "样本类型", "血浆", "血清",
+    "提取", "建库", "文库", "上机", "测序", "质控", "qc", "浓度", "体积", "投入量",
+    "产出", "覆盖度", "深度", "检测限", "报告", "解读", "阈值", "标准", "流程", "步骤",
+    "操作", "排查", "异常", "失败", "污染", "误差", "偏差", "不一致", "原因", "差异",
+    "对比", "区别", "适用", "版本", "参数", "指标", "验证", "复核", "判读", "阳性",
+    "阴性", "灰区", "嵌合", "母血", "胎儿", "cnv", "nifty", "wes", "ptseq", "b1",
+    "多少", "范围", "上限", "下限", "以上", "以下", "不低于", "不超过", "值",
+)
+# Answer shapes that ask for a single verified value.  These keep the existing
+# product/version clarification gate: a number may not be guessed.
+SCALAR_ANSWER_SHAPES = {
+    "scalar_lookup", "scoped_scalar", "ambiguous_scalar", "conditional_scalar",
+    "sop_parameter_short_answer", "parameter_short_answer",
+}
+# Expert capabilities that can be answered as bounded analysis without first
+# pinning down a product version.
+ANALYSIS_CAPABILITIES = {
+    "mechanism_explanation", "after_sales_diagnosis", "data_interpretation",
+}
+_ANALYSIS_INTENTS = {
+    "mechanism", "troubleshooting", "report_interpretation",
+}
+
+
+def is_business_question(task_contract: Any, message: str) -> bool:
+    """True when the message is an IVD business question worth routing.
+
+    Everything else (greeting, small talk, a meta question about the assistant,
+    a maintenance or release instruction) must reach the general agent, not the
+    after-sales evidence contract.
+    """
+    task = task_contract if isinstance(task_contract, dict) else {}
+    if str(task.get("intent") or "") == "social":
+        return False
+    text = str(message or "")
+    if not text.strip():
+        return False
+    if SOP_IDENTIFIER_RE.search(text):
+        return True
+    envelope = task.get("context")
+    if isinstance(envelope, dict):
+        for field_name in ("product_line", "product_version", "product_variant",
+                           "workflow_step", "parameter_type", "sample_type", "method"):
+            if envelope.get(field_name):
+                return True
+        detail = envelope.get("provenance_detail")
+        matched = detail.get("matched_terms") if isinstance(detail, dict) else None
+        if isinstance(matched, dict) and any(
+            isinstance(values, (list, tuple)) and values for values in matched.values()
+        ):
+            return True
+    lowered = text.casefold()
+    return any(term in lowered for term in _BUSINESS_SIGNAL_TERMS)
+
+
+def is_analysis_question(
+    plan: Any, answer_shape: Any, expert_contract: Any
+) -> bool:
+    """True when the question asks for analysis rather than a verified value."""
+    shapes = set()
+    if isinstance(answer_shape, dict):
+        shapes.add(str(answer_shape.get("answer_shape") or ""))
+    elif isinstance(answer_shape, (list, tuple, set)):
+        shapes.update(str(item) for item in answer_shape)
+    shapes.discard("")
+    if any(shape in SCALAR_ANSWER_SHAPES or shape.startswith("sop_") for shape in shapes):
+        # A parameter/SOP-bound question needs the discriminating context before
+        # any SOP can be cited, so it keeps the existing clarification gate.
+        return False
+    capability = str((expert_contract if isinstance(expert_contract, dict) else {}).get("capability") or "")
+    if capability in ANALYSIS_CAPABILITIES:
+        return True
+    intent = str(((plan if isinstance(plan, dict) else {}).get("task_contract") or {}).get("intent") or "")
+    return intent in _ANALYSIS_INTENTS
+
 
 def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
     """Render the stop wording for the gap that actually blocks the contract.
@@ -1401,11 +1498,38 @@ def _render_fast_response_context(
     clarification_required = bool(guard.get("_workflow_card_unavailable") or
         (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
     planner_control_stop = (plan.get("fast_path") or {}).get("disposition") == "control_stop"
+    # A message with no business signal is not an after-sales question.  It must
+    # reach the general agent (greeting, meta question, maintenance command)
+    # instead of being met with the evidence-contract clarification.  An explicit
+    # stop from the planner is a deliberate decision and is never bypassed here.
+    business_question = is_business_question(plan.get("task_contract") or {}, message)
+    planner_gate_decision = str((plan.get("preflight_gate") or {}).get("decision") or "")
+    if (not business_question and not clarification_required and not planner_control_stop
+            and planner_gate_decision != "block"):
+        return {}
     # A fast-path miss still needs the existing expert evidence contract.
     # Without this, the early return bypasses its required clarification.
     early_expert_contract = plan.get("expert_route_contract") or {}
+    early_contract_status = str(early_expert_contract.get("status") or "")
+    # A non-scalar business question that the structured path cannot answer is
+    # handled in expert mode: the model reasons over the controlled material it
+    # can read and states its own boundaries.  A scalar/parameter question keeps
+    # the product/version clarification gate, because a value may not be guessed.
+    # Both projections matter: a planner may report a generic "standard" fast
+    # shape while its answer projection still asks for a single verified value.
+    # Any scalar or SOP-bound signal keeps the clarification gate.
+    route_answer_shapes = [
+        str((plan.get("fast_path") or {}).get("answer_shape") or ""),
+        str((plan.get("answer_shape") or {}).get("answer_shape") or ""),
+    ]
+    expert_mode_escalation = bool(
+        business_question
+        and (early_contract_status in {"clarification", "pending_evidence"} or planner_control_stop)
+        and not (early_expert_contract.get("clarification") or {}).get("workflow")
+        and is_analysis_question(plan, route_answer_shapes, early_expert_contract)
+    )
     expert_requires_clarification = (
-        early_expert_contract.get("status") in {"clarification", "pending_evidence", "blocked"}
+        early_contract_status in {"clarification", "pending_evidence", "blocked"}
         and not early_expert_contract.get("formal_answer_allowed", False)
         and not early_expert_contract.get("bounded_expert_answer_allowed", False)
     )
@@ -1471,7 +1595,7 @@ def _render_fast_response_context(
         lines.append("已解析联系人事实卡，直接采用卡内当前值，不再全文检索或自行推测。")
     elif direct_response and answer_card:
         lines.append("已解析正式答案卡，直接采用卡内当前值，不再重复检索或调用模型。")
-    if planner_control_stop:
+    if planner_control_stop and not expert_mode_escalation:
         prompt = fast_path.get('clarification') or fast_path.get('control_response')
         direct_response = direct_response or (prompt.strip() if isinstance(prompt,str) else '')
         direct_response = direct_response or '当前请求需要先完成上下文或来源核对，暂不继续生成结论。'
@@ -1485,7 +1609,8 @@ def _render_fast_response_context(
     contract_guarded = False
     contract_status = str(expert_contract.get("status") or "")
     if (
-        contract_status in {"clarification", "pending_evidence", "blocked"}
+        not expert_mode_escalation
+        and contract_status in {"clarification", "pending_evidence", "blocked"}
         and not expert_contract.get("formal_answer_allowed", False)
         and not expert_contract.get("bounded_expert_answer_allowed", False)
     ):
@@ -1557,6 +1682,35 @@ def _render_fast_response_context(
             "numeric_fast_answer_allowed": False,
         }
         lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
+    if expert_mode_escalation:
+        # The evidence tier did not reach serving level, so nothing here may be
+        # rendered as a formal conclusion.  Keep the gate open and let the model
+        # answer as analysis that carries its own boundaries.
+        gate = {
+            **gate,
+            "decision": "continue",
+            "pipeline_action": "continue_final_answer",
+            "issues": [item for item in (gate.get("issues") or ())
+                       if item != "expert_route_contract_not_ready"],
+        }
+        direct_response = ""
+        answer_shape = {**answer_shape, "answer_shape": "expert_analysis"}
+        fast_path = {**fast_path, "route_id": "expert_mode_auto_fallback",
+                     "route_source": "expert_mode_auto_fallback",
+                     "stop_after_fast_path": False,
+                     "numeric_fast_answer_allowed": False,
+                     "direct_response": ""}
+        lines.append("[专家模式] 结构化快速路径未命中，本轮自动进入专家模式分析作答。")
+        lines.append(
+            "作答要求：先给出能确定的结论性判断，再给依据、边界与下一步核查动作；"
+            "不得输出未经核实的数值、产品专属参数、报告规则或个案结论，"
+            "缺少依据时明确说明缺哪一份受控来源。"
+        )
+        lines.append(
+            "不要重复索取产品/版本；只有缺少产品/版本会让结论完全不可判定时，"
+            "才在回答末尾用一句话点名所需信息。"
+        )
+        lines.append("本轮专家证据合同未达 serving 层级，答案只能作为分析意见，须标注推断与待核实项。")
     parameter_contract = {}
     if (not contract_guarded and gate.get("decision") != "block"
             and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}
@@ -1578,7 +1732,7 @@ def _render_fast_response_context(
             "locator": answer_card.get("source_locator", ""),
         }]}
     expert_bundle = plan.get("expert_evidence_bundle") or {}
-    if expert_contract.get("status") not in (None, "", "none"):
+    if expert_contract.get("status") not in (None, "", "none") and not expert_mode_escalation:
         lines.append("[本轮专家声明合同与实际摘录]\n" + json.dumps({
             "task_id": (plan.get("task_contract") or {}).get("task_id"),
             "contract": expert_contract, "bundle": expert_bundle}, ensure_ascii=False))
@@ -1593,7 +1747,7 @@ def _render_fast_response_context(
     return {
         "expert_execution_contract": plan.get("expert_execution_contract") or {},
         "task_contract": plan.get("task_contract") or {},
-        "expert_route_contract": expert_contract,
+        "expert_route_contract": {} if expert_mode_escalation else expert_contract,
         "expert_evidence_bundle": expert_bundle,
         "expert_validator_path": str(module_path.with_name("hermes_expert_answer_contract.py")),
         "context": "\n".join(lines),

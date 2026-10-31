@@ -1561,3 +1561,81 @@ def test_serving_artifact_startup_imports_are_closed(tmp_path):
     )
 
     check_artifact(tmp_path, 'gateway.run')
+
+
+# ---------------------------------------------------------------------------
+# Expert-mode auto fallback: the structured fast path keeps the questions it can
+# answer, everything else reaches the general agent (expert mode) instead of the
+# evidence-contract clarification.
+# ---------------------------------------------------------------------------
+
+
+def test_business_signal_classification_splits_chat_from_knowledge():
+    from gateway.after_sales_guard import is_business_question
+
+    assert is_business_question({}, "你好？") is False
+    assert is_business_question({}, "不要使用agent ，回滚仓库") is False
+    assert is_business_question({"intent": "social"}, "今天几号") is False
+    assert is_business_question({}, "NIFTY 提取需要多少血浆") is True
+    assert is_business_question({}, "把 SOP-JL-269 原件发我") is True
+    assert is_business_question(
+        {"context": {"provenance_detail": {"matched_terms": {"product_line": ["NIFTY"]}}}},
+        "这个怎么处理",
+    ) is True
+
+
+def test_greeting_is_not_routed_into_the_evidence_contract():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="你好？",
+        history=[],
+    )
+
+    assert turn is None or turn.blocks_answer_generation is False
+    if turn is not None:
+        assert not turn.expert_route_contract
+        assert "请补充产品" not in turn.context
+        assert turn.direct_response == ""
+
+
+def test_maintenance_instruction_is_not_routed_into_the_evidence_contract():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="不要使用agent ，回滚仓库",
+        history=[],
+    )
+
+    assert turn is None or turn.blocks_answer_generation is False
+    if turn is not None:
+        assert not turn.expert_route_contract
+        assert "请补充产品" not in turn.context
+
+
+def test_analysis_question_that_misses_the_fast_path_runs_in_expert_mode():
+    turn = prepare_after_sales_turn(
+        _config_with_fast_response(),
+        platform="weixin",
+        message="建库浓度低可能是什么原因？",
+        history=[],
+    )
+
+    if turn is None:
+        pytest.skip("pinned KB candidate answers this question from the fast path")
+    assert turn.blocks_answer_generation is False
+    assert "[专家模式]" in turn.context
+    assert "请补充产品名称" not in turn.context
+    assert not turn.expert_route_contract
+    assert turn.direct_response == ""
+
+
+def test_scalar_question_without_product_keeps_the_clarification_gate():
+    from gateway.after_sales_guard import is_analysis_question
+
+    # A verified value may not be guessed, so this shape must stay gated.
+    assert is_analysis_question({}, {"answer_shape": "scalar_lookup"}, {}) is False
+    assert is_analysis_question({}, {"answer_shape": "conditional_scalar"}, {}) is False
+    assert is_analysis_question(
+        {"task_contract": {"intent": "mechanism"}}, {"answer_shape": "standard"}, {}
+    ) is True
