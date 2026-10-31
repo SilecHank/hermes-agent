@@ -2338,9 +2338,10 @@ def _prepare_gateway_ivd_boundary(
     task = resolve_after_sales_task(config.get("after_sales_guard") or {}, message)
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
     mode = ivd_engine_mode(config, platform=platform)
-    if is_non_business_task(task):
-        # A greeting, a question about the assistant, a maintenance instruction
-        # or a runtime notice never enters the IVD engine.
+    if not str(message or "").strip() or is_non_business_task(task):
+        # A greeting, a question about the assistant, a maintenance instruction,
+        # a runtime notice, or a turn with no user text at all never enters the
+        # IVD engine.
         return prepared, None
     if mode == "package":
         return prepared, execute_exclusive_ivd_turn(
@@ -3684,7 +3685,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # A selected new task supersedes old authority. Admitted same-task
             # updates commit their recomputed state below without a transient gap.
             setter(session_key, "ivd_pending_task", None)
-        if task.get("intent") == "social" or is_non_business_task(task):
+        if (task.get("intent") == "social" or is_non_business_task(task)
+                or not str(message or "").strip()):
             from gateway.after_sales_guard import AfterSalesTurn
             return None, AfterSalesTurn(context="", facts={}, validator=None,
                                        allowed_numeric_claims=(), task_contract=task)
