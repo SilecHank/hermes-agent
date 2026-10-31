@@ -221,3 +221,79 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExpertModeMissCoverageTests(unittest.TestCase):
+    """A structured miss must fall back to expert mode, not to a version ask."""
+
+    def setUp(self):
+        import importlib.util
+        from unittest.mock import patch
+
+        def synthetic_loader(path, mtime):
+            spec = importlib.util.spec_from_file_location("synthetic_miss_plan", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        loader = patch("gateway.after_sales_guard._load_module", side_effect=synthetic_loader)
+        loader.start()
+        self.addCleanup(loader.stop)
+
+    def _render(self, plan, message):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as root:
+            module_path = _load_fast_module(
+                Path(root) / "knowledge-base" / "scripts" / "hermes_fast_response_pipeline.py",
+                plan,
+            )
+            return _render_fast_response_context(
+                {"fast_response_module": str(module_path)}, message=message, match=None
+            )
+
+    def _plan(self, *, capability, shape="standard", intent="product_fact"):
+        return {
+            "runtime_preflight": {"eligible": False, "route_version": "test"},
+            "answer_template": {"style": "short_first"},
+            "preflight_gate": {"decision": "allow", "pipeline_action": "continue_final_answer"},
+            "initial_files": [],
+            "task_contract": {
+                "intent": intent,
+                "context": {"provenance_detail": {"matched_terms": {"sample_type": ["组织"]}}},
+            },
+            "fast_path": {"hit": False, "disposition": "miss", "answer_shape": shape},
+            "answer_shape": {"answer_shape": "direct_fact"},
+            "expert_route_contract": {
+                "status": "clarification",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": False,
+                "capability": capability,
+                "issues": ["evidence_not_serving", "evidence_required", "product_scope_required"],
+            },
+        }
+
+    def test_clinical_analysis_question_misses_into_expert_mode(self):
+        # Regression: this question was answered with "请补充产品名称、版本或 SOP
+        # 编号" although the planner itself had no product requirement to meet.
+        result = self._render(
+            self._plan(capability="parameter_resolution"),
+            "稽留流产会导致绒毛都没了吗，取出来只剩母体组织的碎膜了",
+        )
+
+        self.assertEqual("", result["direct_response"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertIn("[专家模式]", result["context"])
+        self.assertEqual("expert_mode_auto_fallback", result["route_id"])
+        self.assertEqual("expert_analysis", result["answer_shape"])
+        self.assertFalse(result["expert_route_contract"])
+
+    def test_case_conclusion_question_keeps_the_gate(self):
+        result = self._render(
+            self._plan(capability="data_interpretation", intent="report_interpretation"),
+            "这个样本的报告结论应该怎么判读",
+        )
+
+        self.assertEqual("block", result["preflight_decision"])
+        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
+        self.assertTrue(result["direct_response"])

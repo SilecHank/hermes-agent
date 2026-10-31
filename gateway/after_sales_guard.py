@@ -385,6 +385,7 @@ _BUSINESS_SIGNAL_TERMS = (
     "对比", "区别", "适用", "版本", "参数", "指标", "验证", "复核", "判读", "阳性",
     "阴性", "灰区", "嵌合", "母血", "胎儿", "cnv", "nifty", "wes", "ptseq", "b1",
     "多少", "范围", "上限", "下限", "以上", "以下", "不低于", "不超过", "值",
+    "绒毛", "流产", "组织", "取材", "蜡块", "石蜡", "羊水", "脐血", "血样", "样本量",
 )
 # Answer shapes that ask for a single verified value.  These keep the existing
 # product/version clarification gate: a number may not be guessed.
@@ -392,14 +393,16 @@ SCALAR_ANSWER_SHAPES = {
     "scalar_lookup", "scoped_scalar", "ambiguous_scalar", "conditional_scalar",
     "sop_parameter_short_answer", "parameter_short_answer",
 }
-# Expert capabilities that can be answered as bounded analysis without first
-# pinning down a product version.
-ANALYSIS_CAPABILITIES = {
-    "mechanism_explanation", "after_sales_diagnosis", "data_interpretation",
-}
-_ANALYSIS_INTENTS = {
-    "mechanism", "troubleshooting", "report_interpretation",
-}
+# Capabilities/intents whose answer is an individual case conclusion or a report
+# rule.  Those may not be produced from an unserved evidence tier, so they keep
+# the clarification gate even when the question is not scalar: a plausible
+# sounding case conclusion is worse than a request for the missing source.
+CASE_CONCLUSION_CAPABILITIES = {"data_interpretation"}
+CASE_CONCLUSION_INTENTS = {"report_interpretation"}
+# Shapes that mean the structured path produced nothing to send.  Anything else
+# (contact card, comparison, mechanism card, navigation, ...) owns the reply.
+ESCALATION_SHAPES = {"", "standard", "clarification", "diagnostic", "unknown",
+                     "direct_fact", "answer"}
 
 
 def is_business_question(task_contract: Any, message: str) -> bool:
@@ -436,22 +439,44 @@ def is_business_question(task_contract: Any, message: str) -> bool:
 def is_analysis_question(
     plan: Any, answer_shape: Any, expert_contract: Any
 ) -> bool:
-    """True when the question asks for analysis rather than a verified value."""
+    """True when the question can be answered as bounded analysis.
+
+    A fast-path miss is answered in expert mode unless the request is for a
+    single verified value (scalar / SOP-bound) or for an individual case
+    conclusion, which may not be generated from an unserved evidence tier.
+    """
     shapes = set()
     if isinstance(answer_shape, dict):
         shapes.add(str(answer_shape.get("answer_shape") or ""))
     elif isinstance(answer_shape, (list, tuple, set)):
         shapes.update(str(item) for item in answer_shape)
     shapes.discard("")
-    if any(shape in SCALAR_ANSWER_SHAPES or shape.startswith("sop_") for shape in shapes):
-        # A parameter/SOP-bound question needs the discriminating context before
-        # any SOP can be cited, so it keeps the existing clarification gate.
+    if any(shape in SCALAR_ANSWER_SHAPES or shape.startswith("sop_")
+           or shape.startswith("file_") for shape in shapes):
+        # A parameter/SOP-bound or file-location question keeps its own gate: a
+        # value may not be guessed and a document must be pointed at, not summed
+        # up by the model.
+        return False
+    # Only shapes that mean "the structured path had nothing to send" may be
+    # escalated.  A dedicated short-answer route (contact card, comparison,
+    # mechanism card, navigation, ...) already owns the reply.
+    if shapes and not shapes <= ESCALATION_SHAPES:
+        return False
+    # If the fast path already produced a reply (direct response, answer card,
+    # resolved contact fact) there is nothing to replace.
+    fast_path = (plan if isinstance(plan, dict) else {}).get("fast_path") or {}
+    if (str(fast_path.get("direct_response") or "").strip()
+            or (fast_path.get("answer_card") or {}).get("stop_after_fast_path")
+            or ((plan if isinstance(plan, dict) else {}).get("contact_fact") or {}
+                ).get("status") == "resolved"):
         return False
     capability = str((expert_contract if isinstance(expert_contract, dict) else {}).get("capability") or "")
-    if capability in ANALYSIS_CAPABILITIES:
-        return True
+    if capability in CASE_CONCLUSION_CAPABILITIES:
+        return False
     intent = str(((plan if isinstance(plan, dict) else {}).get("task_contract") or {}).get("intent") or "")
-    return intent in _ANALYSIS_INTENTS
+    if intent in {"sop_lookup", "file_delivery"}:
+        return False
+    return intent not in CASE_CONCLUSION_INTENTS
 
 
 def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
