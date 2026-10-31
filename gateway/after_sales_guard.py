@@ -479,6 +479,129 @@ def is_analysis_question(
     return intent not in CASE_CONCLUSION_INTENTS
 
 
+@dataclass(frozen=True)
+class AnswerModeDecision:
+    """The single decision about how an IVD turn may be answered.
+
+    Every branch of the after-sales guard reads this object instead of
+    re-deriving its own booleans.  A change to the policy has exactly one place
+    to land, and the regression suite asserts the decision for a table of known
+    inputs (see tests/gateway/test_answer_mode_smoke.py).
+    """
+
+    mode: str
+    reasons: tuple[str, ...]
+    business_question: bool
+    structured_answer: bool
+    expert_contract: dict[str, Any]
+    gate: dict[str, Any]
+
+    @property
+    def skip_guard(self) -> bool:
+        """The general agent answers; no after-sales context is injected."""
+        return self.mode == "agent"
+
+    @property
+    def expert_mode(self) -> bool:
+        return self.mode == "expert_analysis"
+
+    @property
+    def contract_guarded(self) -> bool:
+        return self.mode in {"clarify", "pointer", "blocked_error"}
+
+
+def decide_answer_mode(
+    plan: Any,
+    *,
+    message: str,
+    guard: dict[str, Any] | None = None,
+    match: dict[str, Any] | None = None,
+) -> AnswerModeDecision:
+    """Decide how the turn is answered: agent, fast answer, expert or clarify.
+
+    Ordered, because the order *is* the policy:
+
+    1. no business signal  -> the general agent answers (greeting, meta,
+       maintenance command); an explicit planner stop is never bypassed;
+    2. structured miss on a question that is not scalar/SOP/file-bound and is
+       not an individual case conclusion -> expert mode;
+    3. anything else the evidence contract cannot serve -> clarify (the wording
+       names the missing discriminator);
+    4. otherwise -> fast answer.
+
+    Rule 2 is why a fast-path miss no longer falls through to "请补充产品版本";
+    rule 1 is why a greeting never reaches the evidence contract at all.
+    """
+    plan = plan if isinstance(plan, dict) else {}
+    guard = guard if isinstance(guard, dict) else {}
+    fast_path = plan.get("fast_path") or {}
+    gate = plan.get("preflight_gate") or {}
+    contract = plan.get("expert_route_contract") or {}
+    status = str(contract.get("status") or "")
+    shapes = [
+        str(fast_path.get("answer_shape") or ""),
+        str((plan.get("answer_shape") or {}).get("answer_shape") or ""),
+    ]
+    business = is_business_question(plan.get("task_contract") or {}, message)
+    workflow_clarification = contract.get("clarification") or {}
+    workbook_clarification = bool(
+        guard.get("_workflow_card_unavailable")
+        or (isinstance(match, dict) and (match.get("facts") or {}).get("clarification"))
+    )
+    control_stop = fast_path.get("disposition") == "control_stop"
+    eligible = bool((plan.get("runtime_preflight") or {}).get("eligible", False))
+    structured_answer = bool(
+        str(fast_path.get("direct_response") or "").strip()
+        or (fast_path.get("answer_card") or {}).get("stop_after_fast_path")
+        or (plan.get("contact_fact") or {}).get("status") == "resolved"
+    )
+    reasons: list[str] = []
+    if not business:
+        reasons.append("no_business_signal")
+    if not eligible:
+        reasons.append("fast_path_miss")
+    if status:
+        reasons.append(f"contract_{status}")
+    if control_stop:
+        reasons.append("planner_control_stop")
+    if structured_answer:
+        reasons.append("structured_answer_present")
+
+    if (not business and not workbook_clarification and not control_stop
+            and str(gate.get("decision") or "") != "block"):
+        return AnswerModeDecision("agent", tuple(reasons), business, structured_answer, contract, gate)
+    if (business
+            and (status in {"clarification", "pending_evidence"} or control_stop)
+            and not workflow_clarification.get("workflow")
+            and is_analysis_question(plan, shapes, contract)):
+        reasons.append("expert_mode_escalation")
+        return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
+    guarded = status in {"clarification", "pending_evidence", "blocked"} and not (
+        contract.get("formal_answer_allowed", False)
+        or contract.get("bounded_expert_answer_allowed", False)
+    )
+    # A navigation turn (contact card, document pointer) is answered by its own
+    # route; the evidence contract must not turn it into a clarification.
+    navigation = fast_path.get("disposition") == "navigation"
+    if guarded and not navigation:
+        reasons.append("contract_guard")
+        return AnswerModeDecision("clarify", tuple(reasons), business, structured_answer, contract, gate)
+    if control_stop and not structured_answer and not navigation:
+        reasons.append("planner_stop_clarification")
+        return AnswerModeDecision("clarify", tuple(reasons), business, structured_answer, contract, gate)
+    if str(gate.get("decision") or "") == "block" or (
+            _canonical_preflight_action(gate) in {"stop_before_answer_generation", "stop_before_final_answer"}
+            and not eligible):
+        reasons.append("preflight_gate_block")
+        return AnswerModeDecision("clarify", tuple(reasons), business, structured_answer, contract, gate)
+    # Nothing would be injected for this turn: the general agent answers with no
+    # after-sales context (this is the historical fast-path-miss behaviour).
+    if not (eligible or workbook_clarification or control_stop):
+        reasons.append("nothing_to_inject")
+        return AnswerModeDecision("agent", tuple(reasons), business, structured_answer, contract, gate)
+    return AnswerModeDecision("fast_answer", tuple(reasons), business, structured_answer, contract, gate)
+
+
 def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
     """Render the stop wording for the gap that actually blocks the contract.
 
@@ -1523,44 +1646,13 @@ def _render_fast_response_context(
     clarification_required = bool(guard.get("_workflow_card_unavailable") or
         (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
     planner_control_stop = (plan.get("fast_path") or {}).get("disposition") == "control_stop"
-    # A message with no business signal is not an after-sales question.  It must
-    # reach the general agent (greeting, meta question, maintenance command)
-    # instead of being met with the evidence-contract clarification.  An explicit
-    # stop from the planner is a deliberate decision and is never bypassed here.
-    business_question = is_business_question(plan.get("task_contract") or {}, message)
-    planner_gate_decision = str((plan.get("preflight_gate") or {}).get("decision") or "")
-    if (not business_question and not clarification_required and not planner_control_stop
-            and planner_gate_decision != "block"):
+    # One decision object drives every branch below; see decide_answer_mode.
+    decision = decide_answer_mode(plan, message=message, guard=guard, match=match)
+    if decision.skip_guard:
         return {}
-    # A fast-path miss still needs the existing expert evidence contract.
-    # Without this, the early return bypasses its required clarification.
-    early_expert_contract = plan.get("expert_route_contract") or {}
-    early_contract_status = str(early_expert_contract.get("status") or "")
-    # A non-scalar business question that the structured path cannot answer is
-    # handled in expert mode: the model reasons over the controlled material it
-    # can read and states its own boundaries.  A scalar/parameter question keeps
-    # the product/version clarification gate, because a value may not be guessed.
-    # Both projections matter: a planner may report a generic "standard" fast
-    # shape while its answer projection still asks for a single verified value.
-    # Any scalar or SOP-bound signal keeps the clarification gate.
-    route_answer_shapes = [
-        str((plan.get("fast_path") or {}).get("answer_shape") or ""),
-        str((plan.get("answer_shape") or {}).get("answer_shape") or ""),
-    ]
-    expert_mode_escalation = bool(
-        business_question
-        and (early_contract_status in {"clarification", "pending_evidence"} or planner_control_stop)
-        and not (early_expert_contract.get("clarification") or {}).get("workflow")
-        and is_analysis_question(plan, route_answer_shapes, early_expert_contract)
-    )
-    expert_requires_clarification = (
-        early_contract_status in {"clarification", "pending_evidence", "blocked"}
-        and not early_expert_contract.get("formal_answer_allowed", False)
-        and not early_expert_contract.get("bounded_expert_answer_allowed", False)
-    )
-    if (not runtime_preflight.get("eligible", False) and not clarification_required
-            and not planner_control_stop and not expert_requires_clarification):
-        return {}
+    business_question = decision.business_question
+    early_expert_contract = decision.expert_contract
+    expert_mode_escalation = decision.expert_mode
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
     kb_root = module_path.parent.parent
