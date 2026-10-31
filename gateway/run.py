@@ -6092,6 +6092,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             pass
 
+    def _reconcile_platform_runtime_status(self) -> None:
+        """Re-assert live adapter states into ``gateway_state.json``.
+
+        Each adapter announces ``connected`` exactly once, during its own
+        connect step.  If that single write is lost — a concurrent writer
+        rewrote the record, the status file was briefly unwritable — the file
+        keeps claiming no platform is up while every adapter is serving, and
+        nothing repairs it until the next restart because no further connect
+        event ever fires.  Rewriting from the live adapter set after startup
+        makes the persisted record self-healing.  Best-effort: status must
+        never be able to abort startup.
+        """
+        adapters = getattr(self, "adapters", None) or {}
+        try:
+            entries = list(adapters.items())
+        except AttributeError:
+            return
+        for platform, adapter in entries:
+            value = getattr(platform, "value", None) or (
+                platform if isinstance(platform, str) else None
+            )
+            if not value:
+                continue
+            if getattr(adapter, "has_fatal_error", False):
+                # Failure states are written by the connect/reconnect error
+                # paths; do not overwrite a retrying/fatal platform with
+                # "disconnected".
+                continue
+            state = "connected" if getattr(adapter, "_running", False) else "disconnected"
+            self._update_platform_runtime_status(
+                value,
+                platform_state=state,
+                error_code=None,
+                error_message=None,
+            )
+
     # ------------------------------------------------------------------
     # Per-platform circuit breaker (pause/resume) — used by the reconnect
     # watcher when a retryable failure recurs past a threshold, and by the
@@ -9175,6 +9211,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._running = True
         self._update_runtime_status("running")
+        # Adapters announce "connected" only once, during their own connect
+        # step; re-assert the live set so a lost or overwritten platform write
+        # cannot leave a fully connected gateway reporting an empty platforms
+        # map to health/status readers.
+        self._reconcile_platform_runtime_status()
 
         # Loop-liveness heartbeat (#66892): an asyncio task so a frozen loop
         # stops refreshing ``state/gateway.heartbeat``. Cancelled with the

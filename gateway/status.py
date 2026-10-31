@@ -296,6 +296,19 @@ def _parse_proc_stat_start_ticks(payload: str) -> Optional[int]:
     return value if value >= 0 else None
 
 
+_PROC_STAT_DIR = Path("/proc")
+
+
+def _proc_stat_start_ticks(pid: int) -> Optional[int]:
+    """Return field 22 of ``/proc/<pid>/stat`` (start time in clock ticks)."""
+    try:
+        return _parse_proc_stat_start_ticks(
+            (_PROC_STAT_DIR / str(pid) / "stat").read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
+        return None
+
+
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return a stable per-process start-time fingerprint, or None.
 
@@ -308,20 +321,18 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     we fall back to ``psutil.Process(pid).create_time()`` — a float epoch
     timestamp — quantized to an int (centiseconds) for stable equality.
 
-    The two sources are never mixed on a single platform: ``/proc`` always
-    succeeds first on Linux, and always fails on macOS/Windows so psutil is
-    always used there.  Because the guard only compares the value recorded at
-    spawn against the live value *on the same host*, the differing units across
-    platforms are irrelevant — only same-source equality matters.
+    The two sources are never mixed on the same host, because the units are
+    not comparable: a tick count compared against a centisecond epoch
+    timestamp is a guaranteed mismatch that callers would read as "the file
+    belongs to a different process".  A Linux host therefore never falls back
+    to psutil — when ``/proc`` exists but the read fails, the fingerprint is
+    reported as unknown and the guard degrades to PID-only comparison instead
+    of reporting a false mismatch.  (Issue: gateway_state.json dropping back
+    to ``gateway_state=starting`` with an empty ``platforms`` map.)
     """
-    stat_path = Path(f"/proc/{pid}/stat")
-    try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        parsed = _parse_proc_stat_start_ticks(stat_path.read_text(encoding="utf-8"))
-        if parsed is not None:
-            return parsed
-    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
-        pass
+    proc_root_exists = _PROC_STAT_DIR.exists()
+    if proc_root_exists:
+        return _proc_stat_start_ticks(pid)
 
     # No /proc (macOS / Windows): psutil is a hard dependency and exposes a
     # cross-platform creation time.  Quantize to centiseconds so repeated reads
@@ -992,6 +1003,102 @@ def write_pid_file() -> None:
         raise
 
 
+def _start_time_matches(recorded: Any, live: Any) -> bool:
+    """Compare two start-time fingerprints, tolerating an unknown side.
+
+    The fingerprint is only a PID-reuse guard.  ``None`` on either side means
+    "unknown" (no ``/proc``, a transient read failure, a record written before
+    the field existed), and an unknown must not be reported as a mismatch: the
+    caller treats a mismatch as "this file belongs to another process" and
+    replaces the whole record, which throws away live platform state.
+    """
+    if recorded is None or live is None:
+        return True
+    try:
+        return int(recorded) == int(live)
+    except (TypeError, ValueError):
+        return True
+
+
+def _record_is_own(existing: dict[str, Any], current_record: dict[str, Any]) -> bool:
+    """True when the persisted record was written by *this* process.
+
+    A matching ``pid`` is sufficient: two concurrent processes cannot share a
+    PID, so a start-time difference against our own PID can only mean our own
+    fingerprint read drifted (transient ``/proc`` failure, or a value recorded
+    by an older writer using different units).  Treating that as "someone
+    else's file" would rebuild the record and blank out live platform state.
+    """
+    return existing.get("pid") == current_record["pid"]
+
+
+def _record_writer_is_live(existing: dict[str, Any], current_record: dict[str, Any]) -> bool:
+    """True when another *live* gateway process still owns the persisted record.
+
+    A live owner means the file is being shared with a concurrent writer on the
+    same HERMES_HOME (a second process in the same home, a lingering shutdown
+    writer).  Its lifecycle/platform observations describe the live gateway, so
+    they must be carried over rather than reset.  A dead PID, a recycled PID
+    (same number, different start time) or a record from another HERMES_HOME is
+    not an owner: that is an ordinary restart and the record starts fresh.
+    """
+    pid = existing.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or pid == current_record["pid"]:
+        return False
+    existing_home = existing.get("hermes_home")
+    if existing_home and not _same_hermes_home(existing_home, current_record["hermes_home"]):
+        return False
+    if not _start_time_matches(existing.get("start_time"), _get_process_start_time(pid)):
+        return False
+    return _pid_exists(pid)
+
+
+_OWNERSHIP_CHANGE_LOGGED = False
+
+
+def _takeover_runtime_status_record(
+    existing: dict[str, Any], current_record: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a record owned by a live concurrent writer into ours.
+
+    Only identity fields (pid/argv/start time) are process-scoped; lifecycle
+    state and the ``platforms`` map are observations about the running
+    gateway.  Rebuilding the record from defaults instead would report
+    ``gateway_state=starting`` with no connected platforms for a gateway whose
+    adapters are all up, which is exactly what a health gate rejects — and
+    since adapters only announce ``connected`` once, nothing would repair it
+    until the next restart.
+    """
+    global _OWNERSHIP_CHANGE_LOGGED
+    payload = dict(current_record)
+    payload.setdefault("kind", _GATEWAY_KIND)
+    inherited = {
+        "gateway_state": "starting",
+        "exit_reason": None,
+        "restart_requested": False,
+        "active_agents": 0,
+        "platforms": {},
+    }
+    for key in inherited:
+        if key in existing:
+            inherited[key] = existing[key]
+    if not isinstance(inherited.get("platforms"), dict):
+        inherited["platforms"] = {}
+    payload.update(inherited)
+    payload["updated_at"] = _utc_now_iso()
+    if not _OWNERSHIP_CHANGE_LOGGED:
+        _OWNERSHIP_CHANGE_LOGGED = True
+        logger.warning(
+            "Runtime status file was owned by live pid %s; took it over for pid %s "
+            "while preserving gateway_state=%s and %d platform state(s)",
+            existing.get("pid"),
+            current_record["pid"],
+            payload.get("gateway_state"),
+            len(payload["platforms"]),
+        )
+    return payload
+
+
 def write_runtime_status(
     *,
     gateway_state: Any = _UNSET,
@@ -1007,12 +1114,15 @@ def write_runtime_status(
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
     current_record = _build_pid_record()
-    payload = _read_json_file(path)
-    if (
-        not isinstance(payload, dict)
-        or payload.get("pid") != current_record["pid"]
-        or payload.get("start_time") != current_record["start_time"]
-    ):
+    existing = _read_json_file(path)
+    if isinstance(existing, dict) and _record_is_own(existing, current_record):
+        # Read-merge-write: fields the caller did not pass keep their value.
+        payload = existing
+    elif isinstance(existing, dict) and _record_writer_is_live(existing, current_record):
+        payload = _takeover_runtime_status_record(existing, current_record)
+    else:
+        # No record, unreadable record, dead writer, or a recycled PID: this is
+        # a fresh start, so there is nothing truthful to carry over.
         payload = _build_runtime_status_record()
     payload.setdefault("platforms", {})
     payload["kind"] = current_record["kind"]
