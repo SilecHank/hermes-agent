@@ -2327,6 +2327,32 @@ _GATEWAY_MEDIA_PLACEHOLDER_RE = re.compile(
     r"^\[User sent (?:an image|audio|a video|a file):[^\]\r\n]*\]$",
     re.MULTILINE,
 )
+# Auto vision enrichment rewrites an image turn into one of these blocks before
+# routing.  None of them is text the user wrote: the first carries the model's
+# own description, the other two are failure notices.  Left in place they make a
+# screenshot look like a customer question, which is answered with a product
+# clarification for an image the governed path cannot route anyway.
+_GATEWAY_VISION_DESCRIPTION_RE = re.compile(
+    r"\[The user sent an image~ Here's what I can see:.*?\]",
+    re.DOTALL,
+)
+_GATEWAY_VISION_FAILURE_RE = re.compile(
+    r"\[The user sent an image but [^\]]*\]",
+    re.DOTALL,
+)
+_GATEWAY_VISION_HINT_RE = re.compile(
+    r"\[If you need a closer look, use vision_analyze with image_url:[^\]]*\]"
+)
+
+
+def _strip_turn_scaffolding(text: str) -> str:
+    """Remove gateway-injected notes so only user-authored text remains."""
+    text = _GATEWAY_IDENTITY_NOTE_RE.sub(" ", str(text or ""))
+    text = _GATEWAY_MEDIA_PLACEHOLDER_RE.sub(" ", text)
+    text = _GATEWAY_VISION_DESCRIPTION_RE.sub(" ", text)
+    text = _GATEWAY_VISION_FAILURE_RE.sub(" ", text)
+    text = _GATEWAY_VISION_HINT_RE.sub(" ", text)
+    return text.strip()
 
 
 def user_authored_text(message: str, business_message: str | None = None) -> str:
@@ -2343,10 +2369,8 @@ def user_authored_text(message: str, business_message: str | None = None) -> str
     agent answers the attachment itself.
     """
     if business_message is not None:
-        return str(business_message).strip()
-    text = _GATEWAY_IDENTITY_NOTE_RE.sub(" ", str(message or ""))
-    text = _GATEWAY_MEDIA_PLACEHOLDER_RE.sub(" ", text)
-    return text.strip()
+        return _strip_turn_scaffolding(str(business_message))
+    return _strip_turn_scaffolding(str(message or ""))
 
 
 def _prepare_gateway_ivd_boundary(

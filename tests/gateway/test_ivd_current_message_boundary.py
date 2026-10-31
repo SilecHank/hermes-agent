@@ -109,3 +109,45 @@ def test_captioned_image_turn_still_routes_into_the_ivd_engine():
                                       business_message='这个质控图怎么判读')
     assert [item['question'] for item in engine]==[_NOTE]
     assert engine[0]['business_question']=='这个质控图怎么判读'
+
+
+_VISION_OK=("[The user sent an image~ Here's what I can see:\n"
+            "一张检测报告截图，标题 NIFTY，含 QC 表格]\n"
+            "[If you need a closer look, use vision_analyze with "
+            "image_url: /home/slim/.hermes/cache/images/img_1.jpg ~]")
+_VISION_FAIL=("[The user sent an image but I couldn't quite see it this time (>_<) "
+              "You can try looking at it yourself with vision_analyze using "
+              "image_url: /home/slim/.hermes/cache/images/img_2.jpg]")
+_VISION_ERROR=("[The user sent an image but something went wrong when I tried to "
+               "look at it~ You can try examining it yourself with vision_analyze "
+               "using image_url: /home/slim/.hermes/cache/images/img_3.jpg]")
+
+
+@pytest.mark.parametrize('scaffold',[_VISION_OK,_VISION_FAIL,_VISION_ERROR])
+def test_auto_vision_enrichment_is_not_user_text(scaffold):
+    """Auto vision enrichment must not turn a screenshot into a customer case.
+
+    ``_enrich_message_with_images`` rewrites an image turn into a description
+    block or a failure notice before routing.  None of those blocks is text the
+    user wrote, so the turn has to bypass the IVD engine -- otherwise a bare
+    screenshot is answered with a product clarification for an image the
+    governed path could not route anyway.
+    """
+    from gateway.run import user_authored_text
+    message=_NOTE+'\n'+scaffold
+    assert user_authored_text(message)==""
+    runner=_runner();engine=[];guard=[]
+    with patch('gateway.ivd_runtime.ivd_engine_mode',return_value='package'), \
+         patch('gateway.ivd_runtime.execute_exclusive_ivd_turn',side_effect=lambda *a,**kw:engine.append(kw)), \
+         patch('gateway.after_sales_guard.prepare_after_sales_turn',side_effect=lambda *a,**kw:guard.append(kw) or None):
+        _,turn=runner._prepare_ivd_lifecycle({},platform='weixin',message=message,history=[])
+    assert engine==[] and guard==[]
+    assert turn is not None and turn.context=="" and turn.direct_response==""
+
+
+@pytest.mark.parametrize('scaffold',[_VISION_OK,_VISION_FAIL,_VISION_ERROR])
+def test_vision_enrichment_keeps_a_real_caption(scaffold):
+    """Enrichment plus a caption is still a governed question: the caption survives."""
+    from gateway.run import user_authored_text
+    message=_NOTE+'\n'+scaffold+'\n这个质控图怎么判读'
+    assert user_authored_text(message)=='这个质控图怎么判读'
