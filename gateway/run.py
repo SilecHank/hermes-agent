@@ -22155,6 +22155,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # optional and fail-open: a missing/invalid KB card never blocks a
             # platform message.
             _ivd_question_text = str(_current_business_text or "")
+            # Telemetry and replay group turns by what the user wrote. The IVD
+            # boundary already strips the inbound scaffolding (sender-identity
+            # note, media placeholders, auto vision notes) before deciding
+            # whether a turn carries a question; recording the unstripped body
+            # made every preview identical and turned unrelated turns into one
+            # "same question repeated" cluster.
+            _ivd_telemetry_text = user_authored_text(_ivd_question_text)
             _after_sales_turn = None
             # Managed IVD establishes its serving contract before legacy
             # routing, retrieval, or visible-answer work. Failures escape.
@@ -22226,7 +22233,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 tool_names=(),
                                 source_paths=_after_sales_turn.source_paths,
                                 validation_status="preflight_blocked",
-                                question_text=_ivd_question_text,
+                                question_text=_ivd_telemetry_text,
+                                question_has_user_text=bool(_ivd_telemetry_text),
                                 preflight_decision=_after_sales_turn.preflight_decision,
                                 preflight_action=_after_sales_turn.preflight_action,
                                 preflight_issues=_after_sales_turn.preflight_issues,
@@ -22279,7 +22287,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 tool_names=(),
                                 source_paths=_after_sales_turn.source_paths,
                                 validation_status="pass" if not _direct_result.get("preflight_blocked") else "preflight_blocked",
-                                question_text=_ivd_question_text,
+                                question_text=_ivd_telemetry_text,
+                                question_has_user_text=bool(_ivd_telemetry_text),
                                 answer_shape=_after_sales_turn.answer_shape,
                                 verified_fact_reuse="active_hit" if _direct_result.get("verified_fact_reused") else "off",
                             )
@@ -23805,7 +23814,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             if isinstance(_validation, dict)
                             else ()
                         ),
-                        question_text=_ivd_question_text,
+                        question_text=_ivd_telemetry_text,
+                        question_has_user_text=bool(_ivd_telemetry_text),
                         retrieval_snapshot=_ivd_retrieval_snapshot,
                         preflight_decision=(
                             _after_sales_turn.preflight_decision

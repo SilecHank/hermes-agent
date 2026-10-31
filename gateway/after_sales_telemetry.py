@@ -120,6 +120,7 @@ def build_runtime_event(
     validation_reasons: Iterable[str] = (),
     answer_text: str = "",
     question_text: str = "",
+    question_has_user_text: bool | None = None,
     retrieval_snapshot: dict[str, object] | None = None,
     preflight_decision: str = "",
     preflight_action: str = "",
@@ -167,6 +168,15 @@ def build_runtime_event(
         "verified_fact_reuse": str(verified_fact_reuse or "off")[:32],
         "question_preview": preview,
         "question_fingerprint": question_fingerprint(preview),
+        # Callers pass the user-authored text only. The flag keeps a textless
+        # turn (screenshot with no caption, runtime-injected notice) separable
+        # from a short question, so replay and alerting can group by what the
+        # user actually asked instead of by inbound scaffolding.
+        "question_has_user_text": (
+            bool(question_has_user_text)
+            if question_has_user_text is not None
+            else bool(preview)
+        ),
         "retrieval_outcome": classify_retrieval_outcome(retrieval),
         "retrieval_profile": str(retrieval.get("profile") or "inactive")[:64],
         "retrieval_stages": retrieval_stages,
