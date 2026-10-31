@@ -2334,10 +2334,14 @@ def _prepare_gateway_ivd_boundary(
         prepare_enabled_ivd_turn,
     )
 
-    from gateway.after_sales_guard import resolve_after_sales_task
+    from gateway.after_sales_guard import is_non_business_task, resolve_after_sales_task
     task = resolve_after_sales_task(config.get("after_sales_guard") or {}, message)
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
     mode = ivd_engine_mode(config, platform=platform)
+    if is_non_business_task(task):
+        # A greeting, a question about the assistant, a maintenance instruction
+        # or a runtime notice never enters the IVD engine.
+        return prepared, None
     if mode == "package":
         return prepared, execute_exclusive_ivd_turn(
             prepared,
@@ -3661,7 +3665,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> tuple[Any, Any]:
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
-        from gateway.after_sales_guard import resolve_after_sales_task
+        from gateway.after_sales_guard import is_non_business_task, resolve_after_sales_task
         store = getattr(self, "session_store", None)
         getter = getattr(store, "get_session_metadata", None)
         pending = (getter(session_key, "ivd_pending_task")
@@ -3680,7 +3684,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # A selected new task supersedes old authority. Admitted same-task
             # updates commit their recomputed state below without a transient gap.
             setter(session_key, "ivd_pending_task", None)
-        if task.get("intent") == "social":
+        if task.get("intent") == "social" or is_non_business_task(task):
             from gateway.after_sales_guard import AfterSalesTurn
             return None, AfterSalesTurn(context="", facts={}, validator=None,
                                        allowed_numeric_claims=(), task_contract=task)

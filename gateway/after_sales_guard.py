@@ -405,6 +405,22 @@ ESCALATION_SHAPES = {"", "standard", "clarification", "diagnostic", "unknown",
                      "direct_fact", "answer"}
 
 
+def is_non_business_task(task_contract: Any) -> bool:
+    """True when the resolver said this turn is not a customer case.
+
+    The KB resolver publishes `task_kind` (social / meta / operator / business /
+    unknown) precisely so the gateway can decide whether the after-sales evidence
+    contract applies at all.  Only `social` used to be honoured, so a message
+    that talked about the assistant itself, a maintenance instruction, or a
+    runtime notice still entered the IVD engine and came back as a product
+    clarification.
+    """
+    task = task_contract if isinstance(task_contract, dict) else {}
+    return str(task.get("task_kind") or "") in {
+        "social", "meta", "operator", "unknown",
+    }
+
+
 def is_business_question(task_contract: Any, message: str) -> bool:
     """True when the message is an IVD business question worth routing.
 
