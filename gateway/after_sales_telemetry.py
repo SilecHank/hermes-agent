@@ -121,6 +121,7 @@ def build_runtime_event(
     answer_text: str = "",
     question_text: str = "",
     question_has_user_text: bool | None = None,
+    ivd_engine_entered: bool | None = None,
     retrieval_snapshot: dict[str, object] | None = None,
     preflight_decision: str = "",
     preflight_action: str = "",
@@ -198,6 +199,14 @@ def build_runtime_event(
             "pipeline_action": str(preflight_action or "unknown")[:64],
             "issues": gate_issues,
         }
+    # A turn the governed engine never handled (screenshot with no caption, a
+    # runtime notice, a social turn) still reaches this recorder, and until now
+    # it was indistinguishable from a governed answer: route_id falls back to
+    # "standard" and route_version to "". Alerting read that silence as "a
+    # textless turn entered the business chain" and fired on every correctly
+    # bypassed media turn. Record the routing fact instead of inferring it.
+    if ivd_engine_entered is not None:
+        event["ivd_engine_entered"] = bool(ivd_engine_entered)
     skill_metrics = skill_snapshot or {}
     event.update(
         {
