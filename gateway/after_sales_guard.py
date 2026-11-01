@@ -582,8 +582,12 @@ def decide_answer_mode(
     )
     control_stop = fast_path.get("disposition") == "control_stop"
     eligible = bool((plan.get("runtime_preflight") or {}).get("eligible", False))
+    # A planner control stop carries its ask in direct_response; that string is
+    # a stop notice, not an answer, so it must not count as a served reply and
+    # block the expert analysis that can still answer the question.
     structured_answer = bool(
-        str(fast_path.get("direct_response") or "").strip()
+        (str(fast_path.get("direct_response") or "").strip()
+         and fast_path.get("disposition") != "control_stop")
         or (fast_path.get("answer_card") or {}).get("stop_after_fast_path")
         or (plan.get("contact_fact") or {}).get("status") == "resolved"
     )
@@ -602,10 +606,26 @@ def decide_answer_mode(
     if (not business and not workbook_clarification and not control_stop
             and str(gate.get("decision") or "") != "block"):
         return AnswerModeDecision("agent", tuple(reasons), business, structured_answer, contract, gate)
+    unserved_contract = status in {"clarification", "pending_evidence", "blocked"}
+    # A navigation disposition only owns the turn when it actually located a
+    # controlled file or contact.  With zero candidates it is a dead end, and
+    # answering "还没定位到具体文件" hides the analysis the turn could still give.
+    navigation_turn = (fast_path.get("disposition") == "navigation"
+                       and bool((plan.get("source_location") or {}).get("candidates") or ()))
+    document_turn = (
+        str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
+        or any(shape.startswith("file_") for shape in shapes)
+    )
+    # 2026-11-02 口径（老板第三次重申）：业务问题只要结构化路径没产出答案，
+    # 就按 bounded 专家分析作答，不再输出「本轮已核对…」这类停发通知，也不再
+    # 回问产品/版本。停发通知对使用者零指引，还把本该给出的已核实部分一并吞掉。
+    # 文件投递与导航仍由各自的路由回答（要点名受控文件，不能由模型转述）。
     if (business
-            and (status in {"clarification", "pending_evidence"} or control_stop)
             and not workflow_clarification.get("workflow")
-            and is_analysis_question(plan, shapes, contract)):
+            and not structured_answer
+            and not navigation_turn
+            and not document_turn
+            and (unserved_contract or control_stop)):
         reasons.append("expert_mode_escalation")
         return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
     guarded = status in {"clarification", "pending_evidence", "blocked"} and not (
