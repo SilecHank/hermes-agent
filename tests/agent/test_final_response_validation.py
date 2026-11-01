@@ -326,3 +326,61 @@ def test_conversation_loop_charges_each_retry_to_its_own_budget():
 
     assert 'if _validation_decision.budget == "format":' in source
     assert "final_validation_format_retries += 1" in source
+
+
+def test_content_authority_speech_act_retry_asks_for_rephrasing_not_a_source_gap():
+    """A report-decision hit in one field is a wording defect, not a gap.
+
+    Observed on WeChat 2026-11-01 (NIFTY 21 fluctuation question): the draft
+    said 确诊 in a verification field, the retry was told "this is a
+    source-side limit, not a wording problem", and the rewritten answer came
+    back with too many claims and fell through to the canned notice.
+    """
+
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("content_authority:report_decision:verification",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "verification" in decision.retry_prompt
+    assert "Reword that field only" in decision.retry_prompt
+    assert "not a wording problem" not in decision.retry_prompt
+
+
+def test_content_authority_source_limit_still_reports_the_gap():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("content_authority:catalog_unavailable",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "not a wording problem" in decision.retry_prompt
+    assert "Reword that field only" not in decision.retry_prompt
+
+
+def test_claim_count_overflow_requests_a_merge_inside_the_contract():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("expert_claims_too_many",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+        format_attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert decision.budget == "format"
+    assert "Merge related claims" in decision.retry_prompt
