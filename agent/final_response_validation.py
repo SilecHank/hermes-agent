@@ -104,12 +104,23 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "Use only the claim kinds the execution contract allows; move the "
                 "content into an allowed kind instead of inventing a new one."
             )
+        elif reason == "claim_scope_invalid":
+            instruction = (
+                "Set every claim's scope to exactly general or product. Use "
+                "general for principle, mechanism, verification or boundary "
+                "claims that bind no product version; use product only when the "
+                "claim carries matching product_line and version. Values from "
+                "other contract fields (for example version_scope's "
+                "general_mechanism) are not claim scopes."
+            )
         elif reason.startswith("proposition_excerpt_link"):
             instruction = (
                 "Each fact, hypothesis, or verification_action claim needs at least "
                 "one support entry with evidence_id, start_line, quote and relation, "
-                "where quote is copied verbatim from that excerpt, and evidence_ids "
-                "must equal exactly the evidence_id values used in support. Boundary "
+                "where start_line is the excerpt's own start_line and quote is a "
+                "contiguous run copied verbatim from that excerpt's text (no "
+                "rephrasing, joining or spanning), and evidence_ids must equal "
+                "exactly the evidence_id values used in support. Boundary "
                 "and unknown claims may cite nothing."
             )
         elif reason == "evidence_required" or reason == "evidence_unresolved":

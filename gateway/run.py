@@ -3370,6 +3370,26 @@ def _parse_session_key(session_key: str) -> "dict | None":
     return None
 
 
+def _should_offer_home_channel(source: Any, *, has_history: bool) -> bool:
+    """Return whether the one-time "/sethome" tip belongs on this turn.
+
+    A home channel only decides where cron results and cross-platform
+    messages land, so the tip is DM-shaped advice. Offering it in a
+    group/forum/channel chat tells every participant to run an admin
+    command and buries the answer they actually asked for (2026-11-01: a
+    WeCom group's first message after the daily reset received the tip
+    instead of an answer). Webhooks deliver to configured targets and
+    local chats have no home channel at all.
+    """
+    if has_history:
+        return False
+    platform = getattr(source, "platform", None)
+    if not platform or platform in (Platform.LOCAL, Platform.WEBHOOK):
+        return False
+    chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+    return chat_type in {"", "dm", "direct", "private"}
+
+
 def _format_gateway_process_notification(evt: dict) -> "str | None":
     """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
     evt_type = evt.get("type", "completion")
@@ -14491,9 +14511,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 turn_sidecar_notes.append(_intro_note)
         
-        # One-time prompt if no home channel is set for this platform
+        # One-time prompt if no home channel is set for this platform.
+        # DM-only: a home channel is a cron/cross-platform delivery target, so
+        # group chats must not be told to run an admin command mid-conversation.
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        if _should_offer_home_channel(source, has_history=bool(history)):
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
             # Multiplex: home channel may live only in the profile secret
