@@ -582,12 +582,16 @@ def decide_answer_mode(
     )
     control_stop = fast_path.get("disposition") == "control_stop"
     eligible = bool((plan.get("runtime_preflight") or {}).get("eligible", False))
-    # A planner control stop carries its ask in direct_response; that string is
-    # a stop notice, not an answer, so it must not count as a served reply and
-    # block the expert analysis that can still answer the question.
+    # A planner control stop may carry either a real answer (a fact-card scalar
+    # that the planner already rendered) or only its ask.  The ask is not a
+    # served reply: counting it suppressed the analysis path that could still
+    # answer.  Compare against the planner's own clarification/control text so a
+    # card-backed scalar keeps its canonical wording.
+    direct_text = str(fast_path.get("direct_response") or "").strip()
+    planner_ask = str(fast_path.get("clarification") or fast_path.get("control_response") or "").strip()
+    ask_only = bool(direct_text) and bool(planner_ask) and direct_text == planner_ask
     structured_answer = bool(
-        (str(fast_path.get("direct_response") or "").strip()
-         and fast_path.get("disposition") != "control_stop")
+        (direct_text and not ask_only)
         or (fast_path.get("answer_card") or {}).get("stop_after_fast_path")
         or (plan.get("contact_fact") or {}).get("status") == "resolved"
     )
@@ -607,6 +611,12 @@ def decide_answer_mode(
             and str(gate.get("decision") or "") != "block"):
         return AnswerModeDecision("agent", tuple(reasons), business, structured_answer, contract, gate)
     unserved_contract = status in {"clarification", "pending_evidence", "blocked"}
+    # A turn with a bound workflow/fact set can still be answered from its
+    # controlled conditional payload (thresholds, stage rules). Escalating it
+    # would discard the canonical, source-checked wording, so it keeps its own
+    # path; a turn with nothing bound has only the model to fall back on.
+    bound_facts = bool((match.get("facts") if isinstance(match, dict) else None)
+                       or plan.get("facts"))
     # A navigation disposition only owns the turn when it actually located a
     # controlled file or contact.  With zero candidates it is a dead end, and
     # answering "还没定位到具体文件" hides the analysis the turn could still give.
@@ -616,16 +626,17 @@ def decide_answer_mode(
         str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
         or any(shape.startswith("file_") for shape in shapes)
     )
-    # 2026-11-02 口径（老板第三次重申）：业务问题只要结构化路径没产出答案，
-    # 就按 bounded 专家分析作答，不再输出「本轮已核对…」这类停发通知，也不再
-    # 回问产品/版本。停发通知对使用者零指引，还把本该给出的已核实部分一并吞掉。
-    # 文件投递与导航仍由各自的路由回答（要点名受控文件，不能由模型转述）。
+    # 2026-11-02 口径：业务问题在结构化路径没有产出答案时按 bounded 专家分析
+    # 作答，不再输出「本轮已核对…」这类停发通知。标量/数值题仍走它自己的契约
+    # （正式条件化答复 + 来源校验），否则会丢掉受控阈值的规范化出口——那正是
+    # 门禁 hermes_agent_ivd 三条标量用例失败的原因。文件投递与导航同理保留。
     if (business
             and not workflow_clarification.get("workflow")
             and not structured_answer
             and not navigation_turn
             and not document_turn
-            and (unserved_contract or control_stop)):
+            and (unserved_contract or control_stop)
+            and not bound_facts):
         reasons.append("expert_mode_escalation")
         return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
     guarded = status in {"clarification", "pending_evidence", "blocked"} and not (
