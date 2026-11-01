@@ -236,3 +236,38 @@ def test_boundary_claim_rejection_explains_the_support_contract():
 
     assert decision.action == "retry"
     assert "Boundary and unknown claims may cite nothing" in decision.retry_prompt
+
+
+def test_claim_scope_rejection_names_the_allowed_scope_values():
+    """scope is an enum; a generic hint burns the single retry (2026-11-01)."""
+
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("claim_scope_invalid",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "general or product" in decision.retry_prompt
+    assert "version_scope" in decision.retry_prompt
+    assert "workflow-boundary violation" not in decision.retry_prompt
+
+
+def test_excerpt_link_rejection_states_the_start_line_rule():
+    decision = evaluate_final_response(
+        lambda _text: {
+            "ok": False,
+            "reasons": ("proposition_excerpt_link_invalid",),
+            "fallback": "stop",
+        },
+        "draft",
+        attempts=0,
+    )
+
+    assert decision.action == "retry"
+    assert "start_line" in decision.retry_prompt
+    assert "verbatim" in decision.retry_prompt

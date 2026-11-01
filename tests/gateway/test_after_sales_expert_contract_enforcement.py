@@ -337,3 +337,38 @@ class ExpertModeMissCoverageTests(unittest.TestCase):
         self.assertEqual("block", result["preflight_decision"])
         self.assertEqual("stop_before_answer_generation", result["preflight_action"])
         self.assertTrue(result["direct_response"])
+
+    def test_expert_output_contract_states_the_claim_scope_domain(self):
+        # Regression (2026-11-01): the prompt named the scope field but never
+        # its value domain, so drafts copied the neighbouring route field
+        # (version_scope="general_mechanism") into scope and every claim was
+        # rejected as claim_scope_invalid on all three platforms.
+        plan = {
+            "runtime_preflight": {"eligible": True, "route_version": "test"},
+            "answer_template": {"style": "short_first"},
+            "preflight_gate": {"decision": "allow", "pipeline_action": "continue_final_answer"},
+            "product_identity": {"product_scope": "NIFTY", "product_scope_confirmed": True},
+            "initial_files": [],
+            "fast_path": {"hit": True, "answer_shape": "standard"},
+            "answer_shape": {"answer_shape": "diagnostic"},
+            "task_contract": {"intent": "diagnostic"},
+            "expert_route_contract": {
+                "status": "ready",
+                "formal_answer_allowed": False,
+                "bounded_expert_answer_allowed": True,
+                "allowed_claim_kinds": [
+                    "hypothesis",
+                    "verification_action",
+                    "boundary",
+                    "unknown",
+                ],
+                "issues": [],
+            },
+        }
+
+        result = self._render(plan, "无创样本两次XO分级不同是什么原因")
+        context = result["context"]
+
+        self.assertIn("scope只能取general或product", context)
+        self.assertIn("version_scope", context)
+        self.assertIn("start_line必须等于该摘录自带的start_line", context)
