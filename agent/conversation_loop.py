@@ -1020,6 +1020,10 @@ def run_conversation(
     _last_preflight_pressure: Optional[int] = None
     _preflight_compression_blocked = _ctx.preflight_compression_blocked
     final_validation_retries = 0
+    # Serialisation retries are counted apart from semantic repair retries: a
+    # draft that never parsed as the contracted object must not spend the one
+    # repair attempt the content/shape violations need (2026-11-01).
+    final_validation_format_retries = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
@@ -6304,6 +6308,15 @@ def run_conversation(
                         getattr(agent, "_final_response_validator", None),
                         final_response,
                         attempts=final_validation_retries,
+                        format_attempts=final_validation_format_retries,
+                        output_contract=str(
+                            getattr(
+                                getattr(agent, "_final_response_validator", None),
+                                "output_contract",
+                                "",
+                            )
+                            or ""
+                        ),
                     )
                 except Exception as _validation_exc:
                     logger.warning(
@@ -6326,7 +6339,10 @@ def run_conversation(
                     _validation_decision is not None
                     and _validation_decision.action == "retry"
                 ):
-                    final_validation_retries += 1
+                    if _validation_decision.budget == "format":
+                        final_validation_format_retries += 1
+                    else:
+                        final_validation_retries += 1
                     rejected_msg = agent._build_assistant_message(
                         assistant_message, "validation_retry"
                     )

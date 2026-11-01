@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+# Reasons that mean "the draft did not arrive as the contracted object" rather
+# than "the draft says something the sources do not support".  A serialisation
+# slip used to consume the single semantic repair attempt, so the provider got
+# one retry that only said "make it valid JSON" and then the turn fell straight
+# through to the canned boundary notice -- the second draft never had a chance
+# to be repaired for scope/citation shape (observed on WeCom, 2026-11-01).
+SERIALIZATION_REASONS = frozenset(
+    {
+        "expert_claims_json_invalid",
+        "expert_claims_structure_required",
+        "expert_claims_required",
+        "expert_claim_invalid",
+    }
+)
+
+
 @dataclass(frozen=True)
 class FinalResponseDecision:
     action: str
@@ -13,6 +29,10 @@ class FinalResponseDecision:
     reasons: tuple[str, ...] = ()
     retry_prompt: str = ""
     error: str = ""
+    # Which retry counter this decision charges: "format" for a draft that was
+    # never a valid contract object, "semantic" for a draft whose content or
+    # claim shape was rejected.
+    budget: str = "semantic"
 
 
 def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
@@ -162,6 +182,9 @@ def evaluate_final_response(
     *,
     attempts: int,
     max_retries: int = 1,
+    format_attempts: int = 0,
+    max_format_retries: int = 2,
+    output_contract: str = "",
 ) -> FinalResponseDecision:
     """Choose accept, one internal retry, or a deterministic safe fallback."""
 
@@ -196,7 +219,16 @@ def evaluate_final_response(
 
     reasons = tuple(str(reason) for reason in result.get("reasons") or ())
     fallback = str(result.get("fallback") or "").strip()
-    if attempts < max_retries:
+    serialization_only = bool(reasons) and set(reasons) <= SERIALIZATION_REASONS
+    if serialization_only:
+        # A semantic repair cannot fix a draft that never parsed; once the
+        # format budget is gone, stop instead of spending the content retry.
+        budget = "format" if format_attempts < max_format_retries else ""
+    elif attempts < max_retries:
+        budget = "semantic"
+    else:
+        budget = ""
+    if budget:
         reason_text = ", ".join(reasons) or "workflow_boundary_violation"
         repair_text = " ".join(
             f"{index}. {instruction}"
@@ -205,13 +237,23 @@ def evaluate_final_response(
                 start=1,
             )
         )
+        contract_text = str(output_contract or "").strip()
+        contract_note = (
+            # A format retry is the cheapest place to restate the contract: the
+            # draft that follows it is re-generated from scratch, so it must
+            # arrive inside the same shape the semantic repair assumes.
+            f" Re-emit inside this output contract verbatim: {contract_text}"
+            if budget == "format" and contract_text
+            else ""
+        )
         return FinalResponseDecision(
             action="retry",
             response=response,
             reasons=reasons,
+            budget=budget,
             retry_prompt=(
                 "[System validation: the proposed answer cannot be persisted or sent. "
-                f"Violations: {reason_text}. Repair instructions: {repair_text} "
+                f"Violations: {reason_text}. Repair instructions: {repair_text}{contract_note} "
                 "Answer the user's original question first. Preserve all supported "
                 "conclusions, mechanisms, and useful next steps from the rejected draft; "
                 "repair only the listed violations. Use the verified workflow facts in the "

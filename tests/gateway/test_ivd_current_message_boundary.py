@@ -151,3 +151,30 @@ def test_vision_enrichment_keeps_a_real_caption(scaffold):
     from gateway.run import user_authored_text
     message=_NOTE+'\n'+scaffold+'\n这个质控图怎么判读'
     assert user_authored_text(message)=='这个质控图怎么判读'
+
+
+_WECOM_ID = 'woMMGPDwAAkaqmcOIDLm5UcB4bAjPC9g'
+
+
+def test_wecom_sender_id_prefix_is_not_user_text():
+    """A WeCom group turn with no body is a media/empty turn, not a case.
+
+    Shared group sessions prefix every turn with ``[<sender>] ``; WeCom has no
+    display name there, so the token is the raw user id.  Left in, a textless
+    turn looks like a question with no product and is answered with a product
+    clarification (2026-11-01).
+    """
+    from gateway.run import user_authored_text
+    assert user_authored_text(_NOTE+'\n['+_WECOM_ID+'] ') == ""
+
+
+def test_wecom_sender_id_prefix_keeps_the_real_question():
+    from gateway.run import user_authored_text
+    message = _NOTE+'\n['+_WECOM_ID+'] 重抽血做出来是XO（+），可能是什么原因'
+    assert user_authored_text(message) == '重抽血做出来是XO（+），可能是什么原因'
+
+
+def test_bracketed_label_the_user_typed_is_not_stripped():
+    """Only id-shaped tokens are scaffolding; a label the user typed survives."""
+    from gateway.run import user_authored_text
+    assert user_authored_text('[NIFTY] 这个怎么判') == '[NIFTY] 这个怎么判'

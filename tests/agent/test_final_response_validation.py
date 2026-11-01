@@ -271,3 +271,58 @@ def test_excerpt_link_rejection_states_the_start_line_rule():
     assert decision.action == "retry"
     assert "start_line" in decision.retry_prompt
     assert "verbatim" in decision.retry_prompt
+
+
+def _json_invalid(_text):
+    return {"ok": False, "reasons": ("expert_claims_json_invalid",), "fallback": "safe"}
+
+
+def test_serialisation_slip_does_not_spend_the_semantic_retry():
+    """A draft that never parsed must not consume the one repair attempt.
+
+    Observed on WeCom 2026-11-01: draft 1 arrived with broken JSON, the single
+    retry only said "make it valid JSON", draft 2 then failed scope/citation
+    shape and the turn fell through to the canned boundary notice.
+    """
+    decision = evaluate_final_response(_json_invalid, "draft", attempts=0, format_attempts=0)
+
+    assert decision.action == "retry"
+    assert decision.budget == "format"
+
+
+def test_format_retry_restates_the_output_contract():
+    decision = evaluate_final_response(
+        _json_invalid, "draft", attempts=0, output_contract="CONTRACT-TEXT"
+    )
+
+    assert "CONTRACT-TEXT" in decision.retry_prompt
+
+
+def test_semantic_retry_survives_a_format_retry():
+    decision = evaluate_final_response(
+        lambda _text: {"ok": False, "reasons": ("claim_scope_invalid",), "fallback": "safe"},
+        "draft",
+        attempts=0,
+        format_attempts=2,
+    )
+
+    assert decision.action == "retry"
+    assert decision.budget == "semantic"
+
+
+def test_format_retry_budget_is_bounded():
+    decision = evaluate_final_response(
+        _json_invalid, "draft", attempts=0, format_attempts=2
+    )
+
+    assert decision.action == "fallback"
+    assert decision.response == "safe"
+
+
+def test_conversation_loop_charges_each_retry_to_its_own_budget():
+    source = (Path(__file__).resolve().parents[2] / "agent" / "conversation_loop.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'if _validation_decision.budget == "format":' in source
+    assert "final_validation_format_retries += 1" in source
