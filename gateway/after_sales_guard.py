@@ -308,8 +308,12 @@ def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
     """Explain a source-validation stop without inventing a missing library file."""
     state = str(turn.source_location.get("status") or "")
     if state == "multiple_formal_candidates":
-        discriminator = str(turn.source_location.get("missing_discriminator") or "版本")
-        return f"已定位到多个正式资料候选，需要先确认{discriminator}后才能继续核实。"
+        # 多个候选通常是同一份文件的多个版本：选版本是系统该做的事，
+        # 问到使用者头上等于让问题停在这里。
+        return (
+            "同类正式资料存在多个版本，我按当前执行版本核对后再给结论。"
+            "如果这一步不是常规流程（例如复检、重建库或换方法），说明是哪一种，我据此收窄。"
+        )
     if state == "internal_lookup_blocked":
         return (
             "这次正式资料定位未完成，暂不输出未经核实的结论。"
@@ -349,7 +353,10 @@ EXPERT_CONTRACT_MECHANISM_BOUNDARY = (
 )
 EXPERT_CONTRACT_EVIDENCE_ASKS = {
     "parameter_resolution": "请补充实验阶段、样本类型与所用方法，我会按对应正式 SOP 重新核实。",
-    "data_interpretation": "请补充样本信息与对应的报告规则版本，我会按正式规则重新核实。",
+    "data_interpretation": (
+        "请补充样本信息与涉及的报告环节（报告生成、报出规则或复检流程），"
+        "报告规则版本我按项目自己核对。"
+    ),
     "after_sales_diagnosis": (
         "请补充会改变判断的现场事实，例如是否首次检测、同批次其它样本表现与关键质控结果。"
     ),
@@ -702,7 +709,8 @@ def build_preflight_block_result(
     """Build a direct Chinese response without invoking the model."""
     fallback = (
         "当前检索计划包含待验证或非正式来源，暂不能据此给出结论。"
-        "请补充产品名称、版本或SOP编号，我会改用正式来源继续核实。"
+        "告诉我项目名称和涉及的那一步（提取、建库、上机或分析），我按这两项改用正式来源继续核实；"
+        "适用版本和文件编号我自己核对。"
     )
     if ({"expert_route_contract_not_ready","planner_control_stop"} & set(turn.preflight_issues)) and turn.direct_response:
         fallback = turn.direct_response
@@ -1861,13 +1869,18 @@ def _render_fast_response_context(
             direct_response = build_expert_contract_stop_response(expert_contract)
         elif scalar_question and not workflow_clarification.get("workflow"):
             envelope = plan.get("context_envelope") or {}
-            labels = {"product_line": "产品名称", "product_version": "适用版本",
-                      "method": "实验方法", "workflow_step": "具体步骤", "sample_type": "样本类型"}
+            # 只追问使用者答得出的字段。'适用版本'是系统自己要解析的检索条件，
+            # 追它会让每一个参数类问题都死在同一个给不出的字段上。
+            labels = {"product_line": "产品名称", "method": "实验方法",
+                      "workflow_step": "具体步骤", "sample_type": "样本类型"}
             missing = [labels[key] for key in envelope.get("missing") or ()
                        if key in labels and not envelope.get(key)]
             if not envelope.get("product_line") and "产品名称" not in missing:
                 missing.insert(0, "产品名称")
-            request = "请确认" + "、".join(missing) + "。" if missing else "需要进一步核对对应正式来源。"
+            if not envelope.get("workflow_step") and "具体步骤" not in missing:
+                missing.append("具体步骤")
+            request = ("请确认" + "、".join(missing) + "；适用版本和文件编号我自己核对。"
+                       if missing else "适用版本和文件编号我自己核对。")
             direct_response = "现有上下文或正式证据不足，暂不输出未经核实的正式数值结论。" + request
         elif (str(answer_shape.get("answer_shape") or "") == "diagnostic"
               or workflow_clarification.get("workflow")):
