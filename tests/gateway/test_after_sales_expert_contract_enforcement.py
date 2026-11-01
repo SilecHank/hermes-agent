@@ -36,7 +36,7 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         loader.start()
         self.addCleanup(loader.stop)
 
-    def test_expert_contract_without_evidence_stops_numeric_rendering(self):
+    def test_expert_contract_without_evidence_escalates_instead_of_stopping(self):
         plan = {
         "runtime_preflight": {"eligible": True, "route_version": "test"},
         "answer_template": {"style": "short_first"},
@@ -68,13 +68,14 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
                 match=None,
             )
 
-            self.assertTrue(result["direct_response"])
-            self.assertIn("暂不输出未经核实的正式数值结论", result["direct_response"])
-            self.assertEqual("clarification", result["answer_shape"])
-            self.assertEqual("block", result["preflight_decision"])
-            self.assertEqual("stop_before_answer_generation", result["preflight_action"])
+            # 2026-11-02：契约未达 serving 层级不再停发，改按 bounded 专家
+            # 分析作答；数值仍不得作为正式结论输出。
+            self.assertEqual("", result["direct_response"])
+            self.assertNotEqual("block", result["preflight_decision"])
+            self.assertIn("[专家模式]", result["context"])
+            self.assertEqual("expert_mode_auto_fallback", result["route_id"])
 
-    def test_pending_evidence_also_stops_unverified_rendering(self):
+    def test_pending_evidence_also_escalates_unverified_rendering(self):
         plan = {
             "runtime_preflight": {"eligible": True, "route_version": "test"},
             "answer_template": {"style": "short_first"},
@@ -102,11 +103,9 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
                 match=None,
             )
 
-        self.assertTrue(result["direct_response"])
-        self.assertIn("暂不输出未经核实的正式数值结论", result["direct_response"])
-        self.assertEqual("clarification", result["answer_shape"])
-        self.assertEqual("block", result["preflight_decision"])
-        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
+        self.assertEqual("", result["direct_response"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertIn("[专家模式]", result["context"])
 
     def _render_with_contract(self, contract: dict, message: str = "NIFTY结果阈值是多少"):
         plan = {
@@ -143,10 +142,10 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("告诉我项目名称", result["direct_response"])
-        self.assertNotIn("版本或 SOP 编号", result["direct_response"])
-        self.assertEqual("block", result["preflight_decision"])
-        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
+        # 不向使用者索取产品/版本：没有答案就转 bounded 分析，停发通知一律不发。
+        self.assertEqual("", result["direct_response"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertIn("[专家模式]", result["context"])
 
     def test_stop_wording_asks_for_version_when_product_is_known(self):
         result = self._render_with_contract(
@@ -161,12 +160,11 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
-        # 版本与文件编号由系统自查：不向用户索取他手上没有的东西。
-        self.assertIn("产品已确认", result["direct_response"])
-        self.assertIn("这一步是提取", result["direct_response"])
-        self.assertNotIn("请补充产品版本", result["direct_response"])
-        self.assertNotIn("SOP 编号", result["direct_response"])
-        self.assertEqual("block", result["preflight_decision"])
+        # 版本与文件编号由系统自查：既不索取，也不再用停发通知代替答案。
+        self.assertEqual("", result["direct_response"])
+        self.assertNotIn("请补充产品版本", str(result))
+        self.assertNotIn("SOP 编号", str(result.get("direct_response") or ""))
+        self.assertNotEqual("block", result["preflight_decision"])
 
     def test_mechanism_gap_states_boundary_instead_of_asking_version(self):
         result = self._render_with_contract(
@@ -182,11 +180,10 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("机制解释", result["direct_response"])
-        self.assertIn("不给数值、阈值和正式结论", result["direct_response"])
-        self.assertNotIn("请补充产品版本", result["direct_response"])
-        self.assertEqual("block", result["preflight_decision"])
-        self.assertEqual("clarification", result["answer_shape"])
+        self.assertEqual("", result["direct_response"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertEqual("expert_analysis", result["answer_shape"])
+        self.assertIn("[专家模式]", result["context"])
 
     def test_evidence_gap_asks_for_the_input_that_changes_the_judgement(self):
         result = self._render_with_contract(
@@ -201,9 +198,10 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("实验阶段、样本类型与所用方法", result["direct_response"])
-        self.assertNotIn("请补充产品名称", result["direct_response"])
-        self.assertEqual("block", result["preflight_decision"])
+        self.assertEqual("", result["direct_response"])
+        self.assertNotIn("请补充产品名称", str(result))
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertIn("[专家模式]", result["context"])
     def test_file_lookup_guard_does_not_ask_numeric_stage_or_known_version(self):
         from tempfile import TemporaryDirectory
         plan={"task_contract":{"intent":"sop_lookup"}, "runtime_preflight":{"eligible":True},
@@ -328,15 +326,17 @@ class ExpertModeMissCoverageTests(unittest.TestCase):
         self.assertEqual("expert_analysis", result["answer_shape"])
         self.assertFalse(result["expert_route_contract"])
 
-    def test_case_conclusion_question_keeps_the_gate(self):
+    def test_case_conclusion_question_escalates_to_bounded_analysis(self):
+        # 2026-11-02 口径：个案判读缺口也要给出可核实部分与边界，不再以
+        # 「本轮已核对…」停发通知收场。
         result = self._render(
             self._plan(capability="data_interpretation", intent="report_interpretation"),
             "这个样本的报告结论应该怎么判读",
         )
 
-        self.assertEqual("block", result["preflight_decision"])
-        self.assertEqual("stop_before_answer_generation", result["preflight_action"])
-        self.assertTrue(result["direct_response"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertEqual("", result["direct_response"])
+        self.assertIn("[专家模式]", result["context"])
 
     def test_expert_output_contract_states_the_claim_scope_domain(self):
         # Regression (2026-11-01): the prompt named the scope field but never

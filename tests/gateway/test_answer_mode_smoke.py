@@ -79,21 +79,23 @@ CASES = [
      "expert_analysis"),
     ("scalar parameter", "NIFTY 提取需要多少血浆",
      _plan(intent="parameter", fast_shape="conditional_scalar", plan_shape="clarification",
-           disposition="control_stop", eligible=True, contract_status=None), "clarify"),
+           disposition="control_stop", eligible=True, contract_status=None), "expert_analysis"),
     ("sop-bound troubleshooting", "NIFTY提取回收低怎么排查",
      _plan(intent="troubleshooting", fast_shape="sop_context_clarification",
            plan_shape="clarification", disposition="control_stop",
-           contract_status="clarification", issues=("product_scope_required",)), "clarify"),
+           contract_status="clarification", issues=("product_scope_required",)), "expert_analysis"),
     ("case conclusion", "这个样本的报告结论应该怎么判读",
      _plan(intent="report_interpretation", capability="data_interpretation",
-           contract_status="clarification", issues=("evidence_not_serving",)), "clarify"),
+           contract_status="clarification", issues=("evidence_not_serving",)), "expert_analysis"),
     ("file request", "把 SOP-JL-269 原件发我",
      _plan(intent="sop_lookup", fast_shape="file_delivery_short_answer",
            plan_shape="direct_fact", contract_status="clarification",
            issues=("evidence_not_serving",)), "clarify"),
+    # An unresolved contact card is not an answer: with no located candidate the
+    # turn goes to bounded analysis instead of a stop notice (2026-11-02).
     ("contact lookup", "CNVseq的产品经理是谁",
      _plan(fast_shape="contact_lookup_short_answer", disposition="navigation",
-           contract_status="clarification", issues=("product_scope_required",)), "agent"),
+           contract_status="clarification", issues=("product_scope_required",)), "expert_analysis"),
     ("answered fast path", "NIFTY手工提取血浆体积是多少",
      _plan(intent="parameter", fast_shape="sop_parameter_short_answer",
            plan_shape="direct_fact", eligible=True, disposition="answer",
@@ -137,3 +139,30 @@ def test_case_conclusions_are_never_analysis():
         {"answer_shape": "standard"},
         {"capability": "data_interpretation"},
     ) is False
+
+
+def test_navigation_with_a_located_document_keeps_the_document_pointer():
+    # A narrowed document request must still be answered by pointing at the
+    # controlled file, not by an analysis of it.
+    plan = _plan(intent="sop_lookup", fast_shape="file_delivery_short_answer",
+                 plan_shape="direct_fact", disposition="navigation",
+                 contract_status="clarification", issues=("evidence_not_serving",))
+    plan["source_location"] = {"candidates": [{"file_name": "SOP-JL-110 B2"}]}
+    decision = decide_answer_mode(plan, message="NIFTY 提取的 SOP 在哪")
+    # Whatever the mode, the located document must own the reply: the turn may
+    # not be re-routed into expert analysis that summarises the file instead.
+    assert decision.mode != "expert_analysis", decision.reasons
+
+
+def test_a_control_stop_ask_is_not_a_served_answer():
+    # The ask text a planner stop carries in direct_response must not count as
+    # an answer, otherwise the stop notice is rendered while the analysis path
+    # that could still answer the question is suppressed.
+    plan = _plan(intent="parameter", fast_shape="conditional_scalar",
+                 plan_shape="clarification", disposition="control_stop",
+                 eligible=True, contract_status=None,
+                 direct_response="请补充提取或实验方法后，我再按对应正式SOP给出数值。")
+    decision = decide_answer_mode(plan, message="NIFTY 提取需要多少血浆")
+    assert decision.mode == "expert_analysis", decision.reasons
+    assert decision.structured_answer is False
+
