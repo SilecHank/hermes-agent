@@ -2353,6 +2353,27 @@ _GATEWAY_VISION_HINT_RE = re.compile(
 _GATEWAY_SENDER_PREFIX_RE = re.compile(
     r"^\s*\[(?=[^\]\r\n]*\d)[A-Za-z0-9_@.:\-]{12,64}\]\s*"
 )
+# Background jobs and gateway bookkeeping post their own turns into the chat:
+# ``[IMPORTANT: Background process proc_… completed normally (exit code 0).
+# Command: … Output: …]``, ``[IMPORTANT: MCP servers have been reloaded …]``,
+# ``[System note: …]``.  None of it is user-authored, but these turns arrive in
+# the user role carrying the session's topic -- so a regression run that
+# finishes right after a real answer gets routed as a business question,
+# preflight blocks it for missing evidence, and the customer sees a
+# clarification sentence appended to an answer that was already complete
+# (2026-11-01).  The completion notice spans several lines and embeds brackets,
+# so the whole-turn form is matched to the end of the turn, not to a ``]``.
+_GATEWAY_BACKGROUND_NOTICE_RE = re.compile(
+    r"\A\s*\[IMPORTANT: Background process .*\]\s*\Z",
+    re.DOTALL,
+)
+_GATEWAY_BACKGROUND_NOTICE_TAIL_RE = re.compile(
+    r"\[IMPORTANT: Background process .*\]\s*\Z",
+    re.DOTALL,
+)
+_GATEWAY_RUNTIME_NOTICE_RE = re.compile(
+    r"\[(?:IMPORTANT|System note): [^\]\r\n]*\]"
+)
 
 
 def _strip_turn_scaffolding(text: str) -> str:
@@ -2363,6 +2384,9 @@ def _strip_turn_scaffolding(text: str) -> str:
     text = _GATEWAY_VISION_DESCRIPTION_RE.sub(" ", text)
     text = _GATEWAY_VISION_FAILURE_RE.sub(" ", text)
     text = _GATEWAY_VISION_HINT_RE.sub(" ", text)
+    text = _GATEWAY_BACKGROUND_NOTICE_RE.sub(" ", text)
+    text = _GATEWAY_BACKGROUND_NOTICE_TAIL_RE.sub(" ", text)
+    text = _GATEWAY_RUNTIME_NOTICE_RE.sub(" ", text)
     return text.strip()
 
 

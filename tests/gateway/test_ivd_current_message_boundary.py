@@ -178,3 +178,56 @@ def test_bracketed_label_the_user_typed_is_not_stripped():
     """Only id-shaped tokens are scaffolding; a label the user typed survives."""
     from gateway.run import user_authored_text
     assert user_authored_text('[NIFTY] 这个怎么判') == '[NIFTY] 这个怎么判'
+
+
+_BACKGROUND_NOTICE = (
+    '[IMPORTANT: Background process proc_3fbbfa37e032 completed normally '
+    '(exit code 0).\n'
+    'Command: cd /home/slim/IVD-KnowledgeHub && python3 -B -m unittest discover '
+    "-s scripts -p 'test_*.py' > /tmp/kb.log 2>&1; echo \"exit=$?\"\n"
+    'Output:\n'
+    'exit=0\n'
+    '----------------------------------------------------------------------\n'
+    'Ran 2694 tests in 368.332s\n'
+    'OK (skipped=14)\n]'
+)
+
+
+def test_background_completion_notice_never_enters_the_ivd_engine():
+    """A finished background job is a runtime event, not a customer question.
+
+    Completion notices arrive in the user role and inherit the session topic, so
+    the turn used to be routed as a business question, blocked at preflight for
+    missing evidence, and answered with a clarification sentence appended to an
+    answer the user had already received in full (2026-11-01).
+    """
+    from gateway.run import user_authored_text
+    message = _NOTE + '\n' + _BACKGROUND_NOTICE
+    assert user_authored_text(message) == ''
+    runner = _runner()
+    engine = []
+    guard = []
+    with patch('gateway.ivd_runtime.ivd_engine_mode', return_value='package'), \
+         patch('gateway.ivd_runtime.execute_exclusive_ivd_turn', side_effect=lambda *a, **kw: engine.append(kw)), \
+         patch('gateway.after_sales_guard.prepare_after_sales_turn', side_effect=lambda *a, **kw: guard.append(kw) or None):
+        _, turn = runner._prepare_ivd_lifecycle({}, platform='weixin', message=message, history=[])
+    assert engine == [] and guard == []
+    assert turn is not None and turn.context == '' and turn.direct_response == ''
+
+
+def test_background_notice_after_a_question_keeps_the_question():
+    from gateway.run import user_authored_text
+    message = _NOTE + '\n21 波动怎么排查\n' + _BACKGROUND_NOTICE
+    assert user_authored_text(message) == '21 波动怎么排查'
+
+
+def test_gateway_system_note_is_not_user_text():
+    from gateway.run import user_authored_text
+    message = _NOTE + '\n[System note: The previous session reached the prompt-token quality limit.]'
+    assert user_authored_text(message) == ''
+
+
+def test_mcp_reload_notice_is_not_user_text():
+    from gateway.run import user_authored_text
+    message = '[IMPORTANT: MCP servers have been reloaded. 2 tools added. The tool list for this conversation has been updated accordingly.]'
+    assert user_authored_text(message) == ''
