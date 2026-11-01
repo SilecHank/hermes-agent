@@ -18,6 +18,7 @@ SERIALIZATION_REASONS = frozenset(
         "expert_claims_structure_required",
         "expert_claims_required",
         "expert_claim_invalid",
+        "expert_claims_too_many",
     }
 )
 
@@ -113,7 +114,17 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "quotation mark or drop the quotation instead."
             )
         elif reason == "expert_claims_required":
-            instruction = "Provide between one and eight claims."
+            instruction = (
+                "Provide between one and eight claims; merge rather than splitting "
+                "one finding into several claims."
+            )
+        elif reason == "expert_claims_too_many":
+            instruction = (
+                "You returned more than eight claims. Merge related claims so the "
+                "list is at most eight: combine verification actions that share one "
+                "check, fold repeated boundary or unknown statements into one, and "
+                "keep every supported conclusion and evidence_id that survives."
+            )
         elif reason == "expert_claim_invalid":
             instruction = (
                 "Every claim needs a non-empty text value; drop any claim that "
@@ -148,7 +159,32 @@ def _repair_instructions(reasons: tuple[str, ...]) -> tuple[str, ...]:
                 "Cite only evidence_id values present in the supplied bundle; drop "
                 "claims whose evidence cannot be resolved."
             )
-        elif reason.startswith("content_authority:") or reason == "expert_contract_not_ready":
+        elif reason.startswith("content_authority:"):
+            parts = reason.split(":")
+            category = parts[1] if len(parts) > 1 else ""
+            field = parts[2] if len(parts) > 2 else "text"
+            if category in {"catalog_unavailable", "source_scope_unavailable"}:
+                instruction = (
+                    "This is a source-side limit, not a wording problem: do not restate "
+                    "the same conclusion. State what the available sources do not "
+                    "establish and which document or product detail is needed."
+                )
+            else:
+                # A report-decision / parameter-directive / measurement hit is a
+                # speech act in one field, not a gap in the corpus. Telling the
+                # model "not a wording problem" here made it rewrite into a
+                # sources-missing statement and blow the claim budget
+                # (2026-11-01 NIFTY 21 turn).
+                instruction = (
+                    f"The `{field}` field performs an act this answer is not licensed "
+                    "to perform. Reword that field only: describe the data to look at, "
+                    "the check to compare, or defer the act to the formal document or "
+                    "the responsible clinician (按正式报告规则执行 / 由临床决定). If the "
+                    "sentence cannot be rewritten that way, replace it with a boundary "
+                    "claim saying the source does not establish that decision. Keep the "
+                    "other claims, their evidence_ids and the at-most-eight count."
+                )
+        elif reason == "expert_contract_not_ready":
             instruction = (
                 "This is a source-side limit, not a wording problem: do not restate "
                 "the same conclusion. State what the available sources do not "
