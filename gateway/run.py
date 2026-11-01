@@ -2343,11 +2343,22 @@ _GATEWAY_VISION_FAILURE_RE = re.compile(
 _GATEWAY_VISION_HINT_RE = re.compile(
     r"\[If you need a closer look, use vision_analyze with image_url:[^\]]*\]"
 )
+# Shared multi-user sessions prefix every turn with "[<sender>] ".  On WeCom the
+# sender has no display name, so that token is the raw user id
+# ("[woMMGPDwAAkaqmcOIDLm5UcB4bAjPC9g] ...").  Left in, a media-only or empty
+# turn still looks like user text: it enters the governed answer path with no
+# product scope and comes back as a product clarification, and real questions
+# carry the id into the question itself.  Only ids are matched -- a bracketed
+# product or short label the user typed does not look like one.
+_GATEWAY_SENDER_PREFIX_RE = re.compile(
+    r"^\s*\[(?=[^\]\r\n]*\d)[A-Za-z0-9_@.:\-]{12,64}\]\s*"
+)
 
 
 def _strip_turn_scaffolding(text: str) -> str:
     """Remove gateway-injected notes so only user-authored text remains."""
     text = _GATEWAY_IDENTITY_NOTE_RE.sub(" ", str(text or ""))
+    text = _GATEWAY_SENDER_PREFIX_RE.sub(" ", text)
     text = _GATEWAY_MEDIA_PLACEHOLDER_RE.sub(" ", text)
     text = _GATEWAY_VISION_DESCRIPTION_RE.sub(" ", text)
     text = _GATEWAY_VISION_FAILURE_RE.sub(" ", text)

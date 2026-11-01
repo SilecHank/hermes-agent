@@ -929,6 +929,17 @@ class CriticalAfterSalesValidator:
     def requires_structured_claims(self) -> bool:
         return self.turn.expert_route_contract.get('status') not in (None,'','none')
 
+    @property
+    def output_contract(self) -> str:
+        """Claim contract restated on a serialisation retry.
+
+        A draft that failed to parse is re-generated from scratch, so the retry
+        prompt has to carry the whole contract instead of only "make it valid
+        JSON" -- otherwise the second draft arrives outside the scope/citation
+        shape and the turn falls through to the canned boundary notice.
+        """
+        return EXPERT_CLAIMS_OUTPUT_CONTRACT if self.requires_structured_claims else ''
+
     def __call__(self, answer: str) -> dict[str, Any]:
         if self._last_result and answer == self._delivered_text:
             return dict(self._last_result)
