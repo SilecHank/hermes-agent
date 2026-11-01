@@ -162,7 +162,19 @@ def test_a_control_stop_ask_is_not_a_served_answer():
                  plan_shape="clarification", disposition="control_stop",
                  eligible=True, contract_status=None,
                  direct_response="请补充提取或实验方法后，我再按对应正式SOP给出数值。")
+    plan["fast_path"]["clarification"] = "请补充提取或实验方法后，我再按对应正式SOP给出数值。"
     decision = decide_answer_mode(plan, message="NIFTY 提取需要多少血浆")
     assert decision.mode == "expert_analysis", decision.reasons
     assert decision.structured_answer is False
+
+
+def test_a_fact_card_scalar_answer_survives_a_control_stop():
+    # A card-backed scalar keeps its canonical wording even though the planner
+    # stops after it: only the planner's own ask may be discarded.
+    plan = _plan(intent="parameter", fast_shape="sop_parameter_short_answer",
+                 plan_shape="direct_fact", disposition="control_stop",
+                 eligible=True, contract_status=None, direct_response="200 µL")
+    decision = decide_answer_mode(plan, message="NIFTY手工提取血浆体积是多少")
+    assert decision.structured_answer is True
+    assert decision.mode != "expert_analysis", decision.reasons
 
