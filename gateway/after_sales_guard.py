@@ -138,6 +138,18 @@ class AfterSalesTurn:
         return legacy
 
     def _validate_legacy(self, answer: str, *, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        # A formal answer card is a deterministic render of a controlled source
+        # (active + formal_authority + declared source spans). Both the
+        # trusted-tool evidence rule and the scalar-uniqueness gate exist to
+        # stop the model inventing or mis-binding numbers; applied to the card's
+        # own text they reject every card answer, because a deterministic answer
+        # runs no tools and the card's parameter binding is already declared.
+        resolved = getattr(self, "resolved_answer", None)
+        card_text = str(getattr(resolved, "text", "") or "").strip()
+        if (str(getattr(resolved, "source_kind", "") or "") == "formal_answer_card"
+                and card_text and str(answer or "").strip() == card_text):
+            return {"ok": True, "reasons": [], "fallback": "",
+                    "normalized_response": card_text}
         if not (self.validator is not None and (self.facts or self.requires_source_validation)):
             if self.parameter_contract:
                 return {"ok": False, "reasons": ["formal_validator_unavailable"],
