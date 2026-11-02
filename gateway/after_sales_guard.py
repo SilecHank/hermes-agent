@@ -145,6 +145,17 @@ class AfterSalesTurn:
             return {"ok": True, "reasons": [], "fallback": ""}
         assert self.validator is not None
         if self.requires_source_validation and (not self.facts or self.parameter_contract):
+            # A formal answer card is already a deterministic render of a
+            # controlled source (active + formal_authority + source spans). The
+            # trusted-tool-evidence rule exists to stop the model inventing
+            # numbers; applying it to a card render blocks every card answer,
+            # because a deterministic answer runs no tools at all (api_calls=0).
+            resolved = getattr(self, "resolved_answer", None)
+            card_text = str(getattr(resolved, "text", "") or "").strip()
+            if (str(getattr(resolved, "source_kind", "") or "") == "formal_answer_card"
+                    and card_text and str(answer or "").strip() == card_text):
+                return {"ok": True, "reasons": [], "fallback": "",
+                        "normalized_response": card_text}
             trusted_claims, source_read, claim_sources = _trusted_tool_numeric_evidence_details(
                 messages or [],
                 self.source_paths,
