@@ -898,10 +898,11 @@ def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[
         after = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(text)}
         if before != after:
             reasons.append("presentation_numeric_claims_changed")
-        if turn.facts and turn.has_validator:
-            existing = turn.validate(text)
-            if not existing.get("ok"):
-                reasons.extend(existing.get("reasons") or ())
+        # NOTE: the legacy answer validator must NOT be re-run here.  It gates
+        # *model drafts* (scalar-uniqueness, trusted-tool evidence); the text
+        # arriving here is already a deterministic render, and re-running it
+        # rejected every formal card with scalar_claim_not_unique even though
+        # the body and its numbers were untouched (2026-11-02, live log).
     return {"ok": not reasons, "reasons": list(dict.fromkeys(reasons))}
 
 
