@@ -51,6 +51,24 @@ def test_a_deterministic_short_answer_route_is_served_verbatim():
     assert result["normalized_response"] == CARD_TEXT
 
 
+def test_presentation_validation_does_not_re_run_the_model_draft_gate():
+    # 2026-11-02 live log: reasons=['scalar_claim_not_unique'] came from
+    # _validate_direct_fact_presentation re-running turn.validate() on a
+    # deterministic card render whenever facts were bound. The model-draft gate
+    # must not be applied to already-rendered delivery text.
+    from gateway import after_sales_guard as guard
+
+    turn = _turn(source_kind="formal_answer_card")
+    object.__setattr__(turn, "facts", {"workflow_id": "demo"})
+
+    def _never(self, text, **_kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("legacy validator re-run on a rendered card")
+
+    object.__setattr__(turn, "validate", _never.__get__(turn, type(turn)))
+    result = guard._validate_direct_fact_presentation(turn, CARD_TEXT)
+    assert result["ok"] is True, result["reasons"]
+
+
 def test_a_model_drafted_answer_still_needs_source_evidence():
     # Same turn shape, but the submitted text is not the card render: the
     # trusted-tool-evidence rule must still apply.
