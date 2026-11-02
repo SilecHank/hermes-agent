@@ -41,6 +41,16 @@ def test_formal_answer_card_is_served_without_tool_evidence():
     assert result["normalized_response"] == CARD_TEXT
 
 
+def test_a_deterministic_short_answer_route_is_served_verbatim():
+    # The KB renders these; the model never runs, so the fabrication gates must
+    # not reject them (2026-11-02: route=sop_parameter_short_answer, api_calls=0).
+    turn = _turn(source_kind="resolved_card")
+    object.__setattr__(turn, "route_id", "sop_parameter_short_answer")
+    result = turn.validate(CARD_TEXT)
+    assert result["ok"] is True
+    assert result["normalized_response"] == CARD_TEXT
+
+
 def test_a_model_drafted_answer_still_needs_source_evidence():
     # Same turn shape, but the submitted text is not the card render: the
     # trusted-tool-evidence rule must still apply.
