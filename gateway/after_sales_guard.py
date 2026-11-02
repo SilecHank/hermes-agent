@@ -6,12 +6,15 @@ import importlib.util
 import hashlib
 import inspect
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
+
+logger = logging.getLogger(__name__)
 from typing import Any, Callable
 
 from gateway.ivd_evidence import build_runtime_evidence_id
@@ -144,12 +147,9 @@ class AfterSalesTurn:
         # stop the model inventing or mis-binding numbers; applied to the card's
         # own text they reject every card answer, because a deterministic answer
         # runs no tools and the card's parameter binding is already declared.
-        resolved = getattr(self, "resolved_answer", None)
-        card_text = str(getattr(resolved, "text", "") or "").strip()
-        if (str(getattr(resolved, "source_kind", "") or "") == "formal_answer_card"
-                and card_text and str(answer or "").strip() == card_text):
+        if _card_render_covers(self, answer):
             return {"ok": True, "reasons": [], "fallback": "",
-                    "normalized_response": card_text}
+                    "normalized_response": str(answer or "").strip()}
         if not (self.validator is not None and (self.facts or self.requires_source_validation)):
             if self.parameter_contract:
                 return {"ok": False, "reasons": ["formal_validator_unavailable"],
@@ -802,6 +802,12 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
         validation = {"ok": False, "reasons": ["presentation_failed"]}
         text = ""
     if not validation["ok"]:
+        logger.warning(
+            "IVD direct-fact delivery blocked: route=%s source_kind=%s reasons=%s",
+            getattr(turn, "route_id", ""),
+            str(getattr(getattr(turn, "resolved_answer", None), "source_kind", "") or ""),
+            list(validation.get("reasons") or ()),
+        )
         text = "当前回答的数值或来源未通过核对，暂不提供该结论。"
     return {
         "presentation_contract": dict(getattr(turn, "presentation_contract", {}) or {}),
@@ -827,6 +833,37 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
     }
 
 
+def _card_render_covers(turn: "AfterSalesTurn", text: str) -> bool:
+    """True when ``text`` is the formal card's own wording.
+
+    Presentation policy may reformat the delivery text (prefix, footer, source
+    attribution), so an exact equality check is too strict.  What must hold is
+    that the card body is present verbatim and that presentation added no new
+    numeric claim -- otherwise a card answer is blocked by the very gates that
+    exist to stop the model inventing numbers.
+    """
+    resolved = getattr(turn, "resolved_answer", None)
+    # ``from_fast_result`` labels a card that answered without a route_source
+    # string as ``resolved_card``; both mean "this text came from a card, not
+    # from the model".
+    kind = str(getattr(resolved, "source_kind", "") or "")
+    # A deterministic short-answer route never involves the model either: its
+    # text is rendered by the KB loader from controlled content, so the
+    # model-fabrication gates do not apply to it.
+    deterministic_route = str(getattr(turn, "route_id", "") or "").endswith("_short_answer")
+    if kind not in {"formal_answer_card", "resolved_card"} and not deterministic_route:
+        return False
+    card_text = str(getattr(resolved, "text", "") or "").strip()
+    candidate = str(text or "").strip()
+    if not card_text or not candidate:
+        return False
+    if candidate == card_text:
+        return True
+    if not candidate.startswith(card_text):
+        return False
+    extra = candidate[len(card_text):]
+    return not any(ch.isdigit() for ch in extra)
+
 def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[str, Any]:
     """Validate delivery text without inventing a tool-read receipt.
 
@@ -851,6 +888,11 @@ def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[
     )
     reasons.extend(decision.reasons)
     validator = getattr(turn, "validator", None)
+    if validator is not None and _card_render_covers(turn, text):
+        # The card is the source: its body is delivered verbatim and no new
+        # numeric claim was added by presentation. Re-running the scalar /
+        # trusted-tool gates here rejects every card answer.
+        return {"ok": not reasons, "reasons": list(dict.fromkeys(reasons))}
     if validator is not None:
         before = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(original)}
         after = {_normalize_numeric_claim(c) for c in validator.extract_numeric_claims(text)}
