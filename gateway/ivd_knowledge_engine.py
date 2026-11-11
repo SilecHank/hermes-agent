@@ -35,6 +35,7 @@ class ExecutionResult:
     effect_count: int
     source: SourceReference | None = None
     sources: tuple[SourceReference, ...] = ()
+    requires_full_context: bool = False
 
 
 def _normalize(value: object) -> str:
@@ -1064,6 +1065,7 @@ class IVDKnowledgeEngine:
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 0, 0, 0,
                 rendered.source, (rendered.source,) if rendered.source else (),
+                requires_full_context=bool(json.loads(str(getattr(hit, "conditions_json", "{}")))),
             )
 
         diagnostic = (
@@ -1153,6 +1155,7 @@ class IVDKnowledgeEngine:
             return ExecutionResult(
                 decision.text, rendered.answer_shape, "answer", 0, 1, 0, 0,
                 rendered.source, (rendered.source,) if rendered.source else (),
+                requires_full_context=bool(json.loads(str(getattr(fuzzy, "conditions_json", "{}")))),
             )
         sop_content = self._sop_content_search(normalized, product_line)
         if sop_content is not None:

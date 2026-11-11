@@ -160,6 +160,10 @@ def _discover_providers() -> None:
                 continue
             _import_plugin_dir(child, "bundled")
 
+    # A frozen serving distribution only loads its manifest-bound providers.
+    if Path(__file__).resolve().parent.parent.name == "serving-agent":
+        return
+
     # 2. User plugins — under $HERMES_HOME/plugins/model-providers/<name>/.
     #    These can override any bundled profile of the same name (last-writer-wins
     #    in register_provider()).

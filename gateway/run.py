@@ -2422,7 +2422,7 @@ def _prepare_gateway_ivd_boundary(
         prepare_enabled_ivd_turn,
     )
 
-    from gateway.after_sales_guard import is_non_business_task, resolve_after_sales_task
+    from gateway.ivd_shared_workflow import is_non_business_task, resolve_after_sales_task
     user_text = user_authored_text(message)
     task = resolve_after_sales_task(config.get("after_sales_guard") or {}, user_text)
     prepared = prepare_enabled_ivd_turn(config, platform=platform)
@@ -2577,6 +2577,7 @@ def _append_ivd_turn_telemetry(
         platform=platform,
         session_key=session_key,
         product_scope=turn.product_scope if turn is not None else "",
+        task_contract=getattr(turn, "task_contract", None),
         product_variant=turn.product_variant if turn is not None else "",
         route_id=turn.route_id if turn is not None else "standard",
         route_version=turn.route_version if turn is not None else "",
@@ -3717,6 +3718,16 @@ def _reconnect_backoff(attempt: int) -> int:
     return min(30 * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_CAP)
 
 
+def _bind_agent_serving_tool_boundary(agent, *, mode: str) -> None:
+    """Apply the no-general-tools contract to every frozen serving agent."""
+    if mode != "package" or Path(__file__).resolve().parents[1].name != "serving-agent":
+        return
+    from agent.conversation_loop import enforce_ivd_serving_tool_boundary
+
+    agent.execution_mode = "ivd_serving"
+    enforce_ivd_serving_tool_boundary(agent, mode="ivd_serving")
+
+
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
@@ -3776,7 +3787,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> tuple[Any, Any]:
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
-        from gateway.after_sales_guard import is_non_business_task, resolve_after_sales_task
+        from gateway.ivd_shared_workflow import is_non_business_task, resolve_after_sales_task
         store = getattr(self, "session_store", None)
         getter = getattr(store, "get_session_metadata", None)
         pending = (getter(session_key, "ivd_pending_task")
@@ -20811,7 +20822,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from gateway.after_sales_guard import CriticalAfterSalesValidator
             from agent.final_response_validation import evaluate_final_response
             _proxy_validator = CriticalAfterSalesValidator(_proxy_turn, messages_provider=lambda: [])
-            full_response = evaluate_final_response(_proxy_validator, full_response, attempts=1).response
+            # No model loop remains here: exhaust both retry budgets so a
+            # rejected serialization draft cannot be returned as a retry.
+            full_response = evaluate_final_response(
+                _proxy_validator, full_response, attempts=2, format_attempts=2
+            ).response
         return {
             "final_response": full_response or "(No response from remote agent)",
             "messages": [
@@ -22323,6 +22338,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 platform=platform_key,
                                 session_key=session_key or session_id or "",
                                 product_scope=_after_sales_turn.product_scope,
+                                task_contract=getattr(_after_sales_turn, "task_contract", None),
                                 product_variant=_after_sales_turn.product_variant,
                                 route_id=_after_sales_turn.route_id,
                                 route_version=_after_sales_turn.route_version,
@@ -22378,6 +22394,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 platform=platform_key,
                                 session_key=session_key or session_id or "",
                                 product_scope=_after_sales_turn.product_scope,
+                                task_contract=getattr(_after_sales_turn, "task_contract", None),
                                 product_variant=_after_sales_turn.product_variant,
                                 route_id=_after_sales_turn.route_id,
                                 route_version=_after_sales_turn.route_version,
@@ -22854,6 +22871,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            from gateway.ivd_runtime import ivd_engine_mode
+            _bind_agent_serving_tool_boundary(
+                agent, mode=ivd_engine_mode(user_config, platform=platform_key)
+            )
 
             # IVD context projection is an opt-in request view layered over the
             # configured context engine. It never replaces transcript history
@@ -23657,7 +23679,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _delivery_validator = getattr(agent_holder[0], "_final_response_validator", None)
             if getattr(_delivery_validator, "requires_structured_claims", False) is True and final_response:
                 from agent.final_response_validation import evaluate_final_response
-                _delivery = evaluate_final_response(_delivery_validator, str(final_response), attempts=1)
+                _delivery = evaluate_final_response(
+                    _delivery_validator, str(final_response), attempts=2, format_attempts=2
+                )
                 _old_final = final_response
                 final_response = _delivery.response
                 result["final_response"] = final_response
@@ -23885,6 +23909,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             if _after_sales_turn is not None
                             else ""
                         ),
+                        task_contract=getattr(_after_sales_turn, "task_contract", None),
                         product_variant=(
                             _after_sales_turn.product_variant
                             if _after_sales_turn is not None

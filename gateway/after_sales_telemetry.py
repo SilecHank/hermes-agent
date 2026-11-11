@@ -103,6 +103,29 @@ def classify_retrieval_outcome(snapshot: dict[str, object]) -> str:
     return "partial"
 
 
+def product_scope_observation(*, product_scope: str, task_contract: Mapping[str, object] | None) -> tuple[str, str]:
+    """Describe scope provenance without inferring a product from the event text."""
+    scope = str(product_scope or "").strip()
+    if not scope:
+        return "", "none"
+    task = task_contract if isinstance(task_contract, Mapping) else {}
+    context = task.get("context") if isinstance(task.get("context"), Mapping) else {}
+    provenance = context.get("provenance") if isinstance(context.get("provenance"), Mapping) else {}
+    if task.get("subject") != scope or context.get("product_line") != scope:
+        return "", "unknown"
+    continuation = str(task.get("continuation") or "")
+    if continuation == "topic_carry":
+        return "", "inherited"
+    if continuation == "field_patch":
+        return "", "unknown"  # Patch provenance may be rebuilt from combined text.
+    origin = provenance.get("product_line")
+    if origin == "message":
+        return scope, "current"
+    if origin == "conversation" and continuation in {"clarification_reply", "field_patch"}:
+        return "", "inherited"
+    return "", "unknown"
+
+
 def build_runtime_event(
     *,
     platform: str,
@@ -117,6 +140,7 @@ def build_runtime_event(
     source_paths: Iterable[str],
     validation_status: str,
     product_variant: str = "",
+    task_contract: Mapping[str, object] | None = None,
     validation_reasons: Iterable[str] = (),
     answer_text: str = "",
     question_text: str = "",
@@ -147,6 +171,7 @@ def build_runtime_event(
         str(item)[:64] for item in validation_reasons if str(item)
     ][:8]
     preview = sanitize_question_preview(question_text)
+    current_scope, scope_origin = product_scope_observation(product_scope=product_scope, task_contract=task_contract)
     event = {
         "schema_version": 2,
         "event_type": "ivd_answer_turn",
@@ -154,6 +179,8 @@ def build_runtime_event(
         "platform": str(platform),
         "session_hash": hashlib.sha256(str(session_key).encode("utf-8")).hexdigest()[:16],
         "product_scope": str(product_scope or ""),
+        "current_question_product_scope": current_scope,
+        "product_scope_origin": scope_origin,
         "product_variant": str(product_variant or ""),
         "route_id": str(route_id or "standard"),
         "route_version": str(route_version or ""),

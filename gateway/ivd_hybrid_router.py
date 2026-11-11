@@ -49,12 +49,19 @@ def decide_hybrid_route(
         return HybridRouteDecision("expert", "non_parameter_intent")
     if str(getattr(envelope, "answer_shape", "") or "") not in _SCALAR_SHAPES:
         return HybridRouteDecision("expert", "non_scalar")
+    if getattr(result, "requires_full_context", False):
+        return HybridRouteDecision("expert", "source_conditions_require_context")
     if str(getattr(result, "outcome", "") or "") != "answer":
         return HybridRouteDecision("expert", "non_answer")
     if str(getattr(result, "answer_shape", "") or "") not in _SCALAR_SHAPES:
         return HybridRouteDecision("expert", "non_scalar")
     if len(tuple(getattr(result, "sources", ()) or ())) != 1:
         return HybridRouteDecision("expert", "source_not_unique")
+    from gateway.ivd_shared_workflow import explicit_sop_version_mismatch
+    source = tuple(getattr(result, "sources", ()) or ())[0]
+    if explicit_sop_version_mismatch(text, getattr(source, "document", ""),
+                                     getattr(source, "version", "")):
+        return HybridRouteDecision("expert", "source_version_mismatch")
     routing_lines = str(getattr(result, "text", "") or "").splitlines()
     # The presentation contract appends verified document IDs as attribution.
     # Ignore only those exact IDs on source lines; never drop a whole line or
