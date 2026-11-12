@@ -1318,57 +1318,74 @@ class PluginManager:
         """The actual discovery sweep — see :meth:`discover_and_load`."""
         manifests: List[PluginManifest] = []
 
-        # 1. Bundled plugins (<repo>/plugins/<name>/)
-        #
-        # Repo-shipped plugins live next to hermes_cli/. Two layouts are
-        # supported (see ``_scan_directory`` for details):
-        #
-        #   - flat: ``plugins/disk-cleanup/plugin.yaml`` (standalone)
-        #   - category: ``plugins/image_gen/openai/plugin.yaml`` (backend)
-        #
-        # ``memory/``, ``context_engine/``, and ``model-providers/`` are
-        # skipped at the top level — they have their own discovery systems
-        # (plugins/memory/__init__.py, providers/__init__.py). ``platforms/``
-        # is a category holding platform adapters (scanned one level deeper
-        # below).
-        repo_plugins = get_bundled_plugins_dir()
-        logger.debug("Scanning bundled plugins: %s", repo_plugins)
-        bundled = self._scan_directory(
-            repo_plugins,
-            source="bundled",
-            skip_names={"memory", "context_engine", "platforms", "model-providers"},
-        )
-        logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
-        manifests.extend(bundled)
-        bundled_platforms = self._scan_directory(
-            repo_plugins / "platforms", source="bundled"
-        )
-        logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
-        manifests.extend(bundled_platforms)
-
-        # 2. User plugins (~/.hermes/plugins/)
-        user_dir = get_hermes_home() / "plugins"
-        logger.debug("Scanning user plugins: %s", user_dir)
-        user_manifests = self._scan_directory(user_dir, source="user")
-        logger.debug("  user: %d manifest(s)", len(user_manifests))
-        manifests.extend(user_manifests)
-
-        # 3. Project plugins (./.hermes/plugins/)
-        if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
-            project_dir = Path.cwd() / ".hermes" / "plugins"
-            logger.debug("Scanning project plugins: %s", project_dir)
-            project_manifests = self._scan_directory(project_dir, source="project")
-            logger.debug("  project: %d manifest(s)", len(project_manifests))
-            manifests.extend(project_manifests)
-        else:
-            logger.debug(
-                "Project plugins disabled (set HERMES_ENABLE_PROJECT_PLUGINS=1 to enable)"
+        # The frozen IVD distribution is an explicit runtime artifact.  Do not
+        # discover ambient user/project/entry-point code in its process.
+        serving_root = Path(__file__).resolve().parents[1]
+        if serving_root.name == "serving-agent":
+            platform_dir = serving_root / "plugins/platforms/wecom"
+            manifest_path = platform_dir / "plugin.yaml"
+            if (platform_dir.is_symlink() or manifest_path.is_symlink()
+                    or not manifest_path.is_file()):
+                raise RuntimeError("frozen WeCom platform manifest unavailable")
+            manifest = self._parse_manifest(
+                manifest_path, platform_dir, "bundled", ""
             )
+            if (manifest is None or manifest.name != "wecom-platform"
+                    or manifest.kind != "platform"):
+                raise RuntimeError("frozen WeCom platform manifest invalid")
+            manifests.append(manifest)
+        else:
+            # 1. Bundled plugins (<repo>/plugins/<name>/)
+            #
+            # Repo-shipped plugins live next to hermes_cli/. Two layouts are
+            # supported (see ``_scan_directory`` for details):
+            #
+            #   - flat: ``plugins/disk-cleanup/plugin.yaml`` (standalone)
+            #   - category: ``plugins/image_gen/openai/plugin.yaml`` (backend)
+            #
+            # ``memory/``, ``context_engine/``, and ``model-providers/`` are
+            # skipped at the top level — they have their own discovery systems
+            # (plugins/memory/__init__.py, providers/__init__.py). ``platforms/``
+            # is a category holding platform adapters (scanned one level deeper
+            # below).
+            repo_plugins = get_bundled_plugins_dir()
+            logger.debug("Scanning bundled plugins: %s", repo_plugins)
+            bundled = self._scan_directory(
+                repo_plugins,
+                source="bundled",
+                skip_names={"memory", "context_engine", "platforms", "model-providers"},
+            )
+            logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
+            manifests.extend(bundled)
+            bundled_platforms = self._scan_directory(
+                repo_plugins / "platforms", source="bundled"
+            )
+            logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
+            manifests.extend(bundled_platforms)
 
-        # 4. Pip / entry-point plugins
-        ep_manifests = self._scan_entry_points()
-        logger.debug("  entrypoints: %d manifest(s)", len(ep_manifests))
-        manifests.extend(ep_manifests)
+            # 2. User plugins (~/.hermes/plugins/)
+            user_dir = get_hermes_home() / "plugins"
+            logger.debug("Scanning user plugins: %s", user_dir)
+            user_manifests = self._scan_directory(user_dir, source="user")
+            logger.debug("  user: %d manifest(s)", len(user_manifests))
+            manifests.extend(user_manifests)
+
+            # 3. Project plugins (./.hermes/plugins/)
+            if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+                project_dir = Path.cwd() / ".hermes" / "plugins"
+                logger.debug("Scanning project plugins: %s", project_dir)
+                project_manifests = self._scan_directory(project_dir, source="project")
+                logger.debug("  project: %d manifest(s)", len(project_manifests))
+                manifests.extend(project_manifests)
+            else:
+                logger.debug(
+                    "Project plugins disabled (set HERMES_ENABLE_PROJECT_PLUGINS=1 to enable)"
+                )
+
+            # 4. Pip / entry-point plugins
+            ep_manifests = self._scan_entry_points()
+            logger.debug("  entrypoints: %d manifest(s)", len(ep_manifests))
+            manifests.extend(ep_manifests)
 
         # Load each manifest (skip user-disabled plugins).
         # Later sources override earlier ones on key collision — user

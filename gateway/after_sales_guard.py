@@ -438,21 +438,7 @@ ESCALATION_SHAPES = {"", "standard", "clarification", "diagnostic", "unknown",
                      "direct_fact", "answer"}
 
 
-def is_non_business_task(task_contract: Any) -> bool:
-    """True when the resolver said this turn is not a customer case.
-
-    The KB resolver publishes `task_kind` (social / meta / operator / business /
-    unknown) precisely so the gateway can decide whether the after-sales evidence
-    contract applies at all.  Only `social` used to be honoured, so a message
-    that talked about the assistant itself, a maintenance instruction, or a
-    runtime notice still entered the IVD engine and came back as a product
-    clarification.
-    """
-    task = task_contract if isinstance(task_contract, dict) else {}
-    return str(task.get("task_kind") or "") in {
-        "social", "meta", "operator", "unknown",
-    }
-
+from gateway.ivd_shared_workflow import is_non_business_task
 
 def is_business_question(task_contract: Any, message: str) -> bool:
     """True when the message is an IVD business question worth routing.
@@ -604,6 +590,7 @@ def decide_answer_mode(
         or (isinstance(match, dict) and (match.get("facts") or {}).get("clarification"))
     )
     control_stop = fast_path.get("disposition") == "control_stop"
+    scalar_planner_clarification = _is_scalar_planner_clarification(plan)
     eligible = bool((plan.get("runtime_preflight") or {}).get("eligible", False))
     # A planner control stop may carry either a real answer (a fact-card scalar
     # that the planner already rendered) or only its ask.  The ask is not a
@@ -649,6 +636,10 @@ def decide_answer_mode(
         str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
         or any(shape.startswith("file_") for shape in shapes)
     )
+    single_value_turn = any(
+        shape in SCALAR_ANSWER_SHAPES or shape.startswith("sop_")
+        for shape in shapes
+    )
     # 2026-11-02 口径：业务问题在结构化路径没有产出答案时按 bounded 专家分析
     # 作答，不再输出「本轮已核对…」这类停发通知。标量/数值题仍走它自己的契约
     # （正式条件化答复 + 来源校验），否则会丢掉受控阈值的规范化出口——那正是
@@ -658,8 +649,10 @@ def decide_answer_mode(
             and not structured_answer
             and not navigation_turn
             and not document_turn
+            and (not single_value_turn or (control_stop and not scalar_planner_clarification))
             and (unserved_contract or control_stop)
-            and not bound_facts):
+            and not bound_facts
+            and not scalar_planner_clarification):
         reasons.append("expert_mode_escalation")
         return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
     guarded = status in {"clarification", "pending_evidence", "blocked"} and not (
@@ -686,6 +679,25 @@ def decide_answer_mode(
         reasons.append("nothing_to_inject")
         return AnswerModeDecision("agent", tuple(reasons), business, structured_answer, contract, gate)
     return AnswerModeDecision("fast_answer", tuple(reasons), business, structured_answer, contract, gate)
+
+
+def _is_scalar_planner_clarification(plan: dict[str, Any]) -> bool:
+    """Keep scalar scope/method questions on their non-model clarification gate."""
+    fast = plan.get("fast_path") or {}
+    task = plan.get("task_contract") or {}
+    shapes = {str(task.get("answer_shape") or ""),
+              str((plan.get("answer_shape") or {}).get("answer_shape") or ""),
+              str(fast.get("answer_shape") or "")}
+    if (fast.get("disposition") != "control_stop"
+            or not shapes.intersection({"scalar_lookup", "scoped_scalar", "ambiguous_scalar",
+                                        "conditional_scalar", "sop_context_clarification"})
+            or fast.get("route_source") not in {"numeric_resolution", "context_clarification"}):
+        return False
+    direct = str(fast.get("direct_response") or "").strip()
+    ask = str(fast.get("clarification") or fast.get("control_response") or "").strip()
+    if fast.get("route_source") == "numeric_resolution":
+        return bool(fast.get("sources") and direct and ask and direct == ask)
+    return bool(ask)
 
 
 def build_expert_contract_stop_response(contract: dict[str, Any]) -> str:
@@ -766,7 +778,7 @@ def build_preflight_block_result(
         "告诉我项目名称和涉及的那一步（提取、建库、上机或分析），我按这两项改用正式来源继续核实；"
         "适用版本和文件编号我自己核对。"
     )
-    if ({"expert_route_contract_not_ready","planner_control_stop"} & set(turn.preflight_issues)) and turn.direct_response:
+    if ({"expert_route_contract_not_ready", "planner_control_stop", "source_version_mismatch"} & set(turn.preflight_issues)) and turn.direct_response:
         fallback = turn.direct_response
     present = getattr(turn, "present_text", None)
     conditional = _validated_conditional_preflight(turn)
@@ -801,6 +813,11 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
     except Exception:
         validation = {"ok": False, "reasons": ["presentation_failed"]}
         text = ""
+    from gateway.ivd_shared_workflow import explicit_sop_version_mismatch
+    source = dict(turn.parameter_contract or {})
+    if explicit_sop_version_mismatch(message, str(source.get("source_document_id") or ""),
+                                     str(source.get("source_version") or "")):
+        validation = {"ok": False, "reasons": ["source_version_mismatch"]}
     if not validation["ok"]:
         logger.warning(
             "IVD direct-fact delivery blocked: route=%s source_kind=%s reasons=%s",
@@ -875,6 +892,61 @@ def _validate_direct_fact_presentation(turn: AfterSalesTurn, text: str) -> dict[
     original = str(turn.direct_response)
     reasons = []
     policy = getattr(turn, "presentation_contract", {}) or {}
+    parameter_contract = getattr(turn, "parameter_contract", None) or {}
+    contract_source = str(parameter_contract.get("source_path") or "")
+    contract_lock = parameter_contract.get("source_scope_lock") or {}
+    source_prefix = "knowledge-base/01_标准作业指导书_SOP/"
+    source_refs = [contract_source, *(getattr(turn, "source_paths", ()) or ())]
+    has_sop_source = any(
+        value.replace("\\", "/").startswith(source_prefix)
+        or (Path(value).is_absolute() and source_prefix in value.replace("\\", "/"))
+        for value in (str(item or "") for item in source_refs)
+    )
+    if has_sop_source:
+        try:
+            root = Path(turn.expert_validator_path).resolve(strict=True).parent.parent
+            helper_path = root / "scripts/hermes_sop_scope_lock.py"
+            if not helper_path.is_file() or helper_path.is_symlink():
+                raise ImportError("scope lock unavailable")
+            _bind_workflow_scripts(helper_path)
+            helper = _load_module(str(helper_path), helper_path.stat().st_mtime_ns)
+            relative_sources = set()
+            for raw in (str(item or "") for item in source_refs):
+                normalized = raw.replace("\\", "/")
+                if normalized.startswith(source_prefix):
+                    relative_sources.add(normalized)
+                    continue
+                if source_prefix not in normalized:
+                    continue
+                path = Path(raw)
+                if path.is_absolute():
+                    try:
+                        relative = path.resolve(strict=True).relative_to(root).as_posix()
+                    except (OSError, ValueError):
+                        reasons.append("source_scope_lock_source_outside_package")
+                        continue
+                    if relative.startswith(source_prefix):
+                        relative_sources.add(relative)
+                else:
+                    reasons.append("source_scope_lock_invalid_source_path")
+            if not relative_sources:
+                reasons.append("source_scope_lock_source_missing")
+            for source_path in sorted(relative_sources):
+                actual = helper.reviewed_source_decision(
+                    root, source_path,
+                    product=str(getattr(turn, "product_scope", "") or ""))
+                if actual.get("status") != "allowed":
+                    reasons.append("source_scope_lock_" + str(actual.get("status") or "unknown"))
+                    if source_path == contract_source and contract_lock.get("status") == "allowed":
+                        reasons.append("source_scope_lock_changed")
+                    continue
+                if source_path == contract_source and contract_lock and any(
+                    actual.get(key) != contract_lock.get(key)
+                    for key in ("status", "group_id", "revision", "product")
+                ):
+                    reasons.append("source_scope_lock_changed")
+        except (OSError, ValueError, TypeError, ImportError, AttributeError, KeyError):
+            reasons.append("source_scope_lock_changed")
     if not text.startswith(original):
         reasons.append("validated_body_changed")
     if text != original and not policy.get("verified_sources"):
@@ -1092,24 +1164,9 @@ def _load_presentation_policy(
     fast_response_module: str, *, platform: str, task_type: str = "general",
     detail_requested: bool = False,
 ) -> tuple[ModuleType | None, dict[str, Any]]:
-    """Load the canonical code beside the configured release-owned pipeline."""
-    if not fast_response_module or not Path(fast_response_module).is_file():
-        return None, {}
-    path = Path(fast_response_module).with_name("hermes_channel_presentation.py")
-    if not path.is_file():
-        return None, {}  # Compatibility with releases predating this contract.
-    try:
-        module = _load_module(str(path), path.stat().st_mtime_ns)
-        if not all(callable(getattr(module, name, None)) for name in (
-            "presentation_contract", "render_presentation_instructions", "prepare_user_text"
-        )):
-            return None, {}  # Old KB release: retain its existing guard/policy.
-        contract = module.presentation_contract(platform, task_type=task_type,
-                                                 detail_requested=detail_requested)
-        return module, dict(contract)
-    except Exception:
-        # Presentation loading must not discard the numeric/source guard.
-        return None, {}
+    from gateway.ivd_shared_workflow import _load_presentation_policy as load_policy
+    return load_policy(fast_response_module, platform=platform, task_type=task_type,
+                       detail_requested=detail_requested, _loader=_load_module)
 
 
 def _render_answer_experience_context(guard: dict[str, Any], *, platform: str) -> str:
@@ -1225,117 +1282,16 @@ def _trusted_tool_numeric_evidence_details(
     return tuple(dict.fromkeys(claims)), source_read, claim_sources
 
 
-def _bind_workflow_scripts(path: Path) -> None:
-    """Bind one process to one trusted KB scripts root before its first import.
-
-    Never replace an existing namespace or module. A release change requires a
-    new gateway process; an incompatible cache is a configuration error.
-    """
-    import os
-    import importlib.machinery
-
-    resolved = path.resolve(strict=True)
-    root = resolved.parent.parent
-    agent = Path(__file__).resolve().parents[1]
-    if agent.name == "serving-agent":
-        expected = agent.parent / "serving-package"
-        staged = json.loads((agent.parent / ".staged.json").read_bytes())
-        manifest = json.loads((expected / "package-manifest.json").read_bytes())
-        if (root != expected or manifest.get("package_digest") != staged.get("package_digest")
-                or not staged.get("knowledgehub_commit")):
-            raise ImportError("workflow scripts release binding mismatch")
-        members = manifest.get("members")
-        if (not isinstance(members, dict)
-                or "scripts/hermes_workflow_clarification.py" not in members
-                or str(resolved.relative_to(root)) not in members):
-            raise ImportError("workflow scripts package members unavailable")
-        package_digest = hashlib.sha256(json.dumps(
-            {"algorithm": "sha256-canonical-members-v1", "members": members},
-            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        if package_digest != staged["package_digest"]:
-            raise ImportError("workflow scripts package digest mismatch")
-        for relative, digest in members.items():
-            if relative.startswith("scripts/"):
-                member = root / relative
-                if member.is_symlink() or hashlib.sha256(member.read_bytes()).hexdigest() != digest:
-                    raise ImportError("workflow scripts package member mismatch")
-    else:
-        configured = os.environ.get("IVD_KB_ROOT")
-        if not configured or root != Path(configured).resolve(strict=True) or not (root / ".git").exists():
-            raise ImportError("workflow scripts explicit source binding required")
-    scripts = root / "scripts"
-    helper = scripts / "hermes_workflow_clarification.py"
-    if not helper.is_file() or helper.is_symlink() or scripts.is_symlink():
-        raise ImportError("workflow scripts dependency missing or linked")
-    for name, module in list(sys.modules.items()):
-        if name == "scripts":
-            locations = getattr(module, "__path__", None)
-            resolved_locations = [Path(p).resolve() for p in locations] if locations is not None else []
-            # Existing source tests may have Python's implicit namespace spanning
-            # the selected KB and this Agent's scripts directory. Only that
-            # known empty namespace is narrowed, after all cached children pass.
-            allowed_locations = {scripts, agent / "scripts"} if agent.name != "serving-agent" else {scripts}
-            if (not resolved_locations
-                    or any(p not in allowed_locations for p in resolved_locations)):
-                raise ImportError(f"workflow scripts namespace conflict: {resolved_locations!r}")
-        elif name.startswith("scripts."):
-            file = getattr(module, "__file__", None)
-            if not file or not Path(file).resolve().is_relative_to(scripts):
-                # Source runner owns independent Agent scripts (e.g. environment
-                # isolation). Preserve them only when no KB module shares that
-                # name; never permit a foreign KB dependency or release module.
-                relative = Path(*name.split(".")[1:]).with_suffix(".py")
-                source_agent_module = (agent.name != "serving-agent" and file
-                    and Path(file).resolve() == agent / "scripts" / relative
-                    and not (scripts / relative).exists())
-                if not source_agent_module:
-                    raise ImportError(f"workflow scripts cached module conflict: {name}: {file}")
-    if "scripts" in sys.modules:
-        sys.modules["scripts"].__path__ = [str(scripts)]
-        if sys.modules["scripts"].__spec__ is not None:
-            sys.modules["scripts"].__spec__.submodule_search_locations = [str(scripts)]
-    else:
-        namespace = ModuleType("scripts")
-        namespace.__path__ = [str(scripts)]
-        namespace.__package__ = "scripts"
-        namespace.__spec__ = importlib.machinery.ModuleSpec("scripts", loader=None, is_package=True)
-        namespace.__spec__.submodule_search_locations = namespace.__path__
-        sys.modules["scripts"] = namespace
-
-
-def _load_module(path_text: str, mtime_ns: int) -> ModuleType:
-    path = Path(path_text)
-    if path.name in {"after_sales_workflow_gate.py", "hermes_fast_response_pipeline.py",
-                     "hermes_context_envelope.py"}:
-        _bind_workflow_scripts(path)
-    return _load_module_cached(path_text, mtime_ns)
-
-
-@lru_cache(maxsize=8)
-def _load_module_cached(path_text: str, mtime_ns: int) -> ModuleType:
-    path = Path(path_text)
-    module_name = f"hermes_after_sales_{abs(hash((path_text, mtime_ns)))}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load after-sales module: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+from gateway.ivd_shared_workflow import (
+    _bind_workflow_scripts, _load_module, _load_module_cached,
+)
 
 
 def resolve_after_sales_task(guard: dict[str, Any], message: str, *, actor_id: str = "",
                              pending_task: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Load the sole task resolver from the verified workflow dependency root."""
-    configured_text = str(guard.get("fast_response_module") or guard.get("workflow_module") or '').strip()
-    if not configured_text:
-        return {}
-    configured = Path(configured_text)
-    path = configured.with_name("hermes_context_envelope.py")
-    if not path.is_file():
-        return {}
-    module = _load_module(str(path), path.stat().st_mtime_ns)
-    return module.resolve_current_task(message, actor_id=actor_id, pending_task=pending_task)
+    from gateway.ivd_shared_workflow import resolve_after_sales_task as resolve_task
+    return resolve_task(guard, message, actor_id=actor_id, pending_task=pending_task,
+                        _loader=_load_module)
 
 
 def _clarification_history(message: str, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1566,6 +1522,24 @@ def _attach_verified_fact(
     question: str,
     session_db: Any | None,
 ) -> AfterSalesTurn:
+    from gateway.ivd_shared_workflow import explicit_sop_version_mismatch
+    source = dict(turn.parameter_contract or {})
+    mismatch = explicit_sop_version_mismatch(
+        question, str(source.get("source_document_id") or ""),
+        str(source.get("source_version") or ""),
+    )
+    if mismatch:
+        requested, selected = mismatch
+        document = str(source.get("source_document_id") or "SOP")
+        return replace(
+            turn, context="", facts={}, validator=None, allowed_numeric_claims=(),
+            preflight_decision="block", preflight_action="stop_before_answer_generation",
+            preflight_issues=tuple(dict.fromkeys((*turn.preflight_issues, "source_version_mismatch"))),
+            direct_response=(f"你询问的是 {document} {requested}，当前找到的参数来源是 "
+                             f"{document} {selected}；两者版本不同，暂不提供该参数。"),
+            resolved_answer=None, parameter_contract={}, expected_scalar_claims=(),
+            verified_fact_hit=False, verified_fact_status="off",
+        )
     if not turn.presentation_contract:
         platform = str(guard.get("_presentation_platform") or "generic")
         module, policy = _load_presentation_policy(
@@ -1735,6 +1709,7 @@ def _parameter_card_contract(card: dict[str, Any], root: Path, sources: list[str
     return {**{key: card[key] for key in required},
             "product_variant": str(card.get("product_variant") or ""),
             "absolute_source_path": str(source), "source_revision": "",
+            "source_scope_lock": dict(card.get("source_scope_lock") or {}),
             "conditions": sorted(f"{key}={value}" for key, value in conditions.items())}
 
 
@@ -1817,6 +1792,7 @@ def _render_fast_response_context(
     clarification_required = bool(guard.get("_workflow_card_unavailable") or
         (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
     planner_control_stop = (plan.get("fast_path") or {}).get("disposition") == "control_stop"
+    scalar_planner_clarification = _is_scalar_planner_clarification(plan)
     # One decision object drives every branch below; see decide_answer_mode.
     decision = decide_answer_mode(plan, message=message, guard=guard, match=match)
     if decision.skip_guard:
@@ -1898,6 +1874,7 @@ def _render_fast_response_context(
     contract_status = str(expert_contract.get("status") or "")
     if (
         not expert_mode_escalation
+        and not scalar_planner_clarification
         and contract_status in {"clarification", "pending_evidence", "blocked"}
         and not expert_contract.get("formal_answer_allowed", False)
         and not expert_contract.get("bounded_expert_answer_allowed", False)

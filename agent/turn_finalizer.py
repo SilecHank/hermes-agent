@@ -198,9 +198,29 @@ def finalize_turn(
         from agent.final_response_validation import evaluate_final_response
         _original_final = final_response
         _final_gate = evaluate_final_response(_structured_validator, str(final_response or ""), attempts=1)
+        if _final_gate.action == "retry":
+            # This recovery/iteration-limit path has no live model loop left to
+            # perform the requested rewrite. A retry decision still carries
+            # the rejected draft as ``response`` for the normal loop, so
+            # returning it here would persist and expose unvalidated prose.
+            # Exhaust both retry budgets locally to obtain the validator's
+            # deterministic safe fallback instead.
+            _final_gate = evaluate_final_response(
+                _structured_validator,
+                str(_original_final or ""),
+                attempts=2,
+                format_attempts=2,
+            )
         final_response = _final_gate.response
         if messages and messages[-1].get('role') == 'assistant' and messages[-1].get('content') == _original_final:
             messages[-1] = {**messages[-1], 'content': final_response}
+
+    # A rejected draft and its repair prompt are temporary model-loop context.
+    # Recovery can skip the normal loop cleanup, so remove those rows before
+    # trajectory/session persistence and before returning continuation history.
+    if _structured_guard:
+        from agent.final_response_validation import strip_validation_scaffolding
+        strip_validation_scaffolding(messages)
 
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")

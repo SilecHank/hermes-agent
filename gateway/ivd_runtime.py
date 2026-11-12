@@ -54,6 +54,7 @@ class ExclusiveIVDResult:
     dispatch_count: int = 1
     final_validation_count: int = 1
     presentation_contract: dict[str, Any] = field(default_factory=dict)
+    requires_full_context: bool = False
 
 
 @dataclass
@@ -216,7 +217,7 @@ def execute_exclusive_ivd_turn(
     package_digest = str(
         getattr(prepared.execution_contract, "package_digest", "") or ""
     )
-    from gateway.after_sales_guard import _load_presentation_policy
+    from gateway.ivd_shared_workflow import _load_presentation_policy
     presentation_module, presentation = _load_presentation_policy(
         fast_response_module, platform=platform)
 
@@ -230,7 +231,7 @@ def execute_exclusive_ivd_turn(
 
     dispatcher = IVDDispatcher(package_root)
     context_budget = int(projection.get("context_budget") or 0)
-    from gateway.after_sales_guard import resolve_after_sales_task
+    from gateway.ivd_shared_workflow import resolve_after_sales_task
     task = task_contract or resolve_after_sales_task(
         {"fast_response_module": fast_response_module},
         business_question if business_question is not None else question)
@@ -306,6 +307,7 @@ def execute_exclusive_ivd_turn(
             product_line=str(getattr(outcome.envelope, "product_line", "") or ""),
             product_variant=str(getattr(outcome.envelope, "product_variant", "") or ""),
             ambiguities=tuple(getattr(outcome.envelope, "ambiguities", ()) or ()),
+            requires_full_context=bool(getattr(result, "requires_full_context", False)),
         )
 
 
