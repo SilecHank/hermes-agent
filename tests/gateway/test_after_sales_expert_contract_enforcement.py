@@ -36,6 +36,25 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
         loader.start()
         self.addCleanup(loader.stop)
 
+    def test_navigation_rejects_wrong_explicit_identity_and_does_not_repeat_known_fields(self):
+        from gateway.after_sales_guard import _render_source_navigation
+        source = {"identity": {"sop_id": "SOP-JL-388", "revision": "A0"},
+                  "input_sufficient": True, "candidates": [{"file_name": "SOP-JL-3880 A0 unrelated.pdf"}]}
+        answer = _render_source_navigation(source)
+        self.assertNotIn("3880", answer)
+        self.assertNotIn("告诉我", answer)
+        self.assertNotIn("受控文件", answer)
+
+    def test_navigation_labels_unverified_candidates_and_does_not_claim_delivery(self):
+        from gateway.after_sales_guard import _render_source_navigation
+        source = {"identity": {"sop_id": "SOP-JL-388", "revision": "A0"},
+                  "input_sufficient": True, "candidates": [{"file_name": "SOP-JL-388 A0 质量控制.pdf", "authority": "locator_only"}]}
+        answer = _render_source_navigation(source)
+        self.assertIn("SOP-JL-388 A0", answer)
+        self.assertNotIn("受控文件", answer)
+        self.assertNotIn("已发送", answer)
+        self.assertNotIn("告诉我", answer)
+
     def test_expert_contract_without_evidence_escalates_instead_of_stopping(self):
         plan = {
         "runtime_preflight": {"eligible": True, "route_version": "test"},

@@ -327,6 +327,35 @@ class AfterSalesTurn:
         ]
 
 
+def _render_source_navigation(source_location):
+    """Describe locator results without promoting metadata to verified evidence."""
+    identity = source_location.get("identity") or {}
+    sop = str(identity.get("sop_id") or "").strip().upper()
+    revision = str(identity.get("revision") or "").strip().upper()
+    file_format = str(identity.get("file_format") or "").strip().lower()
+    names = []
+    for item in source_location.get("candidates") or ():
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("file_name") or "").strip()
+        if not name:
+            continue
+        upper = name.upper().replace("－", "-").replace("—", "-")
+        if sop and not re.search(r"(?<![A-Z0-9])" + re.escape(sop) + r"(?![A-Z0-9])", upper):
+            continue
+        if revision and not re.search(r"(?<![A-Z0-9])" + re.escape(revision) + r"(?![A-Z0-9])", upper):
+            continue
+        if file_format and Path(name).suffix.casefold() != "." + file_format:
+            continue
+        names.append(name)
+    if not names:
+        if source_location.get("input_sufficient") or sop:
+            return "暂未核实到与已给编号和版本相符的文件，不能确认或发送；需要继续核对资料库。"
+        return "目前没有足够的信息定位具体文件，请提供产品及文件名称或编号。"
+    return ("找到以下文件名匹配的候选，尚需核对正文、版本和有效状态；文件发送尚未完成：\n"
+            + "\n".join("· " + name for name in names[:5]))
+
+
 def build_source_validation_fallback(turn: AfterSalesTurn, reason: str) -> str:
     """Explain a source-validation stop without inventing a missing library file."""
     state = str(turn.source_location.get("status") or "")
@@ -1919,22 +1948,8 @@ def _render_fast_response_context(
             renderer = getattr(module, 'render_expert_clarification', None)
             direct_response = renderer(expert_contract.get('clarification'),
                                        product=product_identity.get('product_scope')) if callable(renderer) else ''
-        elif navigation_question and navigation_candidates:
-            # Name the controlled files by document title and revision, never by
-            # library path, and say plainly that the wording inside them still
-            # has to be read there.
-            listing = "\n".join(
-                "· " + str(item.get("file_name")).strip()
-                for item in navigation_candidates[:5]
-            )
-            direct_response = ("按现在给的项目和步骤，定位到下面这几份受控文件，具体条文要打开对应文件核对：\n"
-                               + listing
-                               + "\n要收窄到具体一份，再告诉我涉及的是哪一步——提取、建库、上机还是分析，或者直接给文件编号。")
         elif navigation_question:
-            # 定位不到文件时也要给出可执行动作：先点名要那两项信息，
-            # 不把“尚未核实到”当成回答。
-            direct_response = ('还没定位到具体文件。告诉我项目名称，以及涉及的那一步'
-                               '（提取、建库、上机或分析），我按这两项重新定位。')
+            direct_response = _render_source_navigation(source_location)
         elif callable(getattr(module, 'render_acquisition_gap', None)):
             direct_response = module.render_acquisition_gap(
                 task=plan.get('task_contract') or {},
