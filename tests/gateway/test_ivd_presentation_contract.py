@@ -23,7 +23,10 @@ def _policy(tmp_path):
         "def render_presentation_instructions(c): return 'POLICY:'+c['platform']\n"
         "def prepare_user_text(text,c): calls.append(c); return text\n"
     )
-    fast = p / 'hermes_fast_response_pipeline.py'
+    # This is a synthetic planner fixture, not a source-bound KB runtime module.
+    # Keep the fixture name distinct so the production loader's KB binding gate
+    # is not accidentally invoked for test-owned code under tmp_path.
+    fast = p / 'test_fast_response_pipeline.py'
     fast.write_text(
         "def build_fast_response_plan(message,question_type='general',platform='generic'):\n"
         " return {'runtime_preflight':{'eligible':True},'answer_contract':{'task_kind':'compare'},'fast_path':{},'answer_shape':{}}\n"
