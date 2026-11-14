@@ -42,7 +42,9 @@ def test_real_expert_turn_can_progress_with_bounded_analysis_and_reject_fact():
     validator = CriticalAfterSalesValidator(t, messages_provider=lambda: [])
     result = decide_final_response(json.dumps(draft, ensure_ascii=False), validator, attempts=1)
     assert result.action == 'accept'
-    assert '原理推断' in result.response and '核查' in result.response
+    assert '判断：' in result.response
+    assert '怎么确认：' in result.response
+    assert '边界：' in result.response
     assert not result.response.lstrip().startswith('{')
     assert len(calls) == 1
     draft['claims'][0]['kind'] = 'fact'
@@ -55,7 +57,11 @@ def test_free_prose_and_wrong_task_cannot_bypass_expert_validator():
     t = turn()
     assert getattr(t, 'expert_route_contract', None), 'Planner contract was lost'
     validator = CriticalAfterSalesValidator(t, messages_provider=lambda: [])
-    assert decide_final_response('因此这个产品必须按200处理。', validator, attempts=1).action == 'fallback'
+    invalid_prose = '因此这个产品必须按200处理。'
+    assert decide_final_response(invalid_prose, validator, attempts=1).action == 'retry'
+    exhausted = decide_final_response(invalid_prose, validator, attempts=1, format_attempts=2)
+    assert exhausted.action == 'fallback'
+    assert exhausted.response != invalid_prose
     wrong = {'task_id': 'old-task', 'claims': []}
     assert decide_final_response(json.dumps(wrong), validator, attempts=1).action == 'fallback'
 
