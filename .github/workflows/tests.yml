@@ -2,6 +2,9 @@ name: Tests
 
 on:
   workflow_call:
+    secrets:
+      ivd_kb_read_key:
+        required: true
     inputs:
       slice_count:
         description: Number of parallel test slices
@@ -56,6 +59,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Checkout pinned private knowledge repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: SilecHank/IVD-KnowledgeHub
+          ref: f8995f0537d6ab055e08104c23161908253855f7
+          path: .ci-ivd-kb
+          ssh-key: ${{ secrets.ivd_kb_read_key }}
+          persist-credentials: false
+
+      - name: Keep the knowledge checkout out of Agent Git status
+        run: echo '/.ci-ivd-kb/' >> .git/info/exclude
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -115,6 +130,7 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
+          IVD_KB_ROOT: ${{ github.workspace }}/.ci-ivd-kb
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""

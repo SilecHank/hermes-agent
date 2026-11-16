@@ -665,10 +665,13 @@ def decide_answer_mode(
         str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
         or any(shape.startswith("file_") for shape in shapes)
     )
-    single_value_turn = any(
-        shape in SCALAR_ANSWER_SHAPES or shape.startswith("sop_")
-        for shape in shapes
-    )
+    # A requested scalar output is not itself a bound scalar answer.  Preserve
+    # a real scalar/SOP route; a structured miss can still reach expert mode.
+    fast_shape = str(fast_path.get("answer_shape") or "")
+    planned_shape = str((plan.get("answer_shape") or {}).get("answer_shape") or "")
+    single_value_turn = (fast_shape in SCALAR_ANSWER_SHAPES or fast_shape.startswith("sop_")
+                         or (not fast_path and (planned_shape in SCALAR_ANSWER_SHAPES
+                                                or planned_shape.startswith("sop_"))))
     # 2026-11-02 口径：业务问题在结构化路径没有产出答案时按 bounded 专家分析
     # 作答，不再输出「本轮已核对…」这类停发通知。标量/数值题仍走它自己的契约
     # （正式条件化答复 + 来源校验），否则会丢掉受控阈值的规范化出口——那正是
@@ -678,10 +681,10 @@ def decide_answer_mode(
             and not structured_answer
             and not navigation_turn
             and not document_turn
-            and (not single_value_turn or (control_stop and not scalar_planner_clarification))
-            and (unserved_contract or control_stop)
-            and not bound_facts
-            and not scalar_planner_clarification):
+            and (not single_value_turn or control_stop)
+            and (unserved_contract or control_stop or fast_path.get("requires_variant_confirmation")
+                 or (fast_path.get("disposition") == "navigation" and not navigation_turn))
+            and not bound_facts):
         reasons.append("expert_mode_escalation")
         return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
     guarded = status in {"clarification", "pending_evidence", "blocked"} and not (
@@ -1811,11 +1814,13 @@ def _render_fast_response_context(
         if "workflow_clarification" in parameters and isinstance(match, dict):
             kwargs["workflow_clarification"] = (match.get("facts") or {}).get("clarification")
         plan = module.build_fast_response_plan(message, **kwargs)
-    except (TypeError, ValueError, OSError):
-        return {"context": "本轮来源接口或读取未完成；不能继续生成未经校验的业务结论。",
-                "preflight_decision": "block", "preflight_action": "stop_before_answer_generation",
-                "preflight_issues": ("expert_route_contract_not_ready", "evidence_acquisition_failed"),
-                "direct_response": "本轮来源接口或读取未完成，需要先核对来源绑定与读取结果，再继续分析。"}
+    except (TypeError, ValueError, OSError) as exc:
+        logger.warning("After-sales planner unavailable (%s); using expert fallback", type(exc).__name__)
+        return {"context": "[专家模式] 直接回答用户问题，结合专业知识分析；"
+                           "不要用固定的来源不足或澄清话术代替回答。",
+                "route_id": "expert_mode_auto_fallback", "answer_shape": "expert_analysis",
+                "preflight_decision": "continue", "preflight_action": "continue_final_answer",
+                "preflight_issues": ("planner_unavailable",), "direct_response": ""}
     runtime_preflight = plan.get("runtime_preflight") or {}
     workflow_clarification = (plan.get("expert_route_contract") or {}).get("clarification") or {}
     clarification_required = bool(guard.get("_workflow_card_unavailable") or
@@ -1871,11 +1876,12 @@ def _render_fast_response_context(
         str(module_path), platform=platform,
         task_type=str(answer_contract.get("task_kind") or "general"),
         detail_requested=answer_contract.get("detail_level") == "detailed")
-    if presentation_module is not None:
+    if presentation_module is not None and not expert_mode_escalation:
         lines.append(presentation_module.render_presentation_instructions(presentation))
-    lines.extend(_render_answer_contract_lines(answer_contract))
-    if not answer_contract:
-        lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
+    if not expert_mode_escalation:
+        lines.extend(_render_answer_contract_lines(answer_contract))
+        if not answer_contract:
+            lines.append("默认先给结论、要点、下一步、边界/来源；用户追问时再展开。")
     fast_path = plan.get("fast_path") or {}
     answer_shape = plan.get("answer_shape") or {}
     contact_fact = plan.get("contact_fact") or fast_path.get("contact_fact") or {}
@@ -2024,15 +2030,10 @@ def _render_fast_response_context(
                      "direct_response": ""}
         lines.append("[专家模式] 结构化快速路径未命中，本轮自动进入专家模式分析作答。")
         lines.append(
-            "作答要求：先给出能确定的结论性判断，再给依据、边界与下一步核查动作；"
-            "不得输出未经核实的数值、产品专属参数、报告规则或个案结论，"
-            "缺少依据时明确说明缺哪一份受控来源。"
+            "直接回应用户的问题，结合现有信息和专业知识给出有用的分析；"
+            "必要时说明关键假设和可能性，不要用固定的证据不足或澄清话术代替回答。"
         )
-        lines.append(
-            "不要重复索取产品/版本；只有缺少产品/版本会让结论完全不可判定时，"
-            "才在回答末尾用一句话点名所需信息。"
-        )
-        lines.append("本轮专家证据合同未达 serving 层级，答案只能作为分析意见，须标注推断与待核实项。")
+        lines.append("不要重复索取已经提供的信息，也不要把来源缺失当成停止回答的理由。")
     parameter_contract = {}
     if (not contract_guarded and gate.get("decision") != "block"
             and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}

@@ -11,8 +11,10 @@ name: CI
 # through this file.
 #
 # SECURITY: this workflow runs PR-controlled actions, workflows, and code.
-# Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
-# main-only automation uses protected environments in its own workflows.
+# Do not add ``secrets: inherit`` or GitHub App credentials here. The KB
+# deploy key below is read-only and restricted to the knowledge repository.
+# Same-repository PR code can read the key and KB; fork PRs do not get it.
+# Trusted main-only automation uses protected environments in its own workflows.
 
 on:
   workflow_dispatch:
@@ -70,6 +72,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests.yml
+    secrets:
+      ivd_kb_read_key: ${{ secrets.IVD_KB_READ_KEY }}
     with:
       slice_count: 8
 
