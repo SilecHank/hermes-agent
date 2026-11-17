@@ -103,6 +103,7 @@
     "gateway/ivd_route_epoch.py",
     "gateway/ivd_runtime.py",
     "gateway/ivd_shared_workflow.py",
+    "gateway/ivd_source_search.py",
     "gateway/ivd_source_policy.py",
     "gateway/ivd_verified_facts.py",
     "gateway/kanban_watchers.py",

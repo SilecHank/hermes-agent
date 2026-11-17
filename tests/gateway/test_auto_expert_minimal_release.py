@@ -51,7 +51,7 @@ async def test_real_local_lifecycle_enters_expert_without_extra_instruction(monk
    self.tools=[];self._session_messages=[];self.context=kwargs.get('ephemeral_system_prompt') or ''
   def run_conversation(self,message,**kwargs):
    calls.append((message,self.context,kwargs))
-   answer=draft(self.context)
+   answer='可以从磁珠状态、洗脱和同批对照几个方面分析。'
    return {'final_response':answer,'messages':[{'role':'assistant','content':answer}],'api_calls':1,'completed':True}
  config=package_config(tmp_path,mode)
  _install_runtime(monkeypatch,config,Agent)
@@ -60,13 +60,13 @@ async def test_real_local_lifecycle_enters_expert_without_extra_instruction(monk
  result=await runner._run_agent(q,'',[],_source(),'auto-expert-session')
  assert len(calls)==1
  assert q in calls[0][0]
- assert '本轮专家声明合同与实际摘录' in calls[0][1]
- assert '原理推断' in result['final_response'] and '核查' in result['final_response']
+ assert '本轮专家声明合同与实际摘录' not in calls[0][1]
+ assert result['final_response']=='可以从磁珠状态、洗脱和同批对照几个方面分析。'
  assert not result['final_response'].lstrip().startswith('{')
  assert result['messages'][-1]['content']==result['final_response']
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('question', ['CNVseq的产品经理是谁','NIFTY手工提取血浆体积是多少','无创三条目标染色体单体的Z值应该是多少以下','NIFTY提取回收低怎么排查'])
+@pytest.mark.parametrize('question', ['CNVseq的产品经理是谁','NIFTY手工提取血浆体积是多少','无创三条目标染色体单体的Z值应该是多少以下'])
 async def test_real_local_lifecycle_hit_or_control_does_not_construct_model(monkeypatch,tmp_path,question):
  class Agent:
   def __init__(self,**kwargs):raise AssertionError('hit/control crossed model boundary')
@@ -76,6 +76,24 @@ async def test_real_local_lifecycle_hit_or_control_does_not_construct_model(monk
  result=await runner._run_agent(question,'',[],_source(),'hit-session')
  assert result['api_calls']==0
  assert result['final_response']
+
+
+@pytest.mark.asyncio
+async def test_unserved_troubleshooting_question_enters_expert(monkeypatch,tmp_path):
+ calls=[]
+ class Agent:
+  def __init__(self,**kwargs):self.tools=[];self._session_messages=[]
+  def run_conversation(self,message,**kwargs):
+   calls.append(message)
+   answer='可以从样本状态和操作步骤开始排查。'
+   return {'final_response':answer,'messages':[{'role':'assistant','content':answer}],'api_calls':1,'completed':True}
+ config={'after_sales_guard':{**G,'serving_projection_path':str(_write_projection(tmp_path))}}
+ _install_runtime(monkeypatch,config,Agent)
+ runner=_runner(config);runner._get_proxy_url=lambda:None
+ question='NIFTY提取回收低怎么排查'
+ result=await runner._run_agent(question,'',[],_source(),'miss-session')
+ assert len(calls)==1 and question in calls[0]
+ assert result['final_response']=='可以从样本状态和操作步骤开始排查。'
 
 
 @pytest.mark.asyncio
@@ -103,14 +121,13 @@ async def test_expert_failure_is_bounded_without_another_expert_attempt(monkeypa
 
 @pytest.mark.asyncio
 async def test_new_task_does_not_reuse_old_expert_contract(monkeypatch,tmp_path):
- contracts=[]
+ calls=[]
  class Agent:
   def __init__(self,**kwargs):
    self.tools=[];self._session_messages=[];self.context=kwargs.get('ephemeral_system_prompt') or ''
   def run_conversation(self,message,**kwargs):
-   supplied=json.loads(self.context.split('[本轮专家声明合同与实际摘录]\n',1)[1].splitlines()[0])
-   contracts.append(supplied)
-   answer=draft(self.context)
+   calls.append((message,self.context,kwargs))
+   answer='可以结合当前问题分析。'
    return {'final_response':answer,'messages':[{'role':'assistant','content':answer}],'api_calls':1,'completed':True}
  config={'after_sales_guard':{**G,'serving_projection_path':str(_write_projection(tmp_path))}}
  _install_runtime(monkeypatch,config,Agent)
@@ -118,10 +135,11 @@ async def test_new_task_does_not_reuse_old_expert_contract(monkeypatch,tmp_path)
  q='NIFTY为什么磁珠过干影响回收'
  first=await runner._run_agent(q,'',[],_source(),'first-task')
  second=await runner._run_agent('WES为什么磁珠过干影响回收','',[{'role':'user','content':q},{'role':'assistant','content':first['final_response']}],_source(),'second-task')
- assert len(contracts)==2
- assert contracts[0]['task_id']!=contracts[1]['task_id']
- assert contracts[1]['contract']['product_line']=='WES'
- assert '原理推断' in second['final_response']
+ assert len(calls)==2
+ assert q in calls[0][0]
+ assert 'WES为什么磁珠过干影响回收' in calls[1][0]
+ assert '本轮专家声明合同与实际摘录' not in calls[1][1]
+ assert second['final_response']=='可以结合当前问题分析。'
 
 
 @pytest.mark.asyncio

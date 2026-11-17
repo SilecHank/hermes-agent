@@ -64,20 +64,21 @@ def test_real_lifecycle_records_and_consumes_same_actor_pending_version():
     runner = object.__new__(GatewayRunner)
     runner.session_store = MetadataStore()
     runner._ivd_prepared_contracts = {}
-    # A report-interpretation question still gates on the case fields, so it is
-    # the right lifecycle fixture for the version hand-off.  The "what could
-    # explain this" wording answers under a bounded contract instead.
+    # An expert answer may proceed while the case collection remains open for
+    # a later, same-actor version supplement.
     blocking = '无创样本第一次XO（+++），这次XO（+），报告该怎么判读，浓度差多少算异常'
     _, first = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
         message=blocking, history=[], actor_id='actor-a', session_key='fixture-chat')
-    assert first.blocks_answer_generation
+    assert not first.blocks_answer_generation
+    assert first.route_id == 'expert_mode_auto_fallback'
     assert 'product_version' in runner.session_store.value['missing_fields']
     _, second = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
         message='B3', history=[], actor_id='actor-a', session_key='fixture-chat')
     assert second.task_contract['task_id'] == first.task_contract['task_id']
     assert second.task_contract['continuation'] == 'clarification_reply'
     assert second.task_contract['context']['product_version'] == 'B3'
-    assert second.blocks_answer_generation  # Case comparability fields still missing.
+    assert not second.blocks_answer_generation
+    assert second.facts['clarification']['missing']  # Comparability is still unresolved.
     _, isolated = runner._prepare_ivd_lifecycle({'after_sales_guard': G}, platform='weixin',
         message='B3', history=[], actor_id='actor-a', session_key='fixture-chat',
         business_history_isolated=True)

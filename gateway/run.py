@@ -3892,7 +3892,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and str(task.get("intent") or "") in {"troubleshooting", "report_interpretation"}
                 and (task.get("context") or {}).get("product_line")
                 and bool((turn.facts.get("clarification") or {}).get("missing"))
-                and route_contract.get("bounded_expert_answer_allowed", False)
+                and (route_contract.get("bounded_expert_answer_allowed", False)
+                     or (turn.route_id == "expert_mode_auto_fallback"
+                         and bool(turn.facts.get("workflow_binding"))))
             )
             if turn is not None and task and actor_id and (turn.blocks_answer_generation or carry_collection):
                 missing = list((task.get("context") or {}).get("missing") or [])
@@ -3900,12 +3902,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 missing += list(turn.facts.get("missing_discriminators") or [])
                 patch = task.get('field_patch') or {}
                 missing += [field for field in patch.get('remove', []) if field not in (patch.get('set') or {})]
-                if 'product_scope_required' in turn.expert_route_contract.get('issues', []):
+                if {'product_scope_required', 'version_scope_unresolved'} & set(
+                        turn.expert_route_contract.get('issues', [])):
                     current_context = task.get('context') or {}
                     if not current_context.get('product_line'):
                         missing.append('product_line')
                     elif not current_context.get('product_version') and task.get('intent') != 'mechanism':
                         missing.append('product_version')
+                if (carry_collection and turn.route_id == 'expert_mode_auto_fallback'
+                        and task.get('intent') != 'mechanism'
+                        and not (task.get('context') or {}).get('product_version')):
+                    missing.append('product_version')
                 if missing:
                     # A live task update does not mint a fresh authorization
                     # window. Preserve its remaining lifetime through both
@@ -3935,10 +3942,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         and str(task.get("question") or "").strip()
                         and (task.get("context") or {}).get("product_line")
                         and task.get("actor_id") == actor_id):
+                    expiry = time.time() + 900
+                    if (isinstance(pending, dict) and updating_pending
+                            and isinstance(pending.get('expires_at'), (int, float))):
+                        expiry = pending['expires_at']
                     waiting = {"task": task, "actor_id": actor_id,
                                "question": str(task.get("topic_question") or task["question"]),
                                "status": "awaiting_reply",
-                               "expires_at": time.time() + 900,
+                               "expires_at": expiry,
                                "missing_fields": [], "topic_carry": True,
                                "workflow_clarification": dict(turn.facts.get("clarification") or {}),
                                "workflow_binding": binding}

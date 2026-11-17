@@ -402,6 +402,7 @@ def _is_invalid_search_pattern(diagnostics: str) -> bool:
         for marker in (
             "regex parse error",
             "invalid regular expression",
+            "brackets ([ ]) not balanced",
             "unmatched",
             "nothing to repeat",
             "trailing backslash",

@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
-from gateway.after_sales_guard import prepare_after_sales_turn
+from gateway.after_sales_guard import build_preflight_block_result, prepare_after_sales_turn
 
 
 def prepare(question, platform="weixin"):
@@ -26,7 +26,7 @@ def prepare(question, platform="weixin"):
     'NIFTY结果阈值是多少',
     'tNGS 建库投入量是多少',
     'NIFTY为什么磁珠过干影响回收',
-    'NIFTY提取需要多少血浆',
+    '无创这个样本第一次检测是XO（+++），这次是XO（+），报告该怎么判读，浓度差多少算异常',
 ])
 def test_unserved_business_question_reaches_expert_without_canned_response(question):
     turn = prepare(question)
@@ -43,6 +43,15 @@ def test_social_messages_do_not_enter_business_fallback():
         assert turn is not None and not turn.blocks_answer_generation
         assert not turn.has_validator and not turn.direct_response
         assert turn.task_contract.get('intent') == 'social'
+
+
+def test_bound_workflow_without_direct_answer_does_not_block_expert():
+    turn = prepare('NIFTY样本质控MCA偏高怎么处理')
+    assert turn is not None
+    assert (turn.facts.get('workflow_binding') or {}).get('workflow_id') == 'nifty_sample_qc'
+    assert not turn.blocks_answer_generation
+    assert not turn.direct_response
+    assert turn.route_id == 'expert_mode_auto_fallback'
 
 
 def test_existing_formal_scalar_answer_keeps_its_source_validator():
@@ -95,7 +104,7 @@ def test_planner_error_does_not_force_an_evidence_insufficient_reply(tmp_path, m
 
 
 @pytest.mark.parametrize('platform', ['weixin', 'wecom', 'qqbot', 'telegram'])
-@pytest.mark.parametrize('question', ['建库浓度低是什么原因', 'NIFTY提取需要多少血浆'])
+@pytest.mark.parametrize('question', ['建库浓度低是什么原因', 'tNGS 建库投入量是多少'])
 def test_social_and_expert_fallback_share_behavior_across_channels(platform, question):
     greeting = prepare('你好', platform=platform)
     assert greeting is not None and not greeting.blocks_answer_generation
@@ -105,3 +114,13 @@ def test_social_and_expert_fallback_share_behavior_across_channels(platform, que
     assert turn is not None and turn.route_id == 'expert_mode_auto_fallback'
     assert not turn.blocks_answer_generation and not turn.has_validator
     assert not turn.direct_response
+
+
+@pytest.mark.parametrize('platform', ['weixin', 'wecom', 'qqbot', 'telegram'])
+def test_source_checked_conditional_answer_precedes_expert_fallback(platform):
+    question = 'NIFTY提取需要多少血浆'
+    turn = prepare(question, platform=platform)
+    assert turn is not None and turn.route_id == 'conditional_scalar'
+    result = build_preflight_block_result(turn, question)
+    assert result['api_calls'] == 0
+    assert all(value in result['final_response'] for value in ('200', '手工', 'SOP-JL-269'))

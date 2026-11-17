@@ -64,7 +64,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: SilecHank/IVD-KnowledgeHub
-          ref: f8995f0537d6ab055e08104c23161908253855f7
+          ref: b977040e52169270438768e887ae7623a60c6d59
           path: .ci-ivd-kb
           ssh-key: ${{ secrets.ivd_kb_read_key }}
           persist-credentials: false

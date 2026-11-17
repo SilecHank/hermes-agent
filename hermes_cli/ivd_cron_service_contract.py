@@ -21,6 +21,7 @@ from typing import Callable, Mapping
 class FenceDecision:
     allowed: bool
     reason: str
+    warnings: tuple[str, ...] = ()
 
 
 class IndependentIvdCronServiceError(RuntimeError):
@@ -2021,6 +2022,7 @@ def _scan_service_scope(
     scope: Path,
     max_entries: int,
     definition_reader: Callable[[Path], bytes] | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     try:
         metadata = scope.lstat()
@@ -2069,6 +2071,8 @@ def _scan_service_scope(
                         raise IvdCronServiceDiscoveryError(
                             "launchd_plist_unreadable", path
                         ) from exc
+                    if warnings is not None:
+                        warnings.append(f"launchd_plist_unreadable:{path}")
                     continue
                 if _suspicious_ivd_cron_name(name):
                     raise IndependentIvdCronServiceError(path)
@@ -2078,6 +2082,8 @@ def _scan_service_scope(
             except IvdCronServiceDiscoveryError:
                 identity = f"{name} {raw[:4096].decode('utf-8', errors='ignore')}"
                 if kind == "launchd" and not _has_explicit_ivd_identity(identity):
+                    if warnings is not None:
+                        warnings.append(f"launchd_plist_invalid:{path}")
                     continue
                 raise
             if independent:
@@ -2117,6 +2123,7 @@ def assert_embedded_ivd_cron_service_contract(
         raise ValueError("service_kind_invalid")
 
     service_dir = Path(service_dir)
+    warnings: list[str] = []
     if kind == "systemd":
         if systemd_analyze_path is _AUTO_SYSTEMD_ANALYZE:
             systemd_analyze_path = find_trusted_systemd_analyze()
@@ -2163,10 +2170,11 @@ def assert_embedded_ivd_cron_service_contract(
                 scope=scope,
                 max_entries=max_entries_per_scope,
                 definition_reader=definition_reader,
+                warnings=warnings,
             )
 
     if candidate_definition is not None and _definition_is_independent_ivd_cron(
         kind, Path(target_path).name, candidate_definition
     ):
         raise IndependentIvdCronServiceError(f"candidate:{target_path}")
-    return contract
+    return FenceDecision(contract.allowed, contract.reason, tuple(warnings))

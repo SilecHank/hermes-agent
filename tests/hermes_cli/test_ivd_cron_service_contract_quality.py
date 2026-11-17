@@ -100,7 +100,7 @@ def test_explicit_contract_switch_enables_lazy_installer_scan(
     monkeypatch.setattr(
         contract,
         "assert_embedded_ivd_cron_service_contract",
-        lambda **kwargs: calls.append(kwargs),
+        lambda **kwargs: (calls.append(kwargs) or contract.FenceDecision(True, 'embedded_cron_owned')),
     )
     gateway._enforce_embedded_ivd_cron_contract(
         "systemd", tmp_path / "hermes-gateway.service"
@@ -336,7 +336,7 @@ def _launchd_payload(*, periodic: bool = False) -> bytes:
 @pytest.mark.parametrize(
     "kind", ["invalid", "schema", "oversize", "symlink", "unreadable"]
 )
-def test_enabled_launchd_scan_fails_closed_for_any_bad_plist(tmp_path, kind):
+def test_enabled_launchd_scan_reports_incomplete_or_blocks_identified_ivd(tmp_path, kind):
     from hermes_cli.ivd_cron_service_contract import (
         IvdCronServiceDiscoveryError,
         assert_embedded_ivd_cron_service_contract,
@@ -370,8 +370,8 @@ def test_enabled_launchd_scan_fails_closed_for_any_bad_plist(tmp_path, kind):
     target = tmp_path / "target"
     target.mkdir()
     try:
-        with pytest.raises(IvdCronServiceDiscoveryError):
-            assert_embedded_ivd_cron_service_contract(
+        def scan():
+            return assert_embedded_ivd_cron_service_contract(
                 kind="launchd",
                 service_dir=target,
                 target_path=target / "com.nous.hermes.gateway.plist",
@@ -380,6 +380,13 @@ def test_enabled_launchd_scan_fails_closed_for_any_bad_plist(tmp_path, kind):
                 environ={},
                 uid=501,
             )
+        if kind == 'schema':  # Contents explicitly identify an IVD command.
+            with pytest.raises(IvdCronServiceDiscoveryError):
+                scan()
+        else:
+            result = scan()
+            assert result.allowed
+            assert any(str(plist) in warning for warning in result.warnings)
     finally:
         if kind == "unreadable":
             plist.chmod(0o600)

@@ -9,7 +9,7 @@ class GovernedProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_proxy_receives_only_current_task_and_releases_validated_text(self):
         config = {'after_sales_guard': {**G, 'platforms': ['matrix']}}
         question = 'NIFTY为什么磁珠过干影响回收'
-        for kind in ['hypothesis', 'fact', 'bad_verification', 'bad_boundary']:
+        for kind in ['hypothesis', 'fact', 'numeric']:
             with self.subTest(kind=kind):
                 runner = _make_runner()
                 session = _FakeSession(_FakeSSEResponse())
@@ -18,21 +18,12 @@ class GovernedProxyTests(unittest.IsolatedAsyncioTestCase):
                 def post(url, json=None, headers=None, **kwargs):
                     post_calls.append(json)
                     messages = json['messages']
-                    supplied = jsonlib.loads(messages[0]['content'].split(
-                        '[本轮专家声明合同与实际摘录]\n', 1)[1].splitlines()[0])
-                    r = next(r for r in supplied['bundle']['evidence'] if r['tier'] == 'controlled_reference' and r.get('excerpts'))
-                    e = r['excerpts'][0]
-                    draft = {'task_id': supplied['task_id'], 'claims': [{
-                        'kind': 'hypothesis' if kind.startswith('bad_') else kind,
-                        'scope': 'general', 'text': '表面水化状态可能影响洗脱表现。',
-                        'verification': '对照复溶前后的回收表现。', 'boundary': '一般原理推断，不能判定个案或产品参数。',
-                        'evidence_ids': [r['evidence_id']], 'support': [{
-                            'evidence_id': r['evidence_id'], 'start_line': e['start_line'],
-                            'quote': e['text'], 'relation': '用于提出待验证的一般原理假设。'}]}]}
-                    if kind.startswith('bad_'):
-                        draft['claims'][0][kind[4:]] = '投入量必须设置为999 ng，可以直接放行报告。'
+                    self.assertNotIn('[本轮专家声明合同与实际摘录]', messages[0]['content'])
+                    draft = {'hypothesis': '表面水化状态可能影响洗脱表现。',
+                             'fact': '可以从洗脱步骤分析。',
+                             'numeric': '这里使用示例数值 999 ng。'}[kind]
                     chunk = 'data: ' + jsonlib.dumps({'choices':[{'delta':{
-                        'content': jsonlib.dumps(draft, ensure_ascii=False)}}]}) + '\n\ndata: [DONE]\n\n'
+                        'content': draft}}]}) + '\n\ndata: [DONE]\n\n'
                     session._response = _FakeSSEResponse(sse_chunks=[chunk])
                     return original_post(url, json=json, headers=headers, **kwargs)
                 session.post = post
@@ -49,9 +40,8 @@ class GovernedProxyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('X-Hermes-Session-Id', session.captured_headers)
                 self.assertNotIn('旧病例', str(post_calls))
                 consumer.assert_not_called()
-                if kind == 'hypothesis':
-                    self.assertIn('原理推断', result['final_response'])
-                    self.assertIn('核查', result['final_response'])
-                else:
-                    self.assertIn('停止发送', result['final_response'])
+                self.assertEqual(result['final_response'], {
+                    'hypothesis': '表面水化状态可能影响洗脱表现。',
+                    'fact': '可以从洗脱步骤分析。',
+                    'numeric': '这里使用示例数值 999 ng。'}[kind])
                 self.assertEqual(result['messages'][-1]['content'], result['final_response'])
