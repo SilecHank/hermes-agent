@@ -104,7 +104,14 @@ def _run_document_worker(roots: list[Path], terms: list[str], product: str, time
     try:
         stdout, _ = proc.communicate(json.dumps(payload), timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        kill_group = getattr(os, 'killpg', None)
+        kill_signal = getattr(signal, 'SIGKILL', None)
+        try:
+            if not callable(kill_group) or kill_signal is None:
+                raise OSError('process groups unavailable')
+            kill_group(proc.pid, kill_signal)
+        except OSError:
+            proc.kill()
         proc.communicate()
         raise
     if proc.returncode:

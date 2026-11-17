@@ -2,9 +2,30 @@
 import pytest
 import shutil
 import zipfile
+import subprocess
+from unittest.mock import Mock
 
 from gateway.ivd_source_search import search_sources
 from tests.gateway.test_expert_fallback_user_preference import prepare
+
+
+@pytest.mark.parametrize('group_mode', ['available', 'unavailable', 'error'])
+def test_document_worker_timeout_cleans_up_on_each_platform(monkeypatch, tmp_path, group_mode):
+    from gateway import ivd_source_search
+    proc = Mock(pid=123)
+    proc.communicate.side_effect = [subprocess.TimeoutExpired('worker', 0.1), ('', '')]
+    monkeypatch.setattr(ivd_source_search.subprocess, 'Popen', lambda *a, **k: proc)
+    kill_group = (None if group_mode == 'unavailable' else
+                  Mock(side_effect=OSError('unavailable')) if group_mode == 'error' else Mock())
+    monkeypatch.setattr(ivd_source_search.os, 'killpg', kill_group, raising=False)
+    with pytest.raises(subprocess.TimeoutExpired):
+        ivd_source_search._run_document_worker([tmp_path], ['NIFTY'], 'NIFTY', 0.1)
+    if group_mode == 'available':
+        kill_group.assert_called_once()
+        proc.kill.assert_not_called()
+    else:
+        proc.kill.assert_called_once()
+    assert proc.communicate.call_count == 2
 
 
 def test_search_returns_actual_file_lines_and_retains_distinct_versions(tmp_path):
