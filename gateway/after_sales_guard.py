@@ -728,7 +728,11 @@ def decide_answer_mode(
         str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
         or any(shape.startswith("file_") for shape in shapes)
     )
-    if (business and document_turn and not structured_answer and not bound_scalar
+    explicit_document_request = bool(
+        re.search(r'发给我|发我|发一下|发过来|发一份|发送|给我|哪里|在哪|哪个文件|哪一份|哪份|查找|找到|有吗|有没有', message or '')
+        and re.search(r'SOP|文件|原件|说明书|手册|规程|模板|清单|表格|xlsx?', message or '', re.I)
+    )
+    if (business and document_turn and explicit_document_request and not structured_answer and not bound_scalar
             and not (plan.get("source_location") or {}).get("candidates")
             and str(gate.get("decision") or "") != "block"
             and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}):
