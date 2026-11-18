@@ -47,7 +47,7 @@ def test_real_read_tool_binaries_confirm_option_ownership(
 def test_real_binaries_execute_leading_dash_program_payload(
     tmp_path, tool, args, stdin, needs_tty
 ):
-    """A PATH marker proves these binaries do not reparse '-program' as an option."""
+    """Verify whether the actual binary executes or rejects a leading-dash program."""
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
     if sys.platform == "darwin" and tool in {"sort", "man"}:
@@ -75,8 +75,18 @@ def test_real_binaries_execute_leading_dash_program_payload(
     if needs_tty:
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
 
-    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
+    completed = subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
 
+    # GNU sort accepts the program as an option value; the sort shipped on
+    # newer runners can reject the leading dash before starting a process.
+    # Both outcomes are safe for the detector, which conservatively flags the
+    # execution-bearing option regardless of the installed implementation.
+    if (tool == 'sort' and not marker.exists() and completed.returncode == 2
+            and "unexpected argument '-p'" in completed.stderr):
+        assert "Usage: sort" in completed.stderr
+        return
+    assert marker.is_file(), (f"{tool} did not execute the marker; "
+                              f"exit={completed.returncode}, stderr={completed.stderr}")
     assert marker.read_text() == "executed"
 
 

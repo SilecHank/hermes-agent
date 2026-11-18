@@ -82,7 +82,9 @@ def test_lifecycle_differential_through_real_final_validator(tmp_path,name,heade
         assert projected['tier']=='formal_authority'
         assert contract['formal_answer_allowed']
         result = validator(answer(bundle['evidence'][0],quote,kind='fact'))
-        assert result['ok'] and '来源摘录' in result['normalized_response']
+        assert result['ok'] and quote in result['normalized_response']
+        assert bundle['evidence'][0]['source_ref'] == relative
+        assert quote in bundle['evidence'][0]['excerpts'][0]['text']
     else:
         assert projected['tier']=='no_evidence'
         assert not contract['formal_answer_allowed']
@@ -152,4 +154,5 @@ def test_external_non_numeric_hypothesis_stays_available(tmp_path,other):
     bundle,contract,validator=contract_and_validator(p)
     record=next(r for r in bundle['evidence'] if r['tier']=='external_reference')
     result=validator(answer(record,'水化状态可能影响核酸洗脱表现。'))
-    assert result['ok'] and '核查' in result['normalized_response']
+    assert result['ok'] and '核对原始观察记录' in result['normalized_response']
+    assert '不能判定个案原因' in result['normalized_response']

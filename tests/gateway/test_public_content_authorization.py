@@ -8,8 +8,20 @@ from tests.gateway.test_public_task_boundary import G
 
 
 def prepared():
+    # These tests exercise the optional structured-claim validator directly.
+    # The default unserved route intentionally delivers free-form expert output.
+    from pathlib import Path
+    from dataclasses import replace
+    from gateway.after_sales_guard import _load_module
     turn = prepare_after_sales_turn({'after_sales_guard': G}, platform='weixin',
         message='为什么乙醇残留会让PCR扩增变差？', history=[])
+    module_path = Path(G['fast_response_module'])
+    module = _load_module(str(module_path), module_path.stat().st_mtime_ns)
+    plan = module.build_fast_response_plan(turn.task_contract['question'],
+        platform='weixin', task_contract=turn.task_contract)
+    turn = replace(turn, expert_route_contract=plan['expert_route_contract'],
+        expert_evidence_bundle=plan['expert_evidence_bundle'],
+        expert_validator_path=str(module_path.with_name('hermes_expert_answer_contract.py')))
     record = next(r for r in turn.expert_evidence_bundle['evidence']
                   if r.get('excerpts') and r['tier'] == 'controlled_reference')
     excerpt = record['excerpts'][0]

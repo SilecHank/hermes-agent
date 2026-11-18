@@ -199,7 +199,7 @@ def test_launchd_install_allows_exact_telegram_release_sync(monkeypatch, tmp_pat
     assert target.exists()
 
 
-def test_launchd_install_ignores_malformed_unrelated_plist(monkeypatch, tmp_path):
+def test_launchd_install_ignores_malformed_unrelated_plist(monkeypatch, tmp_path, capsys):
     target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
     target.parent.mkdir()
     (target.parent / "battery.plist").write_bytes(b"not a plist")
@@ -208,9 +208,10 @@ def test_launchd_install_ignores_malformed_unrelated_plist(monkeypatch, tmp_path
     gateway_cli.launchd_install(force=True)
 
     assert target.exists()
+    assert '检查未完成' in capsys.readouterr().out
 
 
-def test_launchd_install_ignores_unreadable_unrelated_symlink(monkeypatch, tmp_path):
+def test_launchd_install_ignores_unreadable_unrelated_symlink(monkeypatch, tmp_path, capsys):
     target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
     target.parent.mkdir()
     (target.parent / "com.apple.example.plist").symlink_to("missing.plist")
@@ -219,6 +220,21 @@ def test_launchd_install_ignores_unreadable_unrelated_symlink(monkeypatch, tmp_p
     gateway_cli.launchd_install(force=True)
 
     assert target.exists()
+    assert '检查未完成' in capsys.readouterr().out
+
+
+def test_unreadable_unrelated_plist_does_not_hide_independent_ivd_cron(monkeypatch, tmp_path):
+    from hermes_cli.ivd_cron_service_contract import IndependentIvdCronServiceError
+
+    target = tmp_path / "LaunchAgents" / "com.nous.hermes.gateway.plist"
+    target.parent.mkdir()
+    (target.parent / "a-unrelated.plist").symlink_to("missing.plist")
+    (target.parent / "z-ivd.plist").write_text(INDEPENDENT_LAUNCHD, encoding="utf-8")
+    _launchd_mocks(monkeypatch, target)
+
+    with pytest.raises(IndependentIvdCronServiceError):
+        gateway_cli.launchd_install(force=True)
+    assert not target.exists()
 
 
 def test_launchd_refresh_blocks_existing_independent_ivd_cron(monkeypatch, tmp_path):

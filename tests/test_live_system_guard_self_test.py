@@ -21,6 +21,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import types
 
 import pytest
@@ -275,6 +276,31 @@ def test_subprocess_pkill_python_dash_f_blocked():
         subprocess.run(["pkill", "-f", "python"])
 
 
+def test_nested_shell_process_killer_is_blocked_without_running_it(monkeypatch):
+    def forbidden_spawn(*_args, **_kwargs):
+        raise AssertionError('unsafe subprocess escaped guard')
+    monkeypatch.setattr(subprocess, 'Popen', forbidden_spawn)
+    with pytest.raises(RuntimeError, match='live-system guard'):
+        subprocess.run(['sh', '-c', 'pkill -f hermes'])
+
+
+def test_find_exec_process_killer_remains_blocked(monkeypatch):
+    def forbidden_spawn(*_args, **_kwargs):
+        raise AssertionError('unsafe subprocess escaped guard')
+    monkeypatch.setattr(subprocess, 'Popen', forbidden_spawn)
+    with pytest.raises(RuntimeError, match='live-system guard'):
+        subprocess.run(['find', '.', '-exec', 'pkill', '-f', 'hermes', ';'])
+
+
+@pytest.mark.parametrize('preprocessor', [['--pre', 'pkill'], ['--pre=pkill']])
+def test_ripgrep_preprocessor_process_killer_remains_blocked(monkeypatch, preprocessor):
+    def forbidden_spawn(*_args, **_kwargs):
+        raise AssertionError('unsafe subprocess escaped guard')
+    monkeypatch.setattr(subprocess, 'Popen', forbidden_spawn)
+    with pytest.raises(RuntimeError, match='live-system guard'):
+        subprocess.run(['rg', *preprocessor, '-f', 'hermes'])
+
+
 def test_subprocess_killall_hermes_blocked():
     with pytest.raises(RuntimeError, match="live-system guard"):
         subprocess.run(["killall", "hermes"])
@@ -359,6 +385,22 @@ def test_normal_subprocess_run_passes_through():
     """Plain non-systemctl subprocess.run should work normally."""
     r = subprocess.run(["echo", "hello"], capture_output=True, text=True)
     assert r.stdout.strip() == "hello"
+
+
+def test_search_phrase_containing_skill_is_not_a_process_command():
+    result = subprocess.run(
+        [sys.executable, '-c', 'print("ok")', 'real skill', 'hermes'],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == 'ok'
+
+
+@pytest.mark.skipif(shutil.which('rg') is None, reason='ripgrep is unavailable')
+def test_ripgrep_can_search_for_exact_skill_word_in_hermes_fixture(tmp_path):
+    path = tmp_path / 'hermes-sample.txt'
+    path.write_text('skill\n')
+    result = subprocess.run(['rg', 'skill', str(path)], capture_output=True, text=True, check=True)
+    assert 'skill' in result.stdout
 
 
 # ──────────────────── bypass marker ─────────────────────────────

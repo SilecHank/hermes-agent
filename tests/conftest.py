@@ -746,12 +746,34 @@ def _live_system_guard(request, monkeypatch):
 
     def _is_process_killer(cmd) -> bool:
         cmd_str = _cmd_to_string(cmd)
-        try:
-            tokens = _shlex.split(cmd_str)
-        except ValueError:
-            tokens = cmd_str.split()
+        if isinstance(cmd, (list, tuple)):
+            tokens = [str(token) for token in cmd]
+            if tokens:
+                executable = tokens[0].rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+                has_preprocessor = any(token == '--pre' or token.startswith('--pre=') for token in tokens[1:])
+                # Search terms and file paths are data for these tools. rg's
+                # preprocessor is an executable and still needs inspection.
+                if executable in {'rg', 'grep'} and not has_preprocessor:
+                    return False
+                tokens.extend(token.split('=', 1)[1] for token in list(tokens) if token.startswith('--pre='))
+        else:
+            try:
+                tokens = _shlex.split(cmd_str)
+            except ValueError:
+                tokens = cmd_str.split()
         if not tokens:
             return False
+        # Shell -c scripts are one argv element; inspect their commands without
+        # splitting ordinary arguments such as the search phrase "real skill".
+        for index, token in enumerate(list(tokens[:-1])):
+            head = token.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+            if head in {'sh', 'bash', 'dash', 'zsh', 'ksh'}:
+                option = tokens[index + 1]
+                if option.startswith('-') and 'c' in option[1:] and index + 2 < len(tokens):
+                    try:
+                        tokens.extend(_shlex.split(tokens[index + 2]))
+                    except ValueError:
+                        tokens.extend(tokens[index + 2].split())
         for tok in tokens:
             head = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
             if head in _PROCESS_KILLERS:

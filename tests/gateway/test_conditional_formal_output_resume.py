@@ -33,16 +33,32 @@ def test_source_binding_or_product_mismatch_retains_non_numeric_stop():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('question',['华泛安提取需要多少张石蜡？','五癌共检石蜡样本需要多少张？','多少血浆'])
-async def test_unknown_or_other_product_does_not_borrow_manual_number(monkeypatch,tmp_path,question):
-    class NoModel:
-        def __init__(self,**kwargs):raise AssertionError('unexpected model')
+@pytest.mark.parametrize(('question', 'expect_model'), [
+    ('华泛安提取需要多少张石蜡？', False),
+    ('五癌共检石蜡样本需要多少张？', True),
+    ('多少血浆', True),
+])
+async def test_unknown_or_other_product_does_not_borrow_manual_number(monkeypatch,tmp_path,question,expect_model):
+    contexts = []
+    class Agent:
+        def __init__(self, **kwargs):
+            self.tools = []
+            self._session_messages = []
+            self.context = kwargs.get('ephemeral_system_prompt') or ''
+
+        def run_conversation(self, message, **kwargs):
+            contexts.append(self.context)
+            answer = '不同项目和样本的处理条件可能不同。'
+            return {'final_response': answer, 'messages': [{'role': 'assistant', 'content': answer}],
+                    'api_calls': 1, 'completed': True}
     config={'after_sales_guard':{**G,'serving_projection_path':str(_write_projection(tmp_path))}}
-    _install_runtime(monkeypatch,config,NoModel)
+    _install_runtime(monkeypatch,config,Agent)
     runner=_runner(config);runner._get_proxy_url=lambda:None
     result=await runner._run_agent(question,'',[],_source(Platform.WEIXIN),'negative-fixture')
     assert '200' not in result['final_response']
-    assert result['api_calls']==0
+    assert result['api_calls'] == int(expect_model)
+    assert len(contexts) == int(expect_model)
+    assert all('SOP-JL-269' not in context for context in contexts)
 
 
 def test_trusted_method_followup_and_untrusted_reply_are_not_equivalent():

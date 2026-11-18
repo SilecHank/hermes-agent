@@ -726,24 +726,26 @@ class TestGetProcessStartTime:
         assert status._get_process_start_time(999999999) is None
 
     def test_proc_stat_parser_handles_spaces_and_right_parentheses_in_comm(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         fields_from_state = ["S"] + [str(value) for value in range(4, 22)] + ["424242"]
         payload = "123 (worker pool ) stage) " + " ".join(fields_from_state)
 
         monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: payload)
+        monkeypatch.setattr(status, "_PROC_STAT_DIR", tmp_path)
 
         assert status._get_process_start_time(123) == 424242
 
-    def test_proc_stat_parser_matches_knowledgehub_field_vector(self, monkeypatch):
+    def test_proc_stat_parser_matches_knowledgehub_field_vector(self, monkeypatch, tmp_path):
         fields_from_state = ["R"] + ["0"] * 18 + ["987654"]
         payload = "77 (a b)c)d) " + " ".join(fields_from_state)
 
         monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: payload)
+        monkeypatch.setattr(status, "_PROC_STAT_DIR", tmp_path)
 
         assert status._get_process_start_time(77) == 987654
 
-    def test_psutil_fallback_when_no_proc(self, monkeypatch):
+    def test_psutil_fallback_when_no_proc(self, monkeypatch, tmp_path):
         """When /proc is missing (macOS/Windows), psutil supplies a stable int."""
         import subprocess
         orig_read_text = Path.read_text
@@ -754,6 +756,7 @@ class TestGetProcessStartTime:
             return orig_read_text(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", no_proc)
+        monkeypatch.setattr(status, "_PROC_STAT_DIR", tmp_path / "missing-proc")
         p = subprocess.Popen(["sleep", "20"])
         try:
             a = status._get_process_start_time(p.pid)
@@ -763,6 +766,17 @@ class TestGetProcessStartTime:
         finally:
             p.kill()
             p.wait()
+
+    def test_existing_proc_with_unreadable_stat_does_not_switch_units(self, monkeypatch, tmp_path):
+        import psutil
+
+        def unexpected_fallback(_pid):
+            raise AssertionError("unexpected psutil fallback")
+
+        monkeypatch.setattr(status, "_PROC_STAT_DIR", tmp_path)
+        monkeypatch.setattr(status, "_proc_stat_start_ticks", lambda _pid: None)
+        monkeypatch.setattr(psutil, "Process", unexpected_fallback)
+        assert status._get_process_start_time(os.getpid()) is None
 
 
 class TestTerminatePid:

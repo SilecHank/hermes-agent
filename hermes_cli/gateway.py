@@ -3046,7 +3046,7 @@ def _enforce_embedded_ivd_cron_contract(
         assert_embedded_ivd_cron_service_contract,
     )
 
-    assert_embedded_ivd_cron_service_contract(
+    decision = assert_embedded_ivd_cron_service_contract(
         kind=kind,
         service_dir=target_path.parent,
         target_path=target_path,
@@ -3056,6 +3056,8 @@ def _enforce_embedded_ivd_cron_contract(
         environ=_ivd_service_contract_environ(),
         uid=_ivd_service_contract_uid(),
     )
+    for warning in decision.warnings:
+        print(f"警告：定时任务检查未完成：{warning}")
 
 
 # Directives that older systemd versions silently ignore/strip.  Normalize

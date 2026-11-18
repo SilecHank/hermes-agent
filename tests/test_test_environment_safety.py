@@ -94,7 +94,10 @@ class TestEnvironmentSafetyTests(unittest.TestCase):
         self.assertIn('TEMP="$TEST_HOME/tmp"', runner)
         self.assertNotIn("cleanup --root", runner)
         self.assertNotIn("rm -rf", runner)
-        self.assertIn("-p scripts.test_environment_safety", pyproject)
+        self.assertIn("-p hermes_test_environment_safety_plugin", pyproject)
+        plugin = (PROJECT_ROOT / "hermes_test_environment_safety_plugin.py").read_text(encoding="utf-8")
+        guard = (PROJECT_ROOT / "scripts/test_environment_safety.py").read_text(encoding="utf-8")
+        self.assertEqual(guard, plugin)
         self.assertNotIn("python -m pytest tests/e2e/", workflow)
         self.assertIn("scripts/run_tests.sh tests/e2e/", workflow)
 

@@ -52,6 +52,7 @@ class _SuccessfulAdapter(BasePlatformAdapter):
         super().__init__(PlatformConfig(enabled=True, token="***"), Platform.DISCORD)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        self._mark_connected()
         return True
 
     async def disconnect(self) -> None:

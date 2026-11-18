@@ -81,12 +81,19 @@ class TestSearchErrorGuard:
         assert len(res.matches) == 5
 
     def test_hard_error_is_surfaced(self, method, match_tree):
-        # An invalid regex makes rg/grep exit 2 with only diagnostics in
-        # stdout. The guard MUST surface it — not return empty matches.
-        res = _search(_ops(match_tree), method, "[", match_tree)
+        # A missing explicit source makes rg/grep exit 2 with only diagnostics.
+        # Invalid regexes deliberately retry as literal searches, so they no
+        # longer represent an unrecoverable search error.
+        res = _search(_ops(match_tree), method, "needle", match_tree / "missing.txt")
         assert res.error is not None, "search error was silently swallowed"
         assert "Search failed" in res.error
         assert not res.matches
+
+    def test_invalid_regex_retries_as_literal_against_real_file(self, method, match_tree):
+        (match_tree / 'literal.txt').write_text('value [ literal\n')
+        res = _search(_ops(match_tree), method, '[', match_tree)
+        assert res.error is None
+        assert any('value [ literal' in item.content for item in res.matches)
 
     def test_partial_error_keeps_matches(self, method, partial_error_tree):
         # rg/grep exit 2 because of the unreadable file, but the readable

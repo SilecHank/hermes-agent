@@ -1,4 +1,4 @@
-"""Real planner -> source reads -> turn -> pre-persistence final validator."""
+"""Real planner/source -> explicitly bound expert validator, independent of routing."""
 import json
 from gateway.after_sales_guard import CriticalAfterSalesValidator, prepare_after_sales_turn
 from agent.final_response_validation import evaluate_final_response
@@ -10,8 +10,27 @@ def decide_final_response(response, validator, **kwargs):
 
 
 def turn():
-    return prepare_after_sales_turn({'after_sales_guard': G}, platform='weixin',
-        message='NIFTY为什么磁珠过干影响回收', history=[])
+    # Exercise the existing structured validator as an explicit contract.  The
+    # user's unserved navigation route now goes directly to expert fallback;
+    # test_expert_fallback_user_preference.py exercises that actual routing.
+    from dataclasses import replace
+    from pathlib import Path
+    from gateway.after_sales_guard import _load_module
+
+    question = 'NIFTY为什么磁珠过干影响回收'
+    prepared = prepare_after_sales_turn({'after_sales_guard': G}, platform='weixin',
+        message=question, history=[])
+    module_path = Path(G['fast_response_module'])
+    planner = _load_module(str(module_path), module_path.stat().st_mtime_ns)
+    plan = planner.build_fast_response_plan(question, task_contract=prepared.task_contract)
+    contract = plan['expert_route_contract']
+    bundle = plan['expert_evidence_bundle']
+    context = prepared.context + '\n[本轮专家声明合同与实际摘录]\n' + json.dumps({
+        'task_id': prepared.task_contract['task_id'], 'contract': contract, 'bundle': bundle,
+    }, ensure_ascii=False)
+    return replace(prepared, context=context, route_id='explicit_structured_validator_test',
+                   expert_route_contract=contract, expert_evidence_bundle=bundle,
+                   expert_validator_path=str(module_path.with_name('hermes_expert_answer_contract.py')))
 
 
 def test_real_expert_turn_can_progress_with_bounded_analysis_and_reject_fact():
@@ -42,7 +61,9 @@ def test_real_expert_turn_can_progress_with_bounded_analysis_and_reject_fact():
     validator = CriticalAfterSalesValidator(t, messages_provider=lambda: [])
     result = decide_final_response(json.dumps(draft, ensure_ascii=False), validator, attempts=1)
     assert result.action == 'accept'
-    assert '原理推断' in result.response and '核查' in result.response
+    assert '判断：' in result.response
+    assert '怎么确认：' in result.response
+    assert '边界：' in result.response
     assert not result.response.lstrip().startswith('{')
     assert len(calls) == 1
     draft['claims'][0]['kind'] = 'fact'
@@ -55,7 +76,11 @@ def test_free_prose_and_wrong_task_cannot_bypass_expert_validator():
     t = turn()
     assert getattr(t, 'expert_route_contract', None), 'Planner contract was lost'
     validator = CriticalAfterSalesValidator(t, messages_provider=lambda: [])
-    assert decide_final_response('因此这个产品必须按200处理。', validator, attempts=1).action == 'fallback'
+    invalid_prose = '因此这个产品必须按200处理。'
+    assert decide_final_response(invalid_prose, validator, attempts=1).action == 'retry'
+    exhausted = decide_final_response(invalid_prose, validator, attempts=1, format_attempts=2)
+    assert exhausted.action == 'fallback'
+    assert exhausted.response != invalid_prose
     wrong = {'task_id': 'old-task', 'claims': []}
     assert decide_final_response(json.dumps(wrong), validator, attempts=1).action == 'fallback'
 
