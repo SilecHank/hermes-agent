@@ -74,6 +74,18 @@ async def _run(adapter, event, response="final answer"):
 
 class TestProducerHook:
     @pytest.mark.asyncio
+    async def test_failed_explicit_document_delivery_notifies_user(self, tmp_path, monkeypatch):
+        file = tmp_path / 'SOP-JL-185 B3.pdf'
+        file.write_bytes(b'fixture')
+        monkeypatch.setattr('gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS', (tmp_path,))
+        adapter = _Adapter()
+        adapter.send_document = AsyncMock(return_value=SendResult(success=False, error='private error'))
+        await _run(adapter, _event(), response=f'正在发送文件\nMEDIA:"{file}"')
+        adapter.send_document.assert_awaited_once()
+        assert any('发送失败' in item for item in adapter.sent)
+        assert all('private error' not in item for item in adapter.sent)
+
+    @pytest.mark.asyncio
     async def test_normal_turn_records_and_delivers(self):
         adapter = _Adapter()
         await _run(adapter, _event())

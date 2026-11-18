@@ -95,7 +95,7 @@ CASES = [
     ("file request", "把 SOP-JL-269 原件发我",
      _plan(intent="sop_lookup", fast_shape="file_delivery_short_answer",
            plan_shape="direct_fact", contract_status="clarification",
-           issues=("evidence_not_serving",)), "clarify"),
+           issues=("evidence_not_serving",)), "expert_analysis"),
     # An unresolved contact card is not an answer: with no located candidate the
     # turn goes to bounded analysis instead of a stop notice (2026-11-02).
     ("contact lookup", "CNVseq的产品经理是谁",
@@ -174,6 +174,14 @@ def test_navigation_with_a_located_document_keeps_the_document_pointer():
     # Whatever the mode, the located document must own the reply: the turn may
     # not be re-routed into expert analysis that summarises the file instead.
     assert decision.mode != "expert_analysis", decision.reasons
+
+
+def test_document_miss_uses_expert_but_respects_blocked_preflight():
+    plan = _plan(intent="file_delivery", fast_shape="file_delivery_short_answer",
+                 disposition="miss", contract_status="blocked")
+    assert decide_answer_mode(plan, message="把SOP文件发我").mode == "expert_analysis"
+    plan['preflight_gate']['decision'] = 'block'
+    assert decide_answer_mode(plan, message="把SOP文件发我").mode != "expert_analysis"
 
 
 def test_a_control_stop_ask_is_not_a_served_answer():

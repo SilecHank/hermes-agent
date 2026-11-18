@@ -328,6 +328,47 @@ class AfterSalesTurn:
         ]
 
 
+def _exact_material_attachment(source_location, *, root):
+    """Prepare one exact requested file for delivery, without claiming success."""
+    if not isinstance(source_location, dict):
+        return ''
+    identity = source_location.get('identity') or {}
+    candidates = source_location.get('candidates') or []
+    if not isinstance(identity, dict) or not isinstance(candidates, list) or len(candidates) != 1:
+        return ''
+    sop = str(identity.get('sop_id') or '').upper()
+    revision = str(identity.get('revision') or '').upper()
+    extension = str(identity.get('file_format') or '').lower()
+    if (not re.fullmatch(r'SOP-(?:[A-Z]+-)*[A-Z]+-\d+', sop)
+            or not re.fullmatch(r'[A-UW-Z]\d+', revision)
+            or extension not in {'pdf', 'docx', 'xlsx', 'pptx'}):
+        return ''
+    item = candidates[0]
+    if not isinstance(item, dict) or item.get('authority') != 'locator_only':
+        return ''
+    name = str(item.get('file_name') or '')
+    relative = str(item.get('relative_path') or '')
+    raw = str(item.get('resolved_path') or '')
+    if any(char in name + relative + raw for char in ('\n', '\r', '"', '`')):
+        return ''
+    relpath = Path(relative)
+    if (not relative or relpath.is_absolute() or '..' in relpath.parts
+            or relpath.name != name or Path(name).suffix.lower() != '.' + extension):
+        return ''
+    normalized = name.upper().replace('－', '-').replace('—', '-')
+    if not all(re.search(r'(?<![A-Z0-9])' + re.escape(value) + r'(?![A-Z0-9])', normalized)
+               for value in (sop, revision)):
+        return ''
+    try:
+        trusted = Path(root).resolve(strict=True)
+        file = (trusted / relpath).resolve(strict=True)
+        if not file.is_relative_to(trusted) or not file.is_file() or file != Path(raw).resolve(strict=True):
+            return ''
+    except (OSError, ValueError, RuntimeError, TypeError):
+        return ''
+    return f'正在发送文件：{name}\nMEDIA:"{file}"'
+
+
 def _render_source_navigation(source_location):
     """Describe locator results without promoting metadata to verified evidence."""
     identity = source_location.get("identity") or {}
@@ -687,6 +728,12 @@ def decide_answer_mode(
         str((plan.get("task_contract") or {}).get("intent") or "") in {"sop_lookup", "file_delivery"}
         or any(shape.startswith("file_") for shape in shapes)
     )
+    if (business and document_turn and not structured_answer and not bound_scalar
+            and not (plan.get("source_location") or {}).get("candidates")
+            and str(gate.get("decision") or "") != "block"
+            and _canonical_preflight_action(gate) not in {"stop_before_answer_generation", "stop_before_final_answer"}):
+        reasons.append("document_miss_expert_fallback")
+        return AnswerModeDecision("expert_analysis", tuple(reasons), business, structured_answer, contract, gate)
     # A requested scalar output is not itself a bound scalar answer.  Preserve
     # a real scalar/SOP route; a structured miss can still reach expert mode.
     fast_shape = str(fast_path.get("answer_shape") or "")
@@ -1919,6 +1966,23 @@ def _render_fast_response_context(
             path = kb_root / path
         initial_files.append(str(path.resolve()))
     source_location = dict(plan.get("source_location") or {})
+    material_attachment = ''
+    if (source_location.get('status') == 'source_candidates_found'
+            and re.search(r'发给我|发我|发一下|发过来|发一份|发送|给我', message or '')
+            and not re.search(r'解释|原理|为什么|怎么理解|比较|区别|差异|总结|概括', message or '')
+            and str(gate.get('decision') or '') != 'block'):
+        ident = source_location.get('identity') or {}
+        normalized_message = (message or '').upper().replace('－', '-').replace('—', '-')
+        requested = [str(ident.get(key) or '').upper() for key in ('sop_id', 'revision', 'file_format')]
+        if all(value and re.search(r'(?<![A-Z0-9])' + re.escape(value) + r'(?![A-Z0-9])', normalized_message)
+               for value in requested):
+            locator = getattr(module, 'locate_formal_sources', None)
+            root_provider = getattr(locator, '__globals__', {}).get('_default_material_root')
+            if callable(root_provider):
+                try:
+                    material_attachment = _exact_material_attachment(source_location, root=root_provider())
+                except (OSError, ValueError, TypeError):
+                    material_attachment = ''
     for candidate in source_location.get("candidates") or ():
         if not isinstance(candidate, dict):
             continue
@@ -2023,7 +2087,9 @@ def _render_fast_response_context(
         scalar_question = str(answer_shape.get("answer_shape") or "") in {
             "scalar_lookup", "scoped_scalar", "ambiguous_scalar"
         }
-        if workflow_clarification.get('workflow'):
+        if material_attachment:
+            direct_response = material_attachment
+        elif workflow_clarification.get('workflow'):
             renderer = getattr(module, 'render_expert_clarification', None)
             direct_response = renderer(expert_contract.get('clarification'),
                                        product=product_identity.get('product_scope')) if callable(renderer) else ''

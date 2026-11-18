@@ -233,8 +233,9 @@ class AfterSalesExpertContractEnforcementTests(unittest.TestCase):
             path=_load_fast_module(Path(root)/"scripts/hermes_fast_response_pipeline.py",plan)
             result=_render_fast_response_context({"fast_response_module":str(path)},
                        message="PMseq RNA V5 建库SOP在哪里",match=None)
-        self.assertEqual("block",result["preflight_decision"])
-        self.assertEqual("stop_before_answer_generation",result["preflight_action"])
+        self.assertNotEqual("block", result["preflight_decision"])
+        self.assertEqual("expert_mode_auto_fallback", result["route_id"])
+        self.assertEqual("", result["direct_response"])
         self.assertNotIn("数值",result["direct_response"])
         self.assertNotIn("请补充",result["direct_response"])
         self.assertNotIn("首次建库",result["direct_response"])
