@@ -462,6 +462,11 @@ SCALAR_ANSWER_SHAPES = {
 # sounding case conclusion is worse than a request for the missing source.
 CASE_CONCLUSION_CAPABILITIES = {"data_interpretation"}
 CASE_CONCLUSION_INTENTS = {"report_interpretation"}
+# Intents whose answer is a procedure or a mechanism rather than a value.  Their
+# wording often hits the parameter vocabulary ("标准"/"流程"/"步骤"), so the
+# planner may record a scalar answer shape for them; the intent is the field
+# that says what the turn actually asks for.
+PROCEDURE_INTENTS = {"process", "mechanism", "platform_operation"}
 # Shapes that mean the structured path produced nothing to send.  Anything else
 # (contact card, comparison, mechanism card, navigation, ...) owns the reply.
 ESCALATION_SHAPES = {"", "standard", "clarification", "diagnostic", "unknown",
@@ -657,7 +662,17 @@ def decide_answer_mode(
     bound_facts = bool((match.get("facts") if isinstance(match, dict) else None)
                        or plan.get("facts"))
     task_shape = str((plan.get("task_contract") or {}).get("answer_shape") or "")
-    bound_scalar = bound_facts and task_shape in SCALAR_ANSWER_SHAPES
+    task_intent = str((plan.get("task_contract") or {}).get("intent") or "")
+    # A procedure / mechanism / operation question gets shaped as a scalar
+    # lookup whenever its wording mentions a "standard" or a "step"
+    # ("…标准处理流程是什么"), yet the planner still records the real intent.
+    # Such a turn has no scalar contract to protect, so a bound workflow fact
+    # must not keep it in the stop branch: that combination is what turned the
+    # 2026-11-18 MCA procedure question into a 0-call stop notice even though
+    # the expert fallback was live.
+    procedure_turn = task_intent in PROCEDURE_INTENTS
+    bound_scalar = (bound_facts and task_shape in SCALAR_ANSWER_SHAPES
+                    and not procedure_turn)
     conditional_scalar = (
         (plan.get("numeric_resolution") or {}).get("status") == "resolved_conditional"
         and fast_path.get("disposition") == "control_stop"
@@ -676,9 +691,10 @@ def decide_answer_mode(
     # a real scalar/SOP route; a structured miss can still reach expert mode.
     fast_shape = str(fast_path.get("answer_shape") or "")
     planned_shape = str((plan.get("answer_shape") or {}).get("answer_shape") or "")
-    single_value_turn = (fast_shape in SCALAR_ANSWER_SHAPES or fast_shape.startswith("sop_")
-                         or (not fast_path and (planned_shape in SCALAR_ANSWER_SHAPES
-                                                or planned_shape.startswith("sop_"))))
+    single_value_turn = not procedure_turn and (
+        fast_shape in SCALAR_ANSWER_SHAPES or fast_shape.startswith("sop_")
+        or (not fast_path and (planned_shape in SCALAR_ANSWER_SHAPES
+                               or planned_shape.startswith("sop_"))))
     # 2026-11-02 口径：业务问题在结构化路径没有产出答案时按 bounded 专家分析
     # 作答，不再输出「本轮已核对…」这类停发通知。标量/数值题仍走它自己的契约
     # （正式条件化答复 + 来源校验），否则会丢掉受控阈值的规范化出口——那正是

@@ -36,17 +36,22 @@ def _plan(
     contact_fact=None,
     gate_decision="allow",
     matched=None,
+    task_shape="",
+    facts=None,
 ):
     plan = {
         "runtime_preflight": {"eligible": eligible, "route_version": "smoke"},
         "preflight_gate": {"decision": gate_decision, "pipeline_action": "continue_final_answer"},
         "task_contract": {"intent": intent,
+                          "answer_shape": task_shape,
                           "context": {"provenance_detail": {"matched_terms": matched or {}}}},
         "fast_path": {"hit": bool(direct_response), "disposition": disposition,
                       "answer_shape": fast_shape, "direct_response": direct_response,
                       "answer_card": answer_card},
         "answer_shape": {"answer_shape": plan_shape},
     }
+    if facts is not None:
+        plan["facts"] = facts
     if contact_fact is not None:
         plan["contact_fact"] = contact_fact
     if contract_status is not None:
@@ -102,6 +107,23 @@ CASES = [
            direct_response="200 µL", contract_status=None), "fast_answer"),
     ("planner stop", "这个候选结论可以直接回复吗",
      _plan(intent="sop_lookup", gate_decision="block", contract_status=None), "clarify"),
+    # A procedure question bound to a workflow card must still reach the expert
+    # path.  "标准处理流程" hits the parameter vocabulary, so the planner records
+    # scalar_lookup; the bound card then looked like a scalar with facts and the
+    # turn stopped with 0 model calls even though the expert fallback was live
+    # (2026-11-18, NIFTY MCA 重抽血后仍 MCA).
+    ("procedure question with a bound workflow card",
+     "无创由于孕期肿瘤引起MCA，重抽血之后还是MCA，标准处理流程是什么",
+     _plan(intent="process", task_shape="scalar_lookup", contract_status="blocked",
+           issues=("version_scope_unresolved", "product_scope_required"),
+           facts={"workflow": "qc-troubleshooting"}), "expert_analysis"),
+    # The same shape with a real parameter intent keeps its scalar gate: the fix
+    # may not hand a value question to free-form analysis.
+    ("parameter question with a bound workflow card",
+     "无创提取需要多少血浆",
+     _plan(intent="parameter", task_shape="scalar_lookup", contract_status="blocked",
+           issues=("version_scope_unresolved", "product_scope_required"),
+           facts={"workflow": "extraction"}), "clarify"),
 ]
 
 
