@@ -62,9 +62,14 @@ def test_renderer_prepares_attachment_only_for_explicit_send(tmp_path, monkeypat
     result = guard_module._render_fast_response_context({'fast_response_module': str(module_path)},
                 message='请发送 SOP-JL-185 B3 PDF', match=None)
     assert 'MEDIA:' in result['direct_response']
+    assert result['route_id'] == 'exact_material_delivery'
+    assert result['preflight_decision'] != 'block'
     turn = guard_module.AfterSalesTurn(context='', facts={}, validator=None, allowed_numeric_claims=(),
-        direct_response=result['direct_response'], preflight_issues=result['preflight_issues'])
-    final = guard_module.build_preflight_block_result(turn, '请发送 SOP-JL-185 B3 PDF')['final_response']
+        direct_response=result['direct_response'], preflight_issues=result['preflight_issues'],
+        route_id=result['route_id'], source_location=source, material_root=result['material_root'])
+    delivery = guard_module.build_direct_fact_result(turn, '请发送 SOP-JL-185 B3 PDF')
+    assert delivery['preflight_blocked'] is False
+    final = delivery['final_response']
     assert BasePlatformAdapter.extract_media(final)[0] == [(source['candidates'][0]['resolved_path'], False)]
     other = guard_module._render_fast_response_context({'fast_response_module': str(module_path)},
                 message='SOP-JL-185 B3 的条件是什么', match=None)
@@ -72,6 +77,14 @@ def test_renderer_prepares_attachment_only_for_explicit_send(tmp_path, monkeypat
     explanation = guard_module._render_fast_response_context({'fast_response_module': str(module_path)},
                 message='给我解释 SOP-JL-185 B3 PDF 的原理', match=None)
     assert 'MEDIA:' not in explanation['direct_response']
+    plan['expert_route_contract'] = {'status': 'ready', 'formal_answer_allowed': True}
+    ready = guard_module._render_fast_response_context({'fast_response_module': str(module_path)},
+                message='请发送 SOP-JL-185 B3 PDF', match=None)
+    assert 'MEDIA:' in ready['direct_response']
+    (tmp_path / source['candidates'][0]['relative_path']).unlink()
+    changed = guard_module.build_direct_fact_result(turn, '请发送 SOP-JL-185 B3 PDF')
+    assert changed['preflight_blocked'] is True
+    assert 'MEDIA:' not in changed['final_response']
 
 
 @pytest.mark.asyncio

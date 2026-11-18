@@ -63,6 +63,7 @@ class AfterSalesTurn:
         return int(getattr(self.prepared_ivd_turn, "execution_contract_count", 0))
     answer_contract: dict[str, Any] = field(default_factory=dict)
     source_location: dict[str, Any] = field(default_factory=dict)
+    material_root: str = ""
     answer_shape: str = "diagnostic"
     verified_fact_hit: bool = False
     verified_fact_status: str = "off"
@@ -367,6 +368,21 @@ def _exact_material_attachment(source_location, *, root):
     except (OSError, ValueError, RuntimeError, TypeError):
         return ''
     return f'正在发送文件：{name}\nMEDIA:"{file}"'
+
+
+def _material_request_matches(source_location, message):
+    if not isinstance(source_location, dict) or source_location.get('status') != 'source_candidates_found':
+        return False
+    if (not re.search(r'发给我|发我|发一下|发过来|发一份|发送|给我', message or '')
+            or re.search(r'解释|原理|为什么|怎么理解|比较|区别|差异|总结|概括', message or '')):
+        return False
+    identity = source_location.get('identity')
+    if not isinstance(identity, dict):
+        return False
+    text = (message or '').upper().replace('－', '-').replace('—', '-')
+    requested = [str(identity.get(key) or '').upper() for key in ('sop_id', 'revision', 'file_format')]
+    return all(value and re.search(r'(?<![A-Z0-9])' + re.escape(value) + r'(?![A-Z0-9])', text)
+               for value in requested)
 
 
 def _render_source_navigation(source_location):
@@ -911,6 +927,22 @@ def build_direct_fact_result(turn: AfterSalesTurn, message: str) -> dict[str, An
     """Build the standard zero-model result for an exact active fact hit."""
     if not turn.direct_response:
         raise ValueError("direct fact result requires a validated response")
+    if turn.route_id == 'exact_material_delivery':
+        attachment = (_exact_material_attachment(turn.source_location, root=turn.material_root)
+                      if _material_request_matches(turn.source_location, message) else '')
+        valid = bool(attachment and attachment == turn.direct_response)
+        text = attachment if valid else '文件发送失败，请稍后重试。'
+        return {
+            'presentation_contract': {}, 'final_response': text,
+            'messages': [{'role': 'user', 'content': str(message or '')},
+                         {'role': 'assistant', 'content': text}],
+            'api_calls': 0, 'completed': True, 'partial': False, 'interrupted': False,
+            'error': None, 'history_offset': 0, 'last_prompt_tokens': 0,
+            'agent_persisted': False, 'verified_fact_reused': False,
+            'preflight_blocked': not valid,
+            'presentation_validation': {'ok': valid, 'reasons': [] if valid else ['material_changed']},
+            'evidence_ids': [],
+        }
     present = getattr(turn, "present_text", None)
     try:
         text = present(turn.direct_response) if callable(present) else turn.direct_response
@@ -1524,6 +1556,7 @@ def prepare_after_sales_turn(
                 expert_evidence_bundle=dict(fast_result.get("expert_evidence_bundle") or {}),
                 expert_validator_path=str(fast_result.get("expert_validator_path") or ""),
                 source_location=dict(fast_result.get("source_location") or {}),
+                material_root=str(fast_result.get("material_root") or ""),
                 answer_shape=str(fast_result.get("answer_shape") or "direct_fact"),
                 direct_response=str(fast_result.get("direct_response") or ""),
                 resolved_answer=ResolvedAnswer.from_fast_result(fast_result),
@@ -1606,6 +1639,7 @@ def prepare_after_sales_turn(
             expert_evidence_bundle=dict(fast_result.get("expert_evidence_bundle") or {}),
             expert_validator_path=str(fast_result.get("expert_validator_path") or ""),
             source_location=dict(fast_result.get("source_location") or {}),
+        material_root=str(fast_result.get("material_root") or ""),
             answer_shape=str(fast_result.get("answer_shape") or "diagnostic"),
             fact_key=str(fast_result.get("fact_key") or ""),
             expected_scalar_claims=tuple(
@@ -1951,13 +1985,6 @@ def _render_fast_response_context(
         (isinstance(match, dict) and (match.get("facts") or {}).get("clarification")))
     planner_control_stop = (plan.get("fast_path") or {}).get("disposition") == "control_stop"
     scalar_planner_clarification = _is_scalar_planner_clarification(plan)
-    # One decision object drives every branch below; see decide_answer_mode.
-    decision = decide_answer_mode(plan, message=message, guard=guard, match=match)
-    if decision.skip_guard:
-        return {}
-    business_question = decision.business_question
-    early_expert_contract = decision.expert_contract
-    expert_mode_escalation = decision.expert_mode
     template = plan.get("answer_template") or {}
     gate = plan.get("preflight_gate") or {}
     kb_root = module_path.parent.parent
@@ -1971,22 +1998,26 @@ def _render_fast_response_context(
         initial_files.append(str(path.resolve()))
     source_location = dict(plan.get("source_location") or {})
     material_attachment = ''
-    if (source_location.get('status') == 'source_candidates_found'
-            and re.search(r'发给我|发我|发一下|发过来|发一份|发送|给我', message or '')
-            and not re.search(r'解释|原理|为什么|怎么理解|比较|区别|差异|总结|概括', message or '')
-            and str(gate.get('decision') or '') != 'block'):
-        ident = source_location.get('identity') or {}
-        normalized_message = (message or '').upper().replace('－', '-').replace('—', '-')
-        requested = [str(ident.get(key) or '').upper() for key in ('sop_id', 'revision', 'file_format')]
-        if all(value and re.search(r'(?<![A-Z0-9])' + re.escape(value) + r'(?![A-Z0-9])', normalized_message)
-               for value in requested):
-            locator = getattr(module, 'locate_formal_sources', None)
-            root_provider = getattr(locator, '__globals__', {}).get('_default_material_root')
-            if callable(root_provider):
-                try:
-                    material_attachment = _exact_material_attachment(source_location, root=root_provider())
-                except (OSError, ValueError, TypeError):
-                    material_attachment = ''
+    material_root = ''
+    if (_material_request_matches(source_location, message)
+            and str(gate.get('decision') or '') != 'block'
+            and _canonical_preflight_action(gate) not in {'stop_before_answer_generation', 'stop_before_final_answer'}):
+        locator = getattr(module, 'locate_formal_sources', None)
+        root_provider = getattr(locator, '__globals__', {}).get('_default_material_root')
+        if callable(root_provider):
+            try:
+                material_root = str(root_provider())
+                material_attachment = _exact_material_attachment(source_location, root=material_root)
+            except (OSError, ValueError, TypeError):
+                material_attachment = ''
+    # An exact requested attachment is its own delivery route, not a numeric
+    # claim or a clarification. All other turns retain the ordinary decision.
+    decision = decide_answer_mode(plan, message=message, guard=guard, match=match)
+    if decision.skip_guard and not material_attachment:
+        return {}
+    business_question = decision.business_question
+    early_expert_contract = decision.expert_contract
+    expert_mode_escalation = decision.expert_mode and not material_attachment
     for candidate in source_location.get("candidates") or ():
         if not isinstance(candidate, dict):
             continue
@@ -2153,6 +2184,12 @@ def _render_fast_response_context(
             "numeric_fast_answer_allowed": False,
         }
         lines.append("专家证据契约未满足，已停止模型生成，避免将检索草稿渲染为正式结论。")
+    if material_attachment:
+        direct_response = material_attachment
+        contract_guarded = False
+        answer_shape = {"answer_shape": "file_delivery"}
+        fast_path = {**fast_path, "route_id": "exact_material_delivery",
+                     "route_source": "exact_material_delivery", "direct_response": direct_response}
     if expert_mode_escalation:
         # The evidence tier did not reach serving level, so nothing here may be
         # rendered as a formal conclusion.  Keep the gate open and let the model
@@ -2237,6 +2274,7 @@ def _render_fast_response_context(
         ),
         "answer_contract": answer_contract,
         "source_location": source_location,
+        "material_root": material_root,
         "answer_shape": str(answer_shape.get("answer_shape") or "direct_fact"),
         "direct_response": direct_response,
         "answer_card": dict(answer_card) if isinstance(answer_card, dict) else {},
