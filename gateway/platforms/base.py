@@ -2335,6 +2335,14 @@ def _strip_media_directives(text: str) -> str:
     return _strip_media_tag_directives(text)
 
 
+async def notify_document_delivery_failure(adapter, chat_id, metadata):
+    """Tell the requester about failed file delivery without leaking error details."""
+    try:
+        await adapter.send(chat_id=chat_id, content="文件发送失败，请稍后重试。", metadata=metadata)
+    except Exception:
+        logger.warning("[%s] Could not report document delivery failure", adapter.name)
+
+
 class BasePlatformAdapter(ABC):
     """
     Base class for platform adapters.
@@ -5454,11 +5462,15 @@ class BasePlatformAdapter(ABC):
                                 file_path=media_path,
                                 metadata=_final_thread_metadata,
                             )
+                            if getattr(media_result, 'success', None) is False:
+                                await notify_document_delivery_failure(self, event.source.chat_id, _final_thread_metadata)
 
                         if not media_result.success:
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
                     except Exception as media_err:
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
+                        if ext not in _VIDEO_EXTS and not should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
+                            await notify_document_delivery_failure(self, event.source.chat_id, _final_thread_metadata)
 
                 # Send auto-detected local non-image files as native attachments
                 for file_path in _non_image_local:

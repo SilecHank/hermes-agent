@@ -16436,7 +16436,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # send_multiple_images (Telegram sendPhoto recompresses to ~1280px).
             force_document_attachments = "[[as_document]]" in response
 
-            from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+            from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio, notify_document_delivery_failure
 
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
@@ -16479,6 +16479,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
 
             for media_path, is_voice in non_image_media:
+                document_attempt = False
                 try:
                     ext = Path(media_path).suffix.lower()
                     if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
@@ -16494,13 +16495,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             metadata=_thread_meta,
                         )
                     else:
-                        await adapter.send_document(
+                        document_attempt = True
+                        result = await adapter.send_document(
                             chat_id=event.source.chat_id,
                             file_path=media_path,
                             metadata=_thread_meta,
                         )
+                        if getattr(result, 'success', None) is False:
+                            await notify_document_delivery_failure(adapter, event.source.chat_id, _thread_meta)
                 except Exception as e:
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
+                    if document_attempt:
+                        await notify_document_delivery_failure(adapter, event.source.chat_id, _thread_meta)
 
         except Exception as e:
             logger.warning("Post-stream media extraction failed: %s", e)
