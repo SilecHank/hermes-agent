@@ -80,6 +80,7 @@
     "gateway/after_sales_telemetry.py",
     "gateway/authz_mixin.py",
     "gateway/channel_directory.py",
+    "gateway/citable_document_locator.py",
     "gateway/config.py",
     "gateway/cwd_placeholder.py",
     "gateway/dead_targets.py",

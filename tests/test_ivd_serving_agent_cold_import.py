@@ -68,3 +68,12 @@ def test_missing_startup_dependency_cannot_fall_back_to_editable_source(tmp_path
     result = _probe(source, built.root, tmp_path / 'private', 'gateway.run')
     assert result.returncode != 0
     assert 'serving artifact missing ' + omitted[:-3].replace('/', '.') in result.stderr
+
+
+def test_serving_artifact_can_import_document_locator_on_demand(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    built = build_serving_agent(source, tmp_path / "serving-agent")
+    module = "gateway.citable_document_locator"
+    result = _probe(source, built.root, tmp_path / "private", module)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["origins"][module] == "gateway/citable_document_locator.py"
