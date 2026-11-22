@@ -9,7 +9,7 @@ from gateway.after_sales_guard import (
     build_direct_fact_result, build_preflight_block_result,
 )
 from gateway.config import PlatformConfig
-from gateway.platforms.weixin import _wrap_copy_friendly_lines_for_weixin
+from gateway.platforms.weixin import WeixinAdapter
 from plugins.platforms.wecom.adapter import WeComAdapter
 
 
@@ -57,11 +57,12 @@ def test_direct_and_clarification_share_lossless_policy(tmp_path):
 
 
 def test_weixin_does_not_insert_newline_inside_value_unit_or_sop_version():
+    adapter = WeixinAdapter(PlatformConfig(enabled=True))
     for tail in ('10 μL','SOP-JL-181 A5'):
         original = 'A' * 116 + ' ' + tail
-        formatted = _wrap_copy_friendly_lines_for_weixin(original)
+        formatted = adapter.format_message(original)
         assert tail in formatted
-        assert ' '.join(formatted.split()) == ' '.join(original.split())
+        assert formatted == original
 
 
 def test_wecom_long_reply_and_proactive_send_preserve_tail():
