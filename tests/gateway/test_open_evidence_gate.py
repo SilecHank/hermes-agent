@@ -58,3 +58,25 @@ def test_full_catalog_requires_explicit_scope_and_keeps_original_verification():
         verify.assert_called_once_with(candidates, "/tmp/originals")
         assert build_candidate_context("question", dict(config, scope="unknown")) == ""
         assert retrieve.call_count == 1
+
+
+def test_expert_turn_records_catalog_context_without_counting_it_as_used():
+    from gateway.after_sales_guard import AfterSalesTurn, _attach_verified_fact
+
+    turn = AfterSalesTurn(
+        context="existing expert context", facts={}, validator=None,
+        allowed_numeric_claims=(), route_id="expert_mode_auto_fallback",
+    )
+    guard = {"open_document_evidence": {"enabled": True}}
+    with patch("gateway.after_sales_guard._attach_verified_fact_base", return_value=turn), patch(
+        "gateway.open_evidence.build_candidate_context", side_effect=["catalog excerpt", ""]
+    ):
+        attached = _attach_verified_fact(turn, guard=guard, question="question", session_db=None)
+        unavailable = _attach_verified_fact(turn, guard=guard, question="question", session_db=None)
+
+    assert attached.catalog_context_status == "attached"
+    assert "catalog excerpt" in attached.context
+    assert unavailable.catalog_context_status == "unavailable"
+    assert "继续给出能支持的相关内容或专业分析" in unavailable.context
+    assert "catalog excerpt" not in unavailable.context
+    assert not attached.source_paths

@@ -67,6 +67,7 @@ class AfterSalesTurn:
     answer_shape: str = "diagnostic"
     verified_fact_hit: bool = False
     verified_fact_status: str = "off"
+    catalog_context_status: str = "off"
     direct_response: str = ""
     resolved_answer: ResolvedAnswer | None = None
     direct_evidence_ids: tuple[str, ...] = ()
@@ -1683,6 +1684,17 @@ def prepare_after_sales_turn(
     )
 
 
+_EXPERT_EVIDENCE_GUIDANCE = (
+    "按本轮实际搜索的范围描述结果。部分目录、文件名或候选未命中，只能说明本次未找到，"
+    "不能断言整个材料库没有。继续给出能支持的相关内容或专业分析。"
+    "逐条绑定文件、版本及出处。页码须来自该条正文对应的 PDF 页序；表格引用应来自对应工作表和行。"
+    "只知道位置的大致范围时如实写明，勿用邻近条款页码或推算页码。"
+    "排查未知机型时，先给记录现场、识别故障阶段、查状态和按权限导出日志等通用步骤。"
+    "涉及供电改接、绕过 UPS、检查或更换保险丝、拆机或重启的操作，"
+    "须先确认机型、手册和现场权限。"
+)
+
+
 def _attach_verified_fact(
     turn: AfterSalesTurn,
     *,
@@ -1691,16 +1703,17 @@ def _attach_verified_fact(
     session_db: Any | None,
 ) -> AfterSalesTurn:
     turn = _attach_verified_fact_base(turn, guard=guard, question=question, session_db=session_db)
+    if (turn.route_id != "expert_mode_auto_fallback" or turn.blocks_answer_generation
+            or turn.direct_response):
+        return turn
+
     config = guard.get("open_document_evidence")
-    if (
-        turn.route_id == "expert_mode_auto_fallback" and not turn.blocks_answer_generation
-        and not turn.direct_response and isinstance(config, dict) and config.get("enabled") is True
-    ):
+    extra = ""
+    if isinstance(config, dict) and config.get("enabled") is True:
         from gateway.open_evidence import build_candidate_context
         extra = build_candidate_context(question, config)
-        if extra:
-            turn = replace(turn, context="\n\n".join(filter(None, (turn.context, extra))))
-    return turn
+        turn = replace(turn, catalog_context_status="attached" if extra else "unavailable")
+    return replace(turn, context="\n\n".join(filter(None, (turn.context, _EXPERT_EVIDENCE_GUIDANCE, extra))))
 
 
 def _attach_verified_fact_base(

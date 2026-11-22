@@ -147,6 +147,7 @@ def build_runtime_event(
     question_has_user_text: bool | None = None,
     ivd_engine_entered: bool | None = None,
     retrieval_snapshot: dict[str, object] | None = None,
+    catalog_context_status: str = "off",
     preflight_decision: str = "",
     preflight_action: str = "",
     preflight_issues: Iterable[str] = (),
@@ -206,6 +207,9 @@ def build_runtime_event(
             else bool(preview)
         ),
         "retrieval_outcome": classify_retrieval_outcome(retrieval),
+        "catalog_context_status": (
+            catalog_context_status if catalog_context_status in {"attached", "unavailable"} else "off"
+        ),
         "retrieval_profile": str(retrieval.get("profile") or "inactive")[:64],
         "retrieval_stages": retrieval_stages,
         "retrieval_searches": max(0, int(retrieval.get("searches") or 0)),
