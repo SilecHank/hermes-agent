@@ -114,7 +114,7 @@ def retrieve(question, root, *, limit=5, allowed_hashes=None):
             "-f", f.name, "--embd-separator", SEPARATOR, "--embd-output-format", "json",
             "-t", "2", "--no-warmup", "-ngl", "0", "-c", "4096", "--pooling", "last",
         ]
-        p = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
+        p = subprocess.run(command, capture_output=True, encoding="utf-8", check=True, timeout=10)
     data = json.loads(p.stdout)["data"]
     if len(data) != 1:
         raise ValueError("query embedding count mismatch")
