@@ -1685,6 +1685,26 @@ def _attach_verified_fact(
     question: str,
     session_db: Any | None,
 ) -> AfterSalesTurn:
+    turn = _attach_verified_fact_base(turn, guard=guard, question=question, session_db=session_db)
+    config = guard.get("open_document_evidence")
+    if (
+        turn.route_id == "expert_mode_auto_fallback" and not turn.blocks_answer_generation
+        and not turn.direct_response and isinstance(config, dict) and config.get("enabled") is True
+    ):
+        from gateway.open_evidence import build_candidate_context
+        extra = build_candidate_context(question, config)
+        if extra:
+            turn = replace(turn, context="\n\n".join(filter(None, (turn.context, extra))))
+    return turn
+
+
+def _attach_verified_fact_base(
+    turn: AfterSalesTurn,
+    *,
+    guard: dict[str, Any],
+    question: str,
+    session_db: Any | None,
+) -> AfterSalesTurn:
     turn = _attach_verified_fact_inner(turn, guard=guard, question=question, session_db=session_db)
     if (turn.route_id != 'conditional_scalar' or not turn.blocks_answer_generation
             or 'planner_control_stop' not in turn.preflight_issues
