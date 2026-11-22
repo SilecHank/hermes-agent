@@ -1507,6 +1507,30 @@ def prepare_after_sales_turn(
         platform=normalized_platform,
     )
     fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform, history=history)
+    locator = guard.get("local_document_locator")
+    if (
+        match is None and isinstance(locator, dict) and locator.get("enabled") is True
+        and fast_result.get("route_id") == "clarification"
+        and all(isinstance(locator.get(key), str) and locator[key]
+                for key in ("catalog", "vectors", "originals"))
+    ):
+        from gateway.citable_document_locator import locate_cnas_scope, locate_document_section
+        import sqlite3
+        try:
+            locator_args = (message, locator["catalog"], locator["vectors"], locator["originals"])
+            entries = locator.get("documents")
+            located = (locate_cnas_scope(*locator_args) if entries is None
+                       else locate_document_section(*locator_args, entries))
+        except (OSError, sqlite3.Error, KeyError, TypeError, AttributeError):
+            logger.warning("Local document locator unavailable")
+            located = None
+        if located:
+            return AfterSalesTurn(
+                context="", facts={}, validator=None, allowed_numeric_claims=(),
+                route_id="local_document_location", answer_shape="source_lookup_short_answer",
+                direct_response=located["text"], source_paths=(located["path"],),
+                source_locator=located["location"], task_contract=task or {},
+            )
     if fast_result.get("presentation_contract"):
         experience_context = ""
     fast_context = str(fast_result.get("context") or "")
