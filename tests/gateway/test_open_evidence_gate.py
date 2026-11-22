@@ -79,4 +79,7 @@ def test_expert_turn_records_catalog_context_without_counting_it_as_used():
     assert unavailable.catalog_context_status == "unavailable"
     assert "继续给出能支持的相关内容或专业分析" in unavailable.context
     assert "catalog excerpt" not in unavailable.context
+    assert "同一主题的连续解释合成一段" in unavailable.context
+    assert "操作顺序、并列项目和表格保留各自结构" in attached.context
+    assert "出处紧跟对应结论" in attached.context
     assert not attached.source_paths
