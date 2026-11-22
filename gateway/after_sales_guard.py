@@ -1508,9 +1508,10 @@ def prepare_after_sales_turn(
     )
     fast_result = _render_fast_response_context(guard, message=message, match=match, platform=normalized_platform, history=history)
     locator = guard.get("local_document_locator")
+    locator_route = fast_result.get("route_id")
     if (
         match is None and isinstance(locator, dict) and locator.get("enabled") is True
-        and fast_result.get("route_id") == "clarification"
+        and locator_route in {"clarification", "expert_mode_auto_fallback"}
         and all(isinstance(locator.get(key), str) and locator[key]
                 for key in ("catalog", "vectors", "originals"))
     ):
@@ -1519,8 +1520,12 @@ def prepare_after_sales_turn(
         try:
             locator_args = (message, locator["catalog"], locator["vectors"], locator["originals"])
             entries = locator.get("documents")
-            located = (locate_cnas_scope(*locator_args) if entries is None
-                       else locate_document_section(*locator_args, entries))
+            if entries is None:
+                located = locate_cnas_scope(*locator_args) if locator_route == "clarification" else None
+            else:
+                located = locate_document_section(
+                    *locator_args, entries, clauses_only=locator_route != "clarification",
+                )
         except (OSError, sqlite3.Error, KeyError, TypeError, AttributeError):
             logger.warning("Local document locator unavailable")
             located = None
