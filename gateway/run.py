@@ -2590,6 +2590,7 @@ def _append_ivd_turn_telemetry(
         question_text=question_text,
         ivd_engine_entered=turn is not None,
         retrieval_snapshot=retrieval_snapshot,
+        catalog_context_status=getattr(turn, "catalog_context_status", "off"),
         preflight_decision=turn.preflight_decision if turn is not None else "",
         preflight_action=turn.preflight_action if turn is not None else "",
         preflight_issues=turn.preflight_issues if turn is not None else (),
@@ -23960,6 +23961,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         question_text=_ivd_telemetry_text,
                         question_has_user_text=bool(_ivd_telemetry_text),
                         retrieval_snapshot=_ivd_retrieval_snapshot,
+                        catalog_context_status=getattr(_after_sales_turn, "catalog_context_status", "off"),
                         preflight_decision=(
                             _after_sales_turn.preflight_decision
                             if _after_sales_turn is not None
