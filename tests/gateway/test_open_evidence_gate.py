@@ -39,3 +39,22 @@ def test_open_evidence_disabled_or_without_approval_does_not_search():
         assert build_candidate_context("question", config) == ""
         assert build_candidate_context("question", dict(config, enabled=True)) == ""
         retrieve.assert_not_called()
+
+
+def test_full_catalog_requires_explicit_scope_and_keeps_original_verification():
+    config = {
+        "enabled": True,
+        "root": "/tmp/test",
+        "originals": "/tmp/originals",
+        "allowed_source_sha256": ["0" * 64],
+        "scope": "full_catalog",
+    }
+    candidates = [{"path": "document.pdf"}]
+    with patch("gateway.open_evidence.retrieve", return_value=candidates) as retrieve, patch(
+        "gateway.open_evidence.verify_candidates", return_value=[]
+    ) as verify:
+        assert build_candidate_context("question", config) == ""
+        retrieve.assert_called_once_with("question", "/tmp/test", limit=3, allowed_hashes=None)
+        verify.assert_called_once_with(candidates, "/tmp/originals")
+        assert build_candidate_context("question", dict(config, scope="unknown")) == ""
+        assert retrieve.call_count == 1
