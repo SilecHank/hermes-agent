@@ -54,19 +54,13 @@ class TestWeixinFormatting:
 
         assert adapter.format_message(content) == content
 
-    def test_format_message_wraps_long_plain_lines_for_copying(self):
+    def test_format_message_keeps_full_sentences_and_authored_paragraphs(self):
         adapter = _make_adapter()
+        prose = "常规复核说明" * 28 + " 静置 5 min 后核对 PDF 第8页。"
+        content = prose + "\n\n1. 核对工作表。\n2. 核对文件版本。"
 
-        content = (
-            "Here is a long issue template line with many copyable fields "
-            + " ".join(f"field_{idx}=value_{idx}" for idx in range(24))
-        )
-
-        formatted = adapter.format_message(content)
-
-        assert "\n" in formatted
-        assert all(len(line) <= weixin.WEIXIN_COPY_LINE_WIDTH for line in formatted.splitlines())
-        assert " ".join(formatted.split()) == " ".join(content.split())
+        assert adapter.format_message(content) == content
+        assert adapter._split_text(adapter.format_message(content)) == [content]
 
     def test_format_message_does_not_wrap_long_code_block_lines(self):
         adapter = _make_adapter()
