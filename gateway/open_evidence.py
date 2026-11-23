@@ -13,6 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from gateway.automatic_shortlist import query_terms, shortlist
+from gateway.turn_scaffolding import user_authored_text
 
 SEPARATOR = "\n<|ivd-separate-v1|>\n"
 INSTRUCTION = "Given a question about laboratory procedures, retrieve the source passage that directly answers it."
@@ -74,6 +75,12 @@ def equipment_scope(catalog, question):
 
 
 def retrieve(question, root, *, limit=5, allowed_hashes=None):
+    # Retrieval ranks English identifiers four times higher than Chinese
+    # phrases, so any gateway scaffolding left in the query (sender-identity
+    # note, media placeholder, auto-vision notice) outvotes the user's own
+    # words and pulls back unrelated sources.  Only the authored text is a
+    # question; strip the rest here so every caller gets the same recall.
+    question = user_authored_text(question)
     if not question.strip() or len(question) > 600 or SEPARATOR.strip() in question:
         return []
     root = Path(root)
