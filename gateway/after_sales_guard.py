@@ -68,7 +68,6 @@ class AfterSalesTurn:
     verified_fact_hit: bool = False
     verified_fact_status: str = "off"
     catalog_context_status: str = "off"
-    release_status_requested: bool = False
     direct_response: str = ""
     resolved_answer: ResolvedAnswer | None = None
     direct_evidence_ids: tuple[str, ...] = ()
@@ -1442,6 +1441,36 @@ def _clarification_history(message: str, history: list[dict[str, Any]]) -> list[
             and not any(item.get(key) for key in ("observed", "mirror", "user_id", "sender_id"))]
 
 
+def _enabled_platform_guard(config: dict[str, Any], platform: str) -> dict[str, Any] | None:
+    guard = config.get("after_sales_guard") or {}
+    if not isinstance(guard, dict) or not guard.get("enabled", False):
+        return None
+    normalized_platform = str(platform or "").strip().lower()
+    platforms = guard.get("platforms") or []
+    if isinstance(platforms, str):
+        platforms = [item.strip() for item in platforms.split(",") if item.strip()]
+    enabled_platforms = {
+        str(item or "").strip().lower()
+        for item in platforms
+        if str(item or "").strip()
+    }
+    return guard if normalized_platform in enabled_platforms else None
+
+
+def prepare_operator_question(config: dict[str, Any], platform: str, question: str) -> AfterSalesTurn | None:
+    from gateway.ivd_operator_control import format_operator_question, operator_question_kind
+
+    guard = _enabled_platform_guard(config, platform)
+    kind = operator_question_kind(question) if guard is not None else ""
+    if guard is None or not kind:
+        return None
+    return AfterSalesTurn(
+        context="", facts={}, validator=None, allowed_numeric_claims=(),
+        route_id=f"ivd_{kind}", direct_response=format_operator_question(kind, guard),
+        answer_shape="operator_status",
+    )
+
+
 def prepare_after_sales_turn(
     config: dict[str, Any],
     *,
@@ -1456,21 +1485,14 @@ def prepare_after_sales_turn(
 ) -> AfterSalesTurn | None:
     """Return verified per-turn facts when an enabled workflow card matches."""
 
-    guard = config.get("after_sales_guard") or {}
-    if not isinstance(guard, dict) or not guard.get("enabled", False):
+    if task_contract is None:
+        operator_turn = prepare_operator_question(config, platform, message)
+        if operator_turn is not None:
+            return operator_turn
+    guard = _enabled_platform_guard(config, platform)
+    if guard is None:
         return None
     normalized_platform = str(platform or "").strip().lower()
-    platforms = guard.get("platforms") or []
-    if isinstance(platforms, str):
-        platforms = [item.strip() for item in platforms.split(",") if item.strip()]
-    enabled_platforms = {
-        str(item or "").strip().lower()
-        for item in platforms
-        if str(item or "").strip()
-    }
-    if normalized_platform not in enabled_platforms:
-        return None
-
     guard = {**guard, "_presentation_platform": normalized_platform}
     task = task_contract or resolve_after_sales_task(guard, message, actor_id=actor_id,
                                                     pending_task=pending_task)
@@ -1700,15 +1722,6 @@ _EXPERT_EVIDENCE_GUIDANCE = (
 )
 
 
-_RELEASE_STATUS_QUESTIONS = frozenset({
-    "应该还上线了一个全量向量知识库吧",
-    "全量向量库上线了吗",
-    "全量向量知识库上线了吗",
-    "发布完成，提升了哪个方面",
-    "这次发布提升了什么",
-})
-
-
 def _attach_verified_fact(
     turn: AfterSalesTurn,
     *,
@@ -1720,15 +1733,6 @@ def _attach_verified_fact(
     if (turn.route_id != "expert_mode_auto_fallback" or turn.blocks_answer_generation
             or turn.direct_response):
         return turn
-
-    from gateway.turn_scaffolding import user_authored_text
-
-    authored = user_authored_text(question).strip().rstrip("？?。！!").strip()
-    if authored in _RELEASE_STATUS_QUESTIONS and not (turn.product_scope or turn.product_variant):
-        return replace(turn, release_status_requested=True, context=(turn.context + "\n\n" +
-            "本轮查询售后系统的发布状态或变更。根据当前受控运行状态和对应发布回执回答；"
-            "没有可用记录时说明哪项状态尚未核验。勿搜索实验材料或根据资料片段推定是否上线。"
-        ))
 
     config = guard.get("open_document_evidence")
     extra = ""

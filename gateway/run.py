@@ -3702,6 +3702,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         actor_id: str = "",
         session_key: str = "",
     ) -> tuple[Any, Any]:
+        from gateway.after_sales_guard import prepare_operator_question
+
+        user_text = user_authored_text(message, business_message)
+        operator_turn = prepare_operator_question(config, platform, user_text)
+        if operator_turn is not None:
+            return None, operator_turn
+
         from gateway.ivd_runtime import execute_exclusive_ivd_turn, ivd_engine_mode
 
         from gateway.ivd_shared_workflow import is_non_business_task, resolve_after_sales_task
@@ -3710,7 +3717,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         pending = (getter(session_key, "ivd_pending_task")
                    if callable(getter) and session_key and not business_history_isolated else None)
         guard = config.get("after_sales_guard") or {}
-        user_text = user_authored_text(message, business_message)
         task = resolve_after_sales_task(guard, user_text,
             actor_id=actor_id, pending_task=pending)
         routing_history = []  # Shared task resolution owns all context admission.
@@ -22257,14 +22263,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     combined_ephemeral = (
                         combined_ephemeral + "\n\n" + _after_sales_turn.context
                     ).strip()
-                    if getattr(_after_sales_turn, "release_status_requested", False):
-                        from gateway.ivd_operator_control import read_release_question_evidence
-
-                        release_evidence = read_release_question_evidence()
-                        combined_ephemeral += (
-                            "\n受控发布状态（只按已核验字段回答，部署回执不能推定功能改善）："
-                            + json.dumps(release_evidence, ensure_ascii=False)
-                        )
                     logger.info(
                         "After-sales workflow facts matched: platform=%s workflow=%s stage=%s",
                         platform_key,

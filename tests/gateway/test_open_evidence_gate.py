@@ -121,34 +121,6 @@ def test_expert_turn_records_catalog_context_without_counting_it_as_used():
     assert not attached.source_paths
 
 
-def test_release_status_queries_skip_catalog_without_affecting_product_questions():
-    from gateway.after_sales_guard import AfterSalesTurn, _attach_verified_fact
-
-    turn = AfterSalesTurn(context="existing context", facts={}, validator=None,
-                          allowed_numeric_claims=(), route_id="expert_mode_auto_fallback")
-    guard = {"open_document_evidence": {"enabled": True}}
-    with patch("gateway.after_sales_guard._attach_verified_fact_base", return_value=turn), patch(
-        "gateway.open_evidence.build_candidate_context", return_value="catalog excerpt"
-    ) as catalog:
-        for question in ("应该还上线了一个全量向量知识库吧？", "发布完成，提升了哪个方面"):
-            result = _attach_verified_fact(turn, guard=guard, question=question, session_db=None)
-            assert "对应发布回执" in result.context
-            assert "existing context" in result.context
-        catalog.assert_not_called()
-        for question in ("MGISEQ-2000 设备能上线吗？", "CNV-seq 建库后文库浓度偏低怎么排查",
-                         "这次发布的试剂盒对建库有什么影响？"):
-            result = _attach_verified_fact(turn, guard=guard, question=question, session_db=None)
-            assert result.catalog_context_status == "attached"
-        assert catalog.call_count == 3
-        from dataclasses import replace
-        product_turn = replace(turn, product_scope="MGISEQ-2000")
-        with patch("gateway.after_sales_guard._attach_verified_fact_base", return_value=product_turn):
-            result = _attach_verified_fact(
-                product_turn, guard=guard, question="这次发布提升了什么", session_db=None,
-            )
-        assert result.catalog_context_status == "attached"
-
-
 def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
     import json
     from gateway.ivd_operator_control import read_release_question_evidence
@@ -157,6 +129,11 @@ def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
     receipts = tmp_path / "oob" / "receipts"
     receipts.mkdir(parents=True)
     file = receipts / f"123-{release[:12]}.json"
+    current = tmp_path / "current"
+    current.mkdir()
+    (current / ".staged.json").write_text(json.dumps({
+        "release_id": release, "hermes_agent_commit": "c" * 40, "knowledgehub_commit": "d" * 40,
+    }))
     status = {
         "status": "ready", "current_release": release,
         "gateway": {"runtime_release": release, "process_verified": True},
@@ -166,11 +143,68 @@ def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
         "gateway.ivd_operator_control.read_ivd_operator_status", return_value=status,
     ):
         receipt = {"status": "ready", "reason": "deploy_ready", "release_id": release,
-                   "public_evidence": {"current_release": "b" * 64}}
+                   "public_evidence": {"current_release": "b" * 64},
+                   "change_plan": {"changed_path_count": 5}}
         file.write_text(json.dumps(receipt))
-        assert not read_release_question_evidence()["deployment_receipt_verified"]
+        unbound = read_release_question_evidence()
+        assert not unbound["deployment_receipt_verified"]
+        assert not unbound["change_summary"]
         receipt["public_evidence"]["current_release"] = release
         file.write_text(json.dumps(receipt))
-        assert read_release_question_evidence()["deployment_receipt_verified"]
+        bound = read_release_question_evidence()
+        assert bound["deployment_receipt_verified"]
+        assert "cccccccc" in bound["change_summary"]
+        assert "5 处路径变更" in bound["change_summary"]
         status["gateway"]["process_verified"] = False
         assert read_release_question_evidence() == {"status": "unverified"}
+
+
+def test_operator_questions_are_direct_before_business_lookup():
+    from gateway.after_sales_guard import build_direct_fact_result, prepare_after_sales_turn
+
+    config = {"after_sales_guard": {"enabled": True, "platforms": ["weixin"]}}
+    examples = {
+        "全量向量库现在上线了吗？": "ivd_vector_status",
+        "请问材料库的全量向量检索已经启用了吗？": "ivd_vector_status",
+        "最近一次售后系统发布改了什么？": "ivd_release_changes",
+        "售后系统最新版本有哪些改动？": "ivd_release_changes",
+    }
+    with patch("gateway.ivd_operator_control.read_release_question_evidence", return_value={}), patch(
+        "gateway.after_sales_guard.resolve_after_sales_task", side_effect=RuntimeError("business lookup")
+    ):
+        for question, route in examples.items():
+            turn = prepare_after_sales_turn(config, platform="weixin", message=question, history=[])
+            assert turn.route_id == route
+            result = build_direct_fact_result(turn, question)
+            assert result["api_calls"] == 0
+            assert not result["preflight_blocked"]
+
+
+def test_operator_question_match_leaves_product_launch_and_search_in_business():
+    from gateway.ivd_operator_control import operator_question_kind
+
+    assert not operator_question_kind("MGISEQ-2000 设备能上线吗？")
+    assert not operator_question_kind("全量向量库里有没有已上线试剂盒的说明书？")
+    assert not operator_question_kind("售后系统发布了 NIFTY 试剂盒吗？")
+    assert not operator_question_kind("CNV-seq 建库后文库浓度偏低怎么排查")
+
+
+def test_full_catalog_status_checks_config_and_artifacts(tmp_path):
+    from gateway.ivd_operator_control import format_operator_question
+
+    source = tmp_path / "originals"
+    source.mkdir()
+    index = tmp_path / "2026-11-22"
+    binary = index / "build/bin/llama-embedding"
+    binary.parent.mkdir(parents=True)
+    guard = {"open_document_evidence": {
+        "enabled": True, "scope": "full_catalog", "root": str(index), "originals": str(source),
+    }}
+    with patch("gateway.ivd_operator_control.read_release_question_evidence", return_value={"status": "verified"}):
+        assert "不可用" in format_operator_question("vector_status", guard)
+        for name in ("catalog.sqlite", "vectors.sqlite", "qwen.gguf"):
+            (index / name).touch()
+        binary.touch(mode=0o700)
+        result = format_operator_question("vector_status", guard)
+        assert "2026-11-22" in result
+        assert "未执行检索" in result
