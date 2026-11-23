@@ -147,3 +147,30 @@ def test_release_status_queries_skip_catalog_without_affecting_product_questions
                 product_turn, guard=guard, question="这次发布提升了什么", session_db=None,
             )
         assert result.catalog_context_status == "attached"
+
+
+def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
+    import json
+    from gateway.ivd_operator_control import read_release_question_evidence
+
+    release = "a" * 64
+    receipts = tmp_path / "oob" / "receipts"
+    receipts.mkdir(parents=True)
+    file = receipts / f"123-{release[:12]}.json"
+    status = {
+        "status": "ready", "current_release": release,
+        "gateway": {"runtime_release": release, "process_verified": True},
+        "platform_health": {"status": "healthy"},
+    }
+    with patch("gateway.ivd_operator_control.resolve_ivd_paths", return_value=(tmp_path,)*3), patch(
+        "gateway.ivd_operator_control.read_ivd_operator_status", return_value=status,
+    ):
+        receipt = {"status": "ready", "reason": "deploy_ready", "release_id": release,
+                   "public_evidence": {"current_release": "b" * 64}}
+        file.write_text(json.dumps(receipt))
+        assert not read_release_question_evidence()["deployment_receipt_verified"]
+        receipt["public_evidence"]["current_release"] = release
+        file.write_text(json.dumps(receipt))
+        assert read_release_question_evidence()["deployment_receipt_verified"]
+        status["gateway"]["process_verified"] = False
+        assert read_release_question_evidence() == {"status": "unverified"}

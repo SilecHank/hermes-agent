@@ -22257,6 +22257,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     combined_ephemeral = (
                         combined_ephemeral + "\n\n" + _after_sales_turn.context
                     ).strip()
+                    if getattr(_after_sales_turn, "release_status_requested", False):
+                        from gateway.ivd_operator_control import read_release_question_evidence
+
+                        release_evidence = read_release_question_evidence()
+                        combined_ephemeral += (
+                            "\n受控发布状态（只按已核验字段回答，部署回执不能推定功能改善）："
+                            + json.dumps(release_evidence, ensure_ascii=False)
+                        )
                     logger.info(
                         "After-sales workflow facts matched: platform=%s workflow=%s stage=%s",
                         platform_key,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -93,6 +94,34 @@ def read_ivd_operator_status(
         payload["knowledge_release_digest"] = marker["knowledge_release_digest"]
     payload["cron"] = _cron_status(live, state.parent)
     return payload
+
+
+def read_release_question_evidence() -> dict[str, object]:
+    """Return only bounded operating facts with an exact release binding."""
+    status = read_ivd_operator_status()
+    release = status.get("current_release")
+    gateway = status.get("gateway")
+    if (status.get("status") != "ready" or not isinstance(release, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", release)
+            or not isinstance(gateway, dict) or gateway.get("runtime_release") != release
+            or gateway.get("process_verified") is not True):
+        return {"status": "unverified"}
+    _, state, _ = resolve_ivd_paths()
+    candidates = sorted((state / "oob/receipts").glob(f"*-{release[:12]}.json"), reverse=True)
+    receipt = _safe_json(candidates[0]) if candidates else {}
+    public = receipt.get("public_evidence") if isinstance(receipt, dict) else None
+    matched = (
+        isinstance(receipt, dict) and receipt.get("release_id") == release
+        and receipt.get("status") == "ready" and receipt.get("reason") == "deploy_ready"
+        and isinstance(public, dict) and public.get("current_release") == release
+    )
+    health = status.get("platform_health")
+    return {
+        "status": "verified",
+        "release": release[:12],
+        "channels_healthy": isinstance(health, dict) and health.get("status") == "healthy",
+        "deployment_receipt_verified": matched,
+    }
 
 
 def run_ivd_safe_repair(

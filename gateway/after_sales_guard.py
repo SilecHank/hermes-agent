@@ -68,6 +68,7 @@ class AfterSalesTurn:
     verified_fact_hit: bool = False
     verified_fact_status: str = "off"
     catalog_context_status: str = "off"
+    release_status_requested: bool = False
     direct_response: str = ""
     resolved_answer: ResolvedAnswer | None = None
     direct_evidence_ids: tuple[str, ...] = ()
@@ -1724,7 +1725,7 @@ def _attach_verified_fact(
 
     authored = user_authored_text(question).strip().rstrip("？?。！!").strip()
     if authored in _RELEASE_STATUS_QUESTIONS and not (turn.product_scope or turn.product_variant):
-        return replace(turn, context=(turn.context + "\n\n" +
+        return replace(turn, release_status_requested=True, context=(turn.context + "\n\n" +
             "本轮查询售后系统的发布状态或变更。根据当前受控运行状态和对应发布回执回答；"
             "没有可用记录时说明哪项状态尚未核验。勿搜索实验材料或根据资料片段推定是否上线。"
         ))
