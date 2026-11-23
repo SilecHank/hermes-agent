@@ -142,6 +142,7 @@
     "gateway/stream_dispatch.py",
     "gateway/stream_events.py",
     "gateway/turn_lease.py",
+    "gateway/turn_scaffolding.py",
     "gateway/whatsapp_identity.py",
     "hermes_bootstrap.py",
     "hermes_cli/__init__.py",
