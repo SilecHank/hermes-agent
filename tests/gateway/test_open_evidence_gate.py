@@ -119,3 +119,58 @@ def test_expert_turn_records_catalog_context_without_counting_it_as_used():
     assert "操作顺序、并列项目和表格保留各自结构" in attached.context
     assert "出处紧跟对应结论" in attached.context
     assert not attached.source_paths
+
+
+def test_release_status_queries_skip_catalog_without_affecting_product_questions():
+    from gateway.after_sales_guard import AfterSalesTurn, _attach_verified_fact
+
+    turn = AfterSalesTurn(context="existing context", facts={}, validator=None,
+                          allowed_numeric_claims=(), route_id="expert_mode_auto_fallback")
+    guard = {"open_document_evidence": {"enabled": True}}
+    with patch("gateway.after_sales_guard._attach_verified_fact_base", return_value=turn), patch(
+        "gateway.open_evidence.build_candidate_context", return_value="catalog excerpt"
+    ) as catalog:
+        for question in ("应该还上线了一个全量向量知识库吧？", "发布完成，提升了哪个方面"):
+            result = _attach_verified_fact(turn, guard=guard, question=question, session_db=None)
+            assert "对应发布回执" in result.context
+            assert "existing context" in result.context
+        catalog.assert_not_called()
+        for question in ("MGISEQ-2000 设备能上线吗？", "CNV-seq 建库后文库浓度偏低怎么排查",
+                         "这次发布的试剂盒对建库有什么影响？"):
+            result = _attach_verified_fact(turn, guard=guard, question=question, session_db=None)
+            assert result.catalog_context_status == "attached"
+        assert catalog.call_count == 3
+        from dataclasses import replace
+        product_turn = replace(turn, product_scope="MGISEQ-2000")
+        with patch("gateway.after_sales_guard._attach_verified_fact_base", return_value=product_turn):
+            result = _attach_verified_fact(
+                product_turn, guard=guard, question="这次发布提升了什么", session_db=None,
+            )
+        assert result.catalog_context_status == "attached"
+
+
+def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
+    import json
+    from gateway.ivd_operator_control import read_release_question_evidence
+
+    release = "a" * 64
+    receipts = tmp_path / "oob" / "receipts"
+    receipts.mkdir(parents=True)
+    file = receipts / f"123-{release[:12]}.json"
+    status = {
+        "status": "ready", "current_release": release,
+        "gateway": {"runtime_release": release, "process_verified": True},
+        "platform_health": {"status": "healthy"},
+    }
+    with patch("gateway.ivd_operator_control.resolve_ivd_paths", return_value=(tmp_path,)*3), patch(
+        "gateway.ivd_operator_control.read_ivd_operator_status", return_value=status,
+    ):
+        receipt = {"status": "ready", "reason": "deploy_ready", "release_id": release,
+                   "public_evidence": {"current_release": "b" * 64}}
+        file.write_text(json.dumps(receipt))
+        assert not read_release_question_evidence()["deployment_receipt_verified"]
+        receipt["public_evidence"]["current_release"] = release
+        file.write_text(json.dumps(receipt))
+        assert read_release_question_evidence()["deployment_receipt_verified"]
+        status["gateway"]["process_verified"] = False
+        assert read_release_question_evidence() == {"status": "unverified"}
