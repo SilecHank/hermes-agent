@@ -169,6 +169,30 @@ def format_operator_question(kind: str, guard: dict[str, object]) -> str:
             if summary else f"最近一次已核验发布为 {release}。发布回执暂无具体变更摘要。")
 
 
+def _read_release_changes(state: Path, staged: dict[str, object]) -> list[str]:
+    """Read an operator-authored note bound to this staged release."""
+    notes = state / "oob" / "release-notes"
+    path = notes / f"{staged['release_id']}.json"
+    if notes.is_symlink() or path.is_symlink():
+        return []
+    note = _safe_json(path)
+    if not isinstance(note, dict) or type(note.get("schema_version")) is not int or note["schema_version"] != 1:
+        return []
+    if note.get("release_id") != staged["release_id"]:
+        return []
+    for key in ("hermes_agent_commit", "knowledgehub_commit"):
+        commit = staged.get(key)
+        if not isinstance(commit, str) or not re.fullmatch(r"[a-f0-9]{40}", commit) or note.get(key) != commit:
+            return []
+    changes = note.get("changes")
+    if not isinstance(changes, list) or not 1 <= len(changes) <= 5:
+        return []
+    if not all(isinstance(item, str) and 1 <= len(item) <= 160
+               and item == item.strip() and item.isprintable() for item in changes):
+        return []
+    return changes
+
+
 def read_release_question_evidence() -> dict[str, object]:
     """Return only bounded operating facts with an exact release binding."""
     status = read_ivd_operator_status()
@@ -200,7 +224,11 @@ def read_release_question_evidence() -> dict[str, object]:
         count = plan.get("changed_path_count") if isinstance(plan, dict) else None
         if type(count) is int and count > 0:
             summary_parts.append(f"发布计划记录了 {count} 处路径变更。")
-        summary_parts.append("部署回执未记录具体功能改动。")
+        changes = _read_release_changes(state, current)
+        if changes:
+            summary_parts.append("\n本次功能改动\n" + "\n".join(f"• {change}" for change in changes))
+        else:
+            summary_parts.append("部署回执未记录具体功能改动。")
     health = status.get("platform_health")
     return {
         "status": "verified",

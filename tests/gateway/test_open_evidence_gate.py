@@ -155,6 +155,40 @@ def test_release_question_evidence_binds_receipt_to_active_release(tmp_path):
         assert bound["deployment_receipt_verified"]
         assert "cccccccc" in bound["change_summary"]
         assert "5 处路径变更" in bound["change_summary"]
+        from gateway.after_sales_guard import build_direct_fact_result, prepare_after_sales_turn
+
+        notes = tmp_path / "oob" / "release-notes"
+        notes.mkdir()
+        note_path = notes / f"{release}.json"
+        note = {
+            "schema_version": 1, "release_id": release,
+            "hermes_agent_commit": "c" * 40, "knowledgehub_commit": "d" * 40,
+            "changes": ["发布状态问答直接读取运行证据。", "材料库状态使用独立入口。"],
+        }
+        note_path.write_text(json.dumps(note))
+        config = {"after_sales_guard": {"enabled": True, "platforms": ["weixin"]}}
+        question = "最近一次售后系统发布改了什么？"
+        turn = prepare_after_sales_turn(config, platform="weixin", message=question, history=[])
+        reply = build_direct_fact_result(turn, question)
+        assert reply["api_calls"] == 0 and not reply["preflight_blocked"]
+        assert all(change in reply["final_response"] for change in note["changes"])
+        assert "未记录具体功能改动" not in reply["final_response"]
+        for invalid in (
+            {"release_id": "b" * 64},
+            {"hermes_agent_commit": "f" * 40},
+            {"knowledgehub_commit": "e" * 40},
+            {"changes": ["非法\n多行"]},
+            {"changes": ["过长" * 100]},
+        ):
+            note_path.write_text(json.dumps({**note, **invalid}))
+            evidence = read_release_question_evidence()
+            assert "未记录具体功能改动" in evidence["change_summary"]
+            assert note["changes"][0] not in evidence["change_summary"]
+        note_path.unlink()
+        misplaced = tmp_path / "untrusted.json"
+        misplaced.write_text(json.dumps(note))
+        note_path.symlink_to(misplaced)
+        assert note["changes"][0] not in read_release_question_evidence()["change_summary"]
         status["gateway"]["process_verified"] = False
         assert read_release_question_evidence() == {"status": "unverified"}
 
