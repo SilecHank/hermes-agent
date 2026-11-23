@@ -520,3 +520,23 @@ async def test_gateway_stop_closes_unique_preloaded_contract_once():
 
     assert closes == [1]
     assert not runner._ivd_prepared_contracts
+
+
+def test_operator_status_runs_before_exclusive_business_routing(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("operator status entered business routing")
+
+    monkeypatch.setattr("gateway.ivd_shared_workflow.resolve_after_sales_task", unexpected)
+    monkeypatch.setattr("gateway.ivd_runtime.execute_exclusive_ivd_turn", unexpected)
+    monkeypatch.setattr(
+        "gateway.ivd_operator_control.read_release_question_evidence",
+        lambda: {"status": "verified", "release": "abcdef123456", "deployment_receipt_verified": True},
+    )
+    runner = _runner()
+    prepared, turn = runner._prepare_ivd_lifecycle(
+        {"after_sales_guard": {"enabled": True, "platforms": ["weixin"]}},
+        platform="weixin", message="全量向量库现在上线了吗？", history=[],
+    )
+    assert prepared is None
+    assert turn.route_id == "ivd_vector_status"
+    assert turn.direct_response == "当前全量向量检索未启用。"

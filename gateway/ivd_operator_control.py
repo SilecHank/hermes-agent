@@ -96,6 +96,79 @@ def read_ivd_operator_status(
     return payload
 
 
+_VECTOR_QUESTION = re.compile(
+    r"(?:请问|现在|目前|材料库(?:的)?|售后系统(?:的)?)*"
+    r"全量向量(?:知识库|库|检索)(?:现在|目前|已经|是否|可以)*"
+    r"(?:上线|启用|开启|开放|接入|可用|能用)(?:了吗|了没有|没有|了么|吗|了)?"
+)
+_RELEASE_CHANGES_QUESTION = re.compile(
+    r"(?:请问)?(?:最近(?:一次)?|最新(?:一次)?|这次|本次|刚才)?售后系统(?:的)?"
+    r"(?:最近(?:一次)?|最新(?:一次)?|这次|本次|刚才)?(?:发布|更新|版本)"
+    r"(?:改了什么|更新了什么|有哪些改动|有哪些变化|提升了什么|有什么改进)"
+)
+_RELEASE_STATUS_QUESTION = re.compile(
+    r"(?:请问)?售后系统(?:现在|当前|目前)?"
+    r"(?:运行的是什么版本|运行的是哪个版本|线上版本是什么|当前版本是什么|上线了吗)"
+)
+
+
+def operator_question_kind(question: str) -> str:
+    from gateway.turn_scaffolding import user_authored_text
+
+    authored = user_authored_text(question).strip()
+    if len(authored) > 120:
+        return ""
+    text = re.sub(r"[^\S\n]+", "", authored).rstrip("？?。！!")
+    for pattern, kind in (
+        (_VECTOR_QUESTION, "vector_status"),
+        (_RELEASE_CHANGES_QUESTION, "release_changes"),
+        (_RELEASE_STATUS_QUESTION, "release_status"),
+    ):
+        if pattern.fullmatch(text):
+            return kind
+    return {
+        "应该还上线了一个全量向量知识库吧": "vector_status",
+        "发布完成，提升了哪个方面": "release_changes",
+        "这次发布提升了什么": "release_changes",
+    }.get(text, "")
+
+
+def _vector_status_text(config: object) -> str:
+    if not isinstance(config, dict) or config.get("enabled") is not True:
+        return "当前全量向量检索未启用。"
+    if config.get("scope") != "full_catalog":
+        return "当前向量检索未开放全量范围。"
+    root, originals = config.get("root"), config.get("originals")
+    if not isinstance(root, str) or not isinstance(originals, str):
+        return "已配置全量向量检索，但索引路径配置不完整。"
+    index, source = Path(root), Path(originals)
+    files = ("catalog.sqlite", "vectors.sqlite", "qwen.gguf", "build/bin/llama-embedding")
+    if (not index.is_absolute() or not source.is_absolute() or not source.is_dir()
+            or not all((index / name).is_file() for name in files)
+            or not os.access(index / files[-1], os.X_OK)):
+        return "已配置全量向量检索，但索引、原件目录或检索程序当前不可用。"
+    snapshot = f"索引快照为 {index.name}。" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", index.name) else ""
+    return ("全量向量检索已启用，索引和检索程序均可见。"
+            + snapshot + "专家模式会按需检索材料。本次状态检查未执行检索。")
+
+
+def format_operator_question(kind: str, guard: dict[str, object]) -> str:
+    evidence = read_release_question_evidence()
+    if evidence.get("status") != "verified":
+        return "当前运行状态暂时无法确认，请稍后再查。"
+    if kind == "vector_status":
+        return _vector_status_text(guard.get("open_document_evidence"))
+    release = evidence["release"]
+    if not evidence.get("deployment_receipt_verified"):
+        return f"当前网关运行版本为 {release}，对应部署回执暂未确认。"
+    if kind == "release_status":
+        channel = "渠道状态正常。" if evidence.get("channels_healthy") else "渠道健康状态暂未确认。"
+        return f"当前网关运行版本为 {release}，部署回执已核对。{channel}"
+    summary = evidence.get("change_summary")
+    return (f"最近一次已核验发布为 {release}。" + str(summary)
+            if summary else f"最近一次已核验发布为 {release}。发布回执暂无具体变更摘要。")
+
+
 def read_release_question_evidence() -> dict[str, object]:
     """Return only bounded operating facts with an exact release binding."""
     status = read_ivd_operator_status()
@@ -115,12 +188,26 @@ def read_release_question_evidence() -> dict[str, object]:
         and receipt.get("status") == "ready" and receipt.get("reason") == "deploy_ready"
         and isinstance(public, dict) and public.get("current_release") == release
     )
+    current = _safe_json(state / "current" / ".staged.json")
+    summary_parts = []
+    if matched and isinstance(current, dict) and current.get("release_id") == release:
+        for key, name in (("hermes_agent_commit", "Agent"), ("knowledgehub_commit", "知识库")):
+            commit = current.get(key)
+            if not isinstance(commit, str) or not re.fullmatch(r"[a-f0-9]{40}", commit):
+                continue
+            summary_parts.append(f"{name} 版本为 {commit[:8]}。")
+        plan = receipt.get("change_plan")
+        count = plan.get("changed_path_count") if isinstance(plan, dict) else None
+        if type(count) is int and count > 0:
+            summary_parts.append(f"发布计划记录了 {count} 处路径变更。")
+        summary_parts.append("部署回执未记录具体功能改动。")
     health = status.get("platform_health")
     return {
         "status": "verified",
         "release": release[:12],
         "channels_healthy": isinstance(health, dict) and health.get("status") == "healthy",
         "deployment_receipt_verified": matched,
+        "change_summary": "".join(summary_parts),
     }
 
 
