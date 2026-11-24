@@ -30,6 +30,32 @@ MEASUREMENT_VALUE_RE = re.compile(
 MEASUREMENT_UNIT_RE = re.compile(r"ng\s*/\s*[µuμ]L|%", re.IGNORECASE)
 
 
+_STEP_ORDER = "一二三四五六七八九十"
+_STEP_OPENING = re.compile(r"(?:^|(?<=[。！？；]))[ \t]*(第([" + _STEP_ORDER + r"])步)")
+
+
+def _separate_inline_steps(text: str) -> str:
+    """Put explicit consecutive prose steps on separate paragraphs."""
+    lines = text.splitlines(keepends=True)
+    if any(line.lstrip().startswith(("```", "~~~")) for line in lines):
+        return text
+    for index, line in enumerate(lines):
+        if len(line) < 100 or line.lstrip().startswith(("|", ">", "#")):
+            continue
+        matches = list(_STEP_OPENING.finditer(line))
+        if len(matches) < 2:
+            continue
+        first = _STEP_ORDER.index(matches[0].group(2))
+        if "".join(m.group(2) for m in matches) != _STEP_ORDER[first:first + len(matches)]:
+            continue
+        for match in reversed(matches):
+            if match.start():
+                at = match.start(1)
+                line = line[:at] + "\n\n" + line[at:]
+        lines[index] = line
+    return "".join(lines)
+
+
 @dataclass(frozen=True)
 class AfterSalesTurn:
     context: str
@@ -86,11 +112,13 @@ class AfterSalesTurn:
     expert_validator_path: str = ""
 
     def present_text(self, text: str) -> str:
-        if not self.presentation_module_path or not self.presentation_contract:
-            return text
-        path = Path(self.presentation_module_path)
-        module = _load_module(str(path), path.stat().st_mtime_ns)
-        return module.prepare_user_text(text, self.presentation_contract)
+        if self.presentation_module_path and self.presentation_contract:
+            path = Path(self.presentation_module_path)
+            module = _load_module(str(path), path.stat().st_mtime_ns)
+            text = module.prepare_user_text(text, self.presentation_contract)
+        if self.route_id == "expert_mode_auto_fallback" and not self.direct_response:
+            text = _separate_inline_steps(text)
+        return text
 
 
     def __post_init__(self) -> None:
@@ -1715,9 +1743,10 @@ _EXPERT_EVIDENCE_GUIDANCE = (
     "排查未知机型时，先给记录现场、识别故障阶段、查状态和按权限导出日志等通用步骤。"
     "涉及供电改接、绕过 UPS、检查或更换保险丝、拆机或重启的操作，"
     "须先确认机型、手册和现场权限。"
-    "\n长回复先给结论，同一主题的连续解释合成一段。"
+    "\n长回复先给结论，同一要点的连续解释合成一段。"
     "避免逐句换段、连续堆叠小标题或结尾重复总结。"
     "操作顺序、并列项目和表格保留各自结构，不为减少段落而删减必要信息。"
+    "当正文有多步处置或排查时，每一步独立成段，适用条件、例外和出处紧跟该步。"
     "出处紧跟对应结论，并保留文件名、版本及页码或工作表位置。"
 )
 
