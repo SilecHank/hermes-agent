@@ -34,13 +34,52 @@ _STEP_ORDER = "一二三四五六七八九十"
 _STEP_OPENING = re.compile(r"(?:^|(?<=[。！？；]))[ \t]*(第([" + _STEP_ORDER + r"])步)")
 
 
-def _separate_inline_steps(text: str) -> str:
-    """Put explicit consecutive prose steps on separate paragraphs."""
+_ITEM_COUNT = {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
+_COMPARISON_OPENING = re.compile(
+    r"^(?:这|有|主要有)?([二两三四五])(?:种|类|项|点)[\u4e00-\u9fff]{0,12}?"
+    r"(?:分别是|分别为|包括|如下)[：:]"
+)
+_COMPARISON_BRACKETS = dict(zip("（([【《「『“‘", "）)]】》」』”’"))
+
+
+def _number_inline_comparison(line: str) -> str:
+    """Restore a list when the paragraph explicitly labels and separates its items."""
+    opening = _COMPARISON_OPENING.match(line)
+    if opening is None:
+        return line
+    body = line[opening.end():].rstrip("\r\n")
+    endings = []
+    starts = [0]
+    for position, char in enumerate(body):
+        if char in _COMPARISON_BRACKETS:
+            endings.append(_COMPARISON_BRACKETS[char])
+        elif char in _COMPARISON_BRACKETS.values():
+            if not endings or endings.pop() != char:
+                return line
+        elif char in "；;" and not endings:
+            starts.append(position + 1)
+    if endings or len(starts) != _ITEM_COUNT[opening.group(1)]:
+        return line
+    items = [body[start:end].strip() for start, end in zip(starts, starts[1:] + [len(body)])]
+    if not all(items):
+        return line
+    numbered = "\n\n".join(f"{index}. {item}" for index, item in enumerate(items, 1))
+    return line[:opening.end()] + "\n\n" + numbered + line[opening.end() + len(body):]
+
+
+def _format_expert_prose(text: str) -> str:
+    """Restore explicit list and step structure in expert prose."""
     lines = text.splitlines(keepends=True)
     if any(line.lstrip().startswith(("```", "~~~")) for line in lines):
         return text
     for index, line in enumerate(lines):
-        if len(line) < 100 or line.lstrip().startswith(("|", ">", "#")):
+        if line.lstrip().startswith(("|", ">", "#")):
+            continue
+        comparison = _number_inline_comparison(line)
+        if comparison != line:
+            lines[index] = comparison
+            continue
+        if len(line) < 100:
             continue
         matches = list(_STEP_OPENING.finditer(line))
         if len(matches) < 2:
@@ -117,7 +156,7 @@ class AfterSalesTurn:
             module = _load_module(str(path), path.stat().st_mtime_ns)
             text = module.prepare_user_text(text, self.presentation_contract)
         if self.route_id == "expert_mode_auto_fallback" and not self.direct_response:
-            text = _separate_inline_steps(text)
+            text = _format_expert_prose(text)
         return text
 
 
@@ -1746,7 +1785,7 @@ _EXPERT_EVIDENCE_GUIDANCE = (
     "\n长回复先给结论，同一要点的连续解释合成一段。"
     "避免逐句换段、连续堆叠小标题或结尾重复总结。"
     "操作顺序、并列项目和表格保留各自结构，不为减少段落而删减必要信息。"
-    "当正文有多步处置或排查时，每一步独立成段，适用条件、例外和出处紧跟该步。"
+    "不同成因、方案或鉴别点逐项编号，每项紧跟其依据。多步处置或排查每一步独立成段，适用条件、例外和出处紧跟该步。"
     "出处紧跟对应结论，并保留文件名、版本及页码或工作表位置。"
 )
 

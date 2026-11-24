@@ -260,3 +260,20 @@ def test_expert_presentation_separates_explicit_steps_in_long_prose():
     assert turn.present_text(shown) == shown
     assert turn.present_text("参考第一步的记录，再对照第二步。") == "参考第一步的记录，再对照第二步。"
     assert turn.present_text("```\n" + body + "\n```") == "```\n" + body + "\n```"
+
+
+def test_expert_presentation_numbers_explicit_comparisons_in_prose():
+    from gateway.after_sales_guard import AfterSalesTurn
+
+    turn = AfterSalesTurn(context="", facts={}, validator=None,
+                          allowed_numeric_claims=(), route_id="expert_mode_auto_fallback")
+    text = "这三种成因分别是：情况甲（同组；先保留原记录）；情况乙（手册第11页）；情况丙（手册第12页）。"
+    rendered = turn.present_text(text)
+    assert rendered == (
+        "这三种成因分别是：\n\n1. 情况甲（同组；先保留原记录）；"
+        "\n\n2. 情况乙（手册第11页）；\n\n3. 情况丙（手册第12页）。"
+    )
+    assert turn.present_text(rendered) == rendered
+    assert turn.present_text(text.replace("三种", "四种")) == text.replace("三种", "四种")
+    table = "| 可能 | 依据 |\n|---|---|\n| " + text + " |"
+    assert turn.present_text(table) == table
