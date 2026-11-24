@@ -115,7 +115,7 @@ def test_expert_turn_records_catalog_context_without_counting_it_as_used():
     assert unavailable.catalog_context_status == "unavailable"
     assert "继续给出能支持的相关内容或专业分析" in unavailable.context
     assert "catalog excerpt" not in unavailable.context
-    assert "同一主题的连续解释合成一段" in unavailable.context
+    assert "同一要点的连续解释合成一段" in unavailable.context
     assert "操作顺序、并列项目和表格保留各自结构" in attached.context
     assert "出处紧跟对应结论" in attached.context
     assert not attached.source_paths
@@ -242,3 +242,21 @@ def test_full_catalog_status_checks_config_and_artifacts(tmp_path):
         result = format_operator_question("vector_status", guard)
         assert "2026-11-22" in result
         assert "未执行检索" in result
+
+
+def test_expert_presentation_separates_explicit_steps_in_long_prose():
+    from gateway.after_sales_guard import AfterSalesTurn
+
+    turn = AfterSalesTurn(context="", facts={}, validator=None,
+                          allowed_numeric_claims=(), route_id="expert_mode_auto_fallback")
+    intro = "1. 分类甲\n\n2. 分类乙\n\n3. 分类丙\n\n"
+    body = ("处置分三步。第一步核对记录：" + "核对原始记录和交接记录。" * 5
+            + "第二步查看状态：记录实际状态（原手册第16页）。"
+            + "第三步确认后续处理：保留原文出处。")
+    shown = turn.present_text(intro + body)
+    assert shown.startswith(intro)
+    assert all("\n\n"+marker in shown for marker in ("第一步", "第二步", "第三步"))
+    assert shown.replace("\n", "") == (intro + body).replace("\n", "")
+    assert turn.present_text(shown) == shown
+    assert turn.present_text("参考第一步的记录，再对照第二步。") == "参考第一步的记录，再对照第二步。"
+    assert turn.present_text("```\n" + body + "\n```") == "```\n" + body + "\n```"
